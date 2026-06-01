@@ -3,10 +3,21 @@
 > **一句话定位**: 一个**可嵌入可外挂、自成长、引擎可换**的 agent 程序性知识层系统。  
 > 它不做编排(对 LangGraph / Claude Code / 裸 API 中立), 只解一件事——**在有限 context 预算内, 组装最相关、最精确的知识, 并让这套知识随使用自我进化。**
 
+## 接入 Agent（一行安装）
+
+```bash
+npx skills add vima-tech/Innate
+```
+
+安装后 Claude Code 等支持 [Agent Skills 开放标准](https://agentskills.io/specification)的 Agent 会自动获得 `innate-memory` skill——知道何时召回、何时记录、何时成长，无需手动配置。
+
+> 前提：本机已安装 `innate` CLI（见下方快速开始）。
+
 ## 快速开始
 
 ```bash
-pip install -e .
+# 安装 CLI
+pip install innate
 
 # 1. 写入知识
 innate add "Python 列表推导式比 map/filter 更易读" --kind note --trigger "python 列表处理"
@@ -59,7 +70,9 @@ Innate System
 │   └── Storage           sqlite-vec 默认; 5 个可替换扩展点
 ├── CLI Adapter           Core SDK 的命令行薄封装, 1:1 映射
 ├── Hook Integration      外部系统事件触发 CLI
-└── Runtime (Daemon)      外部独立进程; 监听日志/事件
+├── Runtime (Daemon)      外部独立进程; 监听日志/事件
+└── skills/               Agent Skills 标准接入层
+    └── innate-memory/    npx skills add vima-tech/Innate
 ```
 
 ## 核心特性
@@ -70,6 +83,7 @@ Innate System
 - **安全可注入**: sanitize 钩子覆盖所有写入路径, 默认零重依赖
 - **灵感系统**: spark 记录灵感, 独立 maturity 生命周期, 相关语境下自动唤起
 - **闭环完整**: 召回 → 观测 → 成长 → 治理 → 安全, 五个闭环不缺
+- **一行接入**: `npx skills add vima-tech/Innate` 即可让 Agent 具备完整知识层行为
 
 ## 设计文档
 

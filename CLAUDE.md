@@ -88,6 +88,16 @@ Five pluggable objects injected at `KnowledgeBase(...)`:
 
 All tuning knobs live in the `meta` table (keys prefixed `recall.*` and `curate.*`). They are loaded once at `KnowledgeBase.__init__` into instance attributes; changing them requires a new instance. `innate inspect` prints current values.
 
+## Skill File (`skills/innate-memory/SKILL.md`)
+
+Follows the [Agent Skills open standard](https://agentskills.io/specification). Enables `npx skills add vima-tech/Innate` to install the skill into Claude Code and other compatible agents.
+
+**Rules when editing:**
+- `name:` in frontmatter must exactly match the directory name (`innate-memory`)
+- `description:` is the activation signal the agent uses — keep it precise about WHEN to activate (read vs. write triggers)
+- Body is plain markdown agent instructions; no code execution, no SDK calls — CLI only
+- If adding a second skill, create `skills/<new-name>/SKILL.md`; never put two skills in one file
+
 ## Test Layout
 
 | File | What it covers |
