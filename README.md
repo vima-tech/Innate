@@ -11,7 +11,7 @@ npx skills add vima-tech/Innate
 
 安装后 Claude Code 等支持 [Agent Skills 开放标准](https://agentskills.io/specification)的 Agent 会自动获得 `innate-memory` skill——知道何时召回、何时记录、何时成长，无需手动配置。
 
-> 前提：本机已安装 `innate` CLI（见下方快速开始）。
+> 前提：本机已安装 `innate` CLI（`pip install innate-ai`）。
 
 ### 让 Agent 帮你完成安装（完整提示词）
 
@@ -22,7 +22,7 @@ npx skills add vima-tech/Innate
 > 请帮我安装并初始化 Innate 知识层，步骤如下：
 >
 > ```bash
-> pip install innate          # 安装 CLI
+> pip install innate-ai       # 安装 CLI
 > npx skills add vima-tech/Innate   # 安装 Agent Skill
 > innate inspect              # 验证，应输出空库健康报告
 > ```
@@ -50,7 +50,7 @@ npx skills add vima-tech/Innate
 
 ```bash
 # 安装 CLI
-pip install innate
+pip install innate-ai
 
 # 1. 写入知识
 innate add "Python 列表推导式比 map/filter 更易读" --kind note --trigger "python 列表处理"

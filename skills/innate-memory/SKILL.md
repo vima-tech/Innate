@@ -9,13 +9,13 @@ license: MIT
 metadata:
   author: vima-tech
   version: "4.5.1"
-compatibility: Requires `innate` CLI installed (`pip install innate`). Uses a local SQLite knowledge base.
+compatibility: Requires `innate` CLI installed (`pip install innate-ai`). Uses a local SQLite knowledge base.
 ---
 
 ## Prerequisites
 
 ```bash
-pip install innate
+pip install innate-ai
 # First run creates ~/.innate/personal.db automatically
 ```
 
