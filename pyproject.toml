@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "innate"
+version = "0.1.0"
+description = "自成长 Agent 程序性知识层"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "sqlite-vec>=0.1.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+innate = "innate.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["innate*"]
