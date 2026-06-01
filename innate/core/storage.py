@@ -15,7 +15,7 @@ from .utils import utc_now_iso
 
 # 期望的 schema 版本(必须与 migrations/ 链末端一致)
 EXPECTED_SCHEMA_VERSION = "4.5.1"
-MIGRATIONS_DIR = Path(__file__).parents[2] / "migrations"
+MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 
 def _ver_tuple(v: str) -> Tuple[int, ...]:
@@ -29,8 +29,15 @@ def _ver_tuple(v: str) -> Tuple[int, ...]:
 class Storage:
     """默认 sqlite-vec 存储后端."""
 
-    def __init__(self, db_path: str | Path):
+    def __init__(
+        self,
+        db_path: str | Path,
+        content_dim: int = 1024,
+        trigger_dim: int = 256,
+    ):
         self.db_path = Path(db_path)
+        self.content_dim = content_dim
+        self.trigger_dim = trigger_dim
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
         self._connect()
@@ -72,6 +79,8 @@ class Storage:
             if not schema_file.exists():
                 raise RuntimeError("schema.sql not found")
             sql = schema_file.read_text(encoding="utf-8")
+            sql = sql.replace("embedding float[1024]", f"embedding float[{self.content_dim}]")
+            sql = sql.replace("embedding float[256]", f"embedding float[{self.trigger_dim}]")
             self._conn.executescript(sql)  # type: ignore[union-attr]
             self._conn.commit()  # type: ignore[union-attr]
             return
@@ -83,14 +92,10 @@ class Storage:
         current = row["value"] if row else None
 
         if current is None:
-            # 极老库没有 schema_version 标记,标为 4.5.1 假设已对齐
-            # (这是向上兼容的安全假设;若实际未对齐,后续访问会失败)
-            self._conn.execute(  # type: ignore[union-attr]
-                "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
-                (EXPECTED_SCHEMA_VERSION,),
+            raise RuntimeError(
+                "Database has a meta table but no schema_version; "
+                "cannot safely infer a migration path"
             )
-            self._conn.commit()  # type: ignore[union-attr]
-            return
 
         cur_t = _ver_tuple(current)
         exp_t = _ver_tuple(EXPECTED_SCHEMA_VERSION)
@@ -129,19 +134,25 @@ class Storage:
 
         cur_t = _ver_tuple(current)
         tgt_t = _ver_tuple(target)
-        applied = 0
-        for f_v, t_v, f in migrations:
-            if f_v >= cur_t and t_v <= tgt_t and f_v < t_v:
-                sql = f.read_text(encoding="utf-8")
-                # migrations 自身不带事务包裹;executescript 隐式管理
-                self._conn.executescript(sql)  # type: ignore[union-attr]
-                applied += 1
+        by_source = {f_v: (t_v, f) for f_v, t_v, f in migrations}
+        while cur_t < tgt_t:
+            step = by_source.get(cur_t)
+            if step is None:
+                raise RuntimeError(
+                    f"Missing migration script for {'.'.join(map(str, cur_t))} -> {target}"
+                )
+            t_v, f = step
+            if t_v > tgt_t:
+                raise RuntimeError(f"Migration {f.name} overshoots target {target}")
+            sql = f.read_text(encoding="utf-8")
+            # migrations 自身不带事务包裹;executescript 隐式管理
+            self._conn.executescript(sql)  # type: ignore[union-attr]
+            cur_t = t_v
         self._conn.commit()  # type: ignore[union-attr]
-        if applied == 0:
-            warnings.warn(
-                f"No migration scripts found for {current} -> {target}; "
-                f"DB may be inconsistent.",
-                stacklevel=2,
+        final = self.get_meta("schema_version")
+        if _ver_tuple(final or "0") != tgt_t:
+            raise RuntimeError(
+                f"Migration chain ended at schema_version={final}, expected {target}"
             )
 
     @property
@@ -473,7 +484,13 @@ class Storage:
 
     def purge_usage_trace(self, cutoff_ts: str) -> int:
         cur = self.conn.execute(
-            "DELETE FROM usage_trace WHERE ts <= ?", (cutoff_ts,)
+            """DELETE FROM usage_trace
+               WHERE ts <= ?
+                 AND NOT (
+                   event='retrieved'
+                   AND chunk_id IN (SELECT id FROM chunks WHERE origin='spark')
+                 )""",
+            (cutoff_ts,),
         )
         return cur.rowcount
 

@@ -25,3 +25,6 @@ innate = "innate.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["innate*"]
+
+[tool.setuptools.package-data]
+innate = ["migrations/*.sql"]
