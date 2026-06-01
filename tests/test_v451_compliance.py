@@ -232,7 +232,7 @@ def test_thumbs_down_does_not_update_last_used_at(kb):
     """thumbs_down 不算"正反馈", 不应触发 last_used_at 更新(若 used 列表为空)."""
     cid = kb.add("test", kind="note")
     r = kb.recall("test", budget=1000)
-    # used=[] 时, 不管 up/down 都不更新 last_used_at (设计: "无 used → 只记日志")
+    # used=[] 时, 不管 up/down 都不更新 last_used_at (设计:无 used 则忽略强更新)
     kb.record(r.trace_id, outcome="ok", used=[], feedback="down")
     after = kb.storage.get_chunk(cid)
     assert after["last_used_at"] is None
@@ -399,7 +399,7 @@ def test_recency_w_only_for_explicit_signals(kb):
 
 
 def test_no_used_thumbs_up_no_strong_update(kb):
-    """§二·五B 'thumbs_up: 若本次无 used → 只记日志, 不更新任何块 confidence' (强更新).
+    """§二·五B 'thumbs_up: 若本次无 used → 忽略强更新, 不更新任何块 confidence'.
 
     注: '不强更新' 不等于 '完全不更新'. selected_unused 隐式信号(target=0.3, strength=0.1)
     仍按 outcome='ok' 触发极弱更新. 这里的 '不更新' 特指 thumbs_up 的强更新(不用 fallback 奖励).

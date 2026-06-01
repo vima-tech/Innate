@@ -419,3 +419,197 @@ def test_daemon_matches_numbered_pass_line(tmp_path, monkeypatch):
     conn.close()
     assert event_type == "ok"
     assert len(calls) == 1
+
+
+def test_daemon_hook_json_preserves_event_and_trace_ids(tmp_path, monkeypatch):
+    """Hook JSON 应保留上游关联键并映射完整 record 参数."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    srv = DaemonServer(
+        db_path=str(tmp_path / "knowledge.db"),
+        watch_dirs=[],
+        state_db=str(tmp_path / "state.db"),
+        log_file=str(tmp_path / "daemon.log"),
+    )
+    srv._init_state_db()
+    srv.logger = srv._setup_logging()
+    conn = sqlite3.connect(srv.state_db)
+    payload = {
+        "event_id": "event-1",
+        "event_type": "tool_success",
+        "trace_id": "trace-upstream",
+        "query": "task",
+        "output_summary": "summary",
+        "outcome": "ok",
+        "used": ["c1", "c2"],
+        "nomination": "worth distilling",
+        "priority": 7,
+    }
+    line = json.dumps(payload)
+    srv._handle_line(line, "watch", "a.log", "inode", 0, conn)
+    srv._handle_line(line, "watch", "a.log", "inode", 0, conn)
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT event_id, trace_id, event_type FROM processed_events"
+    ).fetchone()
+    conn.close()
+    assert row == ("event-1", "trace-upstream", "tool_success")
+    assert len(calls) == 1
+    assert calls[0] == [
+        "innate", "--db", str(tmp_path / "knowledge.db"), "record", "trace-upstream",
+        "--outcome", "ok", "--query", "task", "--output-summary", "summary",
+        "--used", "c1,c2", "--nomination", "worth distilling", "--priority", "7",
+        "--source", "daemon",
+    ]
+
+
+def test_daemon_session_start_context_is_reused_by_log_outcome(tmp_path, monkeypatch):
+    """Session Start recall 产生的 trace 应贯穿后续旁路日志."""
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "recall" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, "<!-- innate_trace_id: trace-session -->", ""
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    srv = DaemonServer(
+        db_path=str(tmp_path / "knowledge.db"),
+        watch_dirs=[],
+        state_db=str(tmp_path / "state.db"),
+        log_file=str(tmp_path / "daemon.log"),
+    )
+    srv._init_state_db()
+    srv.logger = srv._setup_logging()
+    conn = sqlite3.connect(srv.state_db)
+    srv._handle_line(
+        json.dumps({
+            "event_id": "start",
+            "event_type": "session_start",
+            "trace_id": "trace-upstream-before-recall",
+            "query": "project",
+        }),
+        "watch", "a.log", "inode", 0, conn,
+    )
+    srv._handle_line("Tests passed", "watch", "a.log", "inode", 100, conn)
+    conn.commit()
+    conn.close()
+
+    assert calls[0][-4:] == ["recall", "project", "--format", "prompt"]
+    assert calls[1][3:6] == ["record", "trace-session", "--outcome"]
+
+
+def test_daemon_session_end_triggers_evolve(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    srv = DaemonServer(
+        db_path=str(tmp_path / "knowledge.db"),
+        watch_dirs=[],
+        state_db=str(tmp_path / "state.db"),
+        log_file=str(tmp_path / "daemon.log"),
+    )
+    srv._init_state_db()
+    srv.logger = srv._setup_logging()
+    conn = sqlite3.connect(srv.state_db)
+    srv._set_active_trace(conn, "watch", "trace-old")
+    srv._handle_line(
+        json.dumps({"event_id": "end", "event_type": "session_end"}),
+        "watch", "a.log", "inode", 0, conn,
+    )
+    assert srv._get_active_trace(conn, "watch") is None
+    conn.commit()
+    conn.close()
+    assert calls == [[
+        "innate", "--db", str(tmp_path / "knowledge.db"),
+        "evolve", "--trigger", "manual",
+    ]]
+
+
+def test_daemon_repeated_exception_class_triggers_failure(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    srv = DaemonServer(
+        db_path=str(tmp_path / "knowledge.db"),
+        watch_dirs=[],
+        state_db=str(tmp_path / "state.db"),
+        log_file=str(tmp_path / "daemon.log"),
+    )
+    srv._init_state_db()
+    srv.logger = srv._setup_logging()
+    conn = sqlite3.connect(srv.state_db)
+    for offset in range(3):
+        srv._handle_line("ValueError raised", "watch", "a.log", "inode", offset, conn)
+    conn.commit()
+    conn.close()
+    assert len(calls) == 1
+    assert "fail" in calls[0]
+
+
+def test_daemon_exception_streak_is_reset_by_unrelated_line(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    srv = DaemonServer(
+        db_path=str(tmp_path / "knowledge.db"),
+        watch_dirs=[],
+        state_db=str(tmp_path / "state.db"),
+        log_file=str(tmp_path / "daemon.log"),
+    )
+    srv._init_state_db()
+    srv.logger = srv._setup_logging()
+    conn = sqlite3.connect(srv.state_db)
+    srv._handle_line("ValueError raised", "watch", "a.log", "inode", 0, conn)
+    srv._handle_line("ordinary log line", "watch", "a.log", "inode", 1, conn)
+    srv._handle_line("ValueError raised", "watch", "a.log", "inode", 2, conn)
+    srv._handle_line("ValueError raised", "watch", "a.log", "inode", 3, conn)
+    conn.commit()
+    conn.close()
+    assert calls == []
+
+
+def test_daemon_status_lists_watched_log_files(tmp_path):
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    srv = DaemonServer(
+        db_path=str(tmp_path / "knowledge.db"),
+        watch_dirs=[],
+        state_db=str(tmp_path / "state.db"),
+        log_file=str(tmp_path / "daemon.log"),
+    )
+    srv._init_state_db()
+    conn = sqlite3.connect(srv.state_db)
+    conn.execute(
+        """INSERT INTO watch_state(
+               watch_path, last_processed_offset, last_processed_inode, updated_at
+           ) VALUES (?, 0, 'inode', ?)""",
+        ("/tmp/example.log", utc_now_iso()),
+    )
+    conn.commit()
+    conn.close()
+
+    status = DaemonServer.status(str(pid_file), state_db=str(srv.state_db))
+
+    assert "files=/tmp/example.log" in status

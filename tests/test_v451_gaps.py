@@ -192,7 +192,7 @@ def test_migration_runner_newer_warns():
 
 
 # =====================================================================
-# CTE 深度上限 → 丢弃 seed
+# hard 闭包深度上限 → 丢弃 seed
 # =====================================================================
 
 def test_cte_depth_limit_drops_seed(kb):
@@ -383,7 +383,6 @@ def test_knowledge_debt_ratio_with_zombie(kb):
         })
     kb.storage.conn.commit()
     info = kb.inspect()
-    # 只有老僵尸计入,新鲜僵尸不计入
     assert info["chunks"]["zombie"] == 1
     # valid=3 (active), pending=0, zombie=1 → debt = 1/3 ≈ 0.33
     assert 0.3 <= info["knowledge_debt_ratio"] <= 0.4
@@ -448,7 +447,7 @@ def test_daemon_log_uses_rotating_handler():
 # =====================================================================
 
 def test_soft_dep_bonus_applied(kb):
-    """soft dep 应为对应 seed 加分(5%)."""
+    """soft dep 应把目标作为普通候选加分."""
     a = kb.add("a", kind="note")
     b = kb.add("b", kind="note")
     kb.storage.insert_dep(a, b, kind="soft")
@@ -457,10 +456,8 @@ def test_soft_dep_bonus_applied(kb):
     info = {a: {"chunk": chunks[a], "sim_content": 0.5, "sim_trigger": 0.5},
             b: {"chunk": chunks[b], "sim_content": 0.0, "sim_trigger": 0.0}}
     kb._apply_soft_dep_bonus(info)
-    # a 有 soft dep, sim_content 应被加成
-    assert info[a]["sim_content"] == pytest.approx(0.5 * 1.05)
-    # b 没有 soft dep, 不变
-    assert info[b]["sim_content"] == 0.0
+    assert info[a]["sim_content"] == 0.5
+    assert info[b]["sim_content"] == pytest.approx(0.05)
 
 
 # =====================================================================

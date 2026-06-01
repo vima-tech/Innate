@@ -10,6 +10,7 @@ from .exceptions import (
 )
 from .kb import CurateReport, CurateScope, Curator, KnowledgeBase, RecallResult
 from .refine import Distiller, HeuristicDistiller, NullRefiner, Refiner
+from .storage import VectorStore
 
 __all__ = [
     "KnowledgeBase",
@@ -23,6 +24,7 @@ __all__ = [
     "NullRefiner",
     "Distiller",
     "HeuristicDistiller",
+    "VectorStore",
     "InnateError",
     "EmbeddingUnavailable",
     "OutcomeConflictError",

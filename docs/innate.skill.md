@@ -30,7 +30,7 @@ description: >
 innate recall "<任务核心意图>" --top 5 --format json
 # 从 JSON 输出取 trace_id, 召回结果注入 context
 
-# 若 Agent 框架支持 prompt 注入且无需 trace 交接:
+# 若 Agent 框架支持 prompt 注入:
 innate recall "<任务核心意图>" --top 5 --format prompt
 # prompt 格式末尾有 <!-- innate_trace_id: xxx --> 可解析 trace_id
 ```
@@ -59,7 +59,9 @@ innate add "<经验>" --kind note --source agent
 
 ## 🚫 安全围栏
 
-- 禁止执行 `innate invalidate` / `archive` (人工治理专属, Agent 无裁定权)
+- 禁止自行执行 `innate approve` / `archive` / `invalidate` / `restore` /
+  `mature-spark` / `promote-spark` / `drop-spark`
+  (人工治理专属; 仅在人明确要求该动作时执行)
 - `innate add --source agent` 只写 pending, 不得绕过审核
 - CLI 返回 `exit_code != 0`: 读 stderr 修正一次, 仍失败则放弃, **绝不阻塞主任务**
 - 禁止在未经测试验证的情况下将 Agent 总结的经验标记为高置信度

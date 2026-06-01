@@ -34,7 +34,7 @@ npx skills add vima-tech/Innate
 > |---|---|
 > | Agent 可直接执行 | `innate recall` · `innate record` · `innate evolve` · `innate inspect` |
 > | 确认后执行 | `innate add ... --source agent` · `innate spark` |
-> | 仅人工治理 | `innate approve` · `innate archive` · `innate invalidate` · `innate restore` · `innate promote-spark` · `innate drop-spark` |
+> | 仅人工治理 | `innate approve` · `innate archive` · `innate invalidate` · `innate restore` · `innate mature-spark` · `innate promote-spark` · `innate drop-spark` |
 >
 > **工作规范**
 > - 每次任务开始前执行 `innate recall "<任务意图>" --format json`，将结果纳入计划
@@ -103,9 +103,9 @@ print(kb.inspect())
 ```
 Innate System
 ├── Core SDK              知识层逻辑(recall/record/evolve/curate/confidence)
-│   ├── Public API        8 个核心方法
+│   ├── Public API        8 类核心能力域
 │   └── Storage           sqlite-vec 默认; 5 个可替换扩展点
-├── CLI Adapter           Core SDK 的命令行薄封装, 1:1 映射
+├── CLI Adapter           Core SDK 的命令行薄封装
 ├── Hook Integration      外部系统事件触发 CLI
 ├── Runtime (Daemon)      外部独立进程; 监听日志/事件
 └── skills/               Agent Skills 标准接入层

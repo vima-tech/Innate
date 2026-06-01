@@ -1,7 +1,11 @@
 -- migrations/4.2_to_4.3.sql
 
 -- 1. episodic_log.trace_id 改唯一索引
-UPDATE episodic_log SET distill_state='discarded', distill_note='migration_dedup'
+--    重复行保留用于审计,但改写关联键后缀以满足唯一约束.
+UPDATE episodic_log
+SET trace_id=trace_id || ':migration_dedup:' || id,
+    distill_state='discarded',
+    distill_note='migration_dedup'
 WHERE id NOT IN (
   SELECT MIN(id) FROM episodic_log GROUP BY trace_id
 );

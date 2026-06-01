@@ -1,12 +1,13 @@
-"""Core SDK — KnowledgeBase: 8 个 Public API 的完整实现."""
+"""Core SDK — KnowledgeBase: 8 类 Public API 能力域的完整实现."""
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
-import math
-import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Tuple
 
 from .embedding import DummyEmbeddingProvider, EmbeddingProvider
 from .exceptions import ChunkNotFoundError, InvalidStateError, OutcomeConflictError
@@ -53,6 +54,7 @@ class RecallResult:
     trace_id: str = ""
     empty: bool = True
     depth_skipped: List[str] = field(default_factory=list)
+    skipped_reasons: Dict[str, str] = field(default_factory=dict)
     _trace: Dict[str, Any] = field(default_factory=dict, repr=False)
 
 
@@ -84,6 +86,10 @@ class KnowledgeBase:
         "curate.promote_used_success_min": 3,
         "curate.promote_confidence_min": 0.65,
     }
+    EVENT_SOURCES = ("sdk", "cli", "hook", "daemon", "augmented")
+    EVOLVE_TRIGGERS = ("manual", "scheduled", "threshold")
+    EXPAND_DEPS_MODES = (False, "direct", "closure")
+    NOMINATION_DEFAULT_PRIORITY = 1
 
     def __init__(
         self,
@@ -94,6 +100,7 @@ class KnowledgeBase:
         refiner: Refiner | None = None,
         distiller: Distiller | None = None,
         sanitize: Callable[[str | None], Tuple[str | None, str]] | None = default_sanitize,
+        storage_factory: Callable[..., Storage] = Storage,
     ):
         self.db_path = db_path
         self.shared_paths = shared or []
@@ -102,24 +109,30 @@ class KnowledgeBase:
         self._curator = curator or Curator()
         self.refiner = refiner or NullRefiner()
         self.distiller = distiller or HeuristicDistiller()
+        self.storage_factory = storage_factory
 
-        self.storage = Storage(
+        self.storage = self.storage_factory(
             db_path,
             content_dim=self.embedding.content_dim,
             trigger_dim=self.embedding.trigger_dim,
         )
         self._shared_storages: Dict[str, Storage] = {}
-        for sp in self.shared_paths:
-            self._shared_storages[sp] = Storage(
-                sp,
-                content_dim=self.embedding.content_dim,
-                trigger_dim=self.embedding.trigger_dim,
-            )
-        self._init_meta()
-        self._validate_embedding_dims(self.storage)
-        for st in self._shared_storages.values():
-            self._validate_embedding_dims(st)
-        self._load_params()
+        try:
+            for sp in self.shared_paths:
+                self._shared_storages[sp] = self.storage_factory(
+                    sp,
+                    content_dim=self.embedding.content_dim,
+                    trigger_dim=self.embedding.trigger_dim,
+                    read_only=True,
+                )
+            self._init_meta()
+            self._validate_embedding_dims(self.storage)
+            for st in self._shared_storages.values():
+                self._validate_embedding_dims(st)
+            self._load_params()
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         """关闭所有数据库连接."""
@@ -210,11 +223,19 @@ class KnowledgeBase:
         trace: bool = True,
         expand_deps: bool | str = False,
         allow_trim: bool = False,
+        refine_mode: str = "off",
         include_sparks: bool = False,
         top: int | None = None,
         source: str = "sdk",
     ) -> RecallResult:
         """同步召回. 纯数学,零模型调用(allow_trim 除外)."""
+        if allow_trim and refine_mode == "off":
+            refine_mode = "trim"
+        if refine_mode not in ("off", "trim", "adapt"):
+            raise InvalidStateError(f"invalid refine_mode: {refine_mode}")
+        if expand_deps not in self.EXPAND_DEPS_MODES:
+            raise InvalidStateError(f"invalid expand_deps: {expand_deps}")
+        self._validate_event_source(source)
         trace_id = gen_uuid()
         now = utc_now_iso()
 
@@ -236,7 +257,13 @@ class KnowledgeBase:
         scored = self._score_candidates(candidates, query)
 
         # 4. 装包
-        selected, skipped, depth_skipped = self._pack(scored, budget, expand_deps, allow_trim, query)
+        selected, skipped, skipped_reasons = self._pack(
+            scored, budget, expand_deps, allow_trim, query, refine_mode
+        )
+        depth_skipped = [
+            cid for cid, reason in skipped_reasons.items()
+            if reason == "dep_depth_limit"
+        ]
 
         # 5. 价值密度回填
         if self.density_refill:
@@ -253,7 +280,6 @@ class KnowledgeBase:
         # 7. 写 usage_trace + episodic_log
         if trace:
             retrieved = [item for _, item in scored]
-            depth_skipped_set = set(depth_skipped)
             for rank, item in enumerate(retrieved, start=1):
                 self.storage.append_trace({
                     "trace_id": trace_id,
@@ -262,21 +288,25 @@ class KnowledgeBase:
                     "similarity": item.get("_fused_score"),
                     "rank": rank,
                     "refine_mode": (
-                        "skipped:dep_depth_limit"
-                        if item["id"] in depth_skipped_set
-                        else None
+                        f"skipped:{skipped_reasons[item['id']]}"
+                        if item["id"] in skipped_reasons else None
                     ),
                     "source": source,
                     "ts": now,
                 })
             # refined trace (trim 发生时)
-            refined_ids = {item["id"] for item in selected if item.pop("_refined", False)}
-            for cid in refined_ids:
+            refined = {
+                item["id"]: item.pop("_refined")
+                for item in selected
+                if item.get("_refined")
+            }
+            for cid, mode in refined.items():
                 self.storage.append_trace({
                     "trace_id": trace_id,
                     "chunk_id": cid,
                     "event": "refined",
                     "strength": 0.5,
+                    "refine_mode": mode,
                     "source": source,
                     "ts": now,
                 })
@@ -307,6 +337,7 @@ class KnowledgeBase:
                 "selected": [item["id"] for item in visible_knowledge],
                 "sparks": [item["id"] for item in sparks],
                 "depth_skipped": depth_skipped,
+                "skipped_reasons": skipped_reasons,
             }
             self.storage.insert_log({
                 "id": gen_uuid(),
@@ -325,7 +356,8 @@ class KnowledgeBase:
             sparks=sparks,
             trace_id=trace_id,
             depth_skipped=depth_skipped,
-            empty=len(knowledge) == 0 and len(sparks) == 0,
+            skipped_reasons=skipped_reasons,
+            empty=len(visible_knowledge) == 0 and len(sparks) == 0,
         )
         result._trace = {"selected_ids": [i["id"] for i in visible_knowledge]}
         return result
@@ -367,12 +399,7 @@ class KnowledgeBase:
         self, q_content: List[float], q_trigger: List[float], libs: List[str] | None = None
     ) -> Dict[str, Dict[str, Any]]:
         """双向量 ANN,返回 chunk_id → {chunk, sim_content, sim_trigger}."""
-        # 确定要查询的 storages
-        storages_to_query: List[Storage] = [self.storage]
-        if libs:
-            for sp in self.shared_paths:
-                if (sp in libs or "shared" in libs) and sp in self._shared_storages:
-                    storages_to_query.append(self._shared_storages[sp])
+        storages_to_query = self._storages_to_query(libs)
 
         candidates: Dict[str, Dict[str, Any]] = {}
         for st in storages_to_query:
@@ -418,11 +445,7 @@ class KnowledgeBase:
         self, q_content: List[float], q_trigger: List[float], libs: List[str] | None = None
     ) -> List[Dict[str, Any]]:
         """独立召回 sparks(不占用 knowledge budget). 纯向量相似度, 不含 confidence 加权."""
-        storages_to_query: List[Storage] = [self.storage]
-        if libs:
-            for sp in self.shared_paths:
-                if (sp in libs or "shared" in libs) and sp in self._shared_storages:
-                    storages_to_query.append(self._shared_storages[sp])
+        storages_to_query = self._storages_to_query(libs)
 
         spark_scores: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         for st in storages_to_query:
@@ -452,6 +475,20 @@ class KnowledgeBase:
         sparks = list(spark_scores.values())
         sparks.sort(key=lambda x: x[0], reverse=True)
         return [chunk for _, chunk in sparks[: self.top_k_candidates]]
+
+    def _storages_to_query(self, libs: List[str] | None) -> List[Storage]:
+        """按调用方选择组装检索库;默认只查 personal."""
+        if not libs:
+            return [self.storage]
+        storages: List[Storage] = []
+        personal_id = self.storage.get_meta("lib_id")
+        if any(lib in ("personal", self.db_path, personal_id) for lib in libs):
+            storages.append(self.storage)
+        for path, storage in self._shared_storages.items():
+            shared_id = storage.get_meta("lib_id")
+            if any(lib in ("shared", path, shared_id) for lib in libs):
+                storages.append(storage)
+        return storages
 
     def _score_candidates(
         self, candidates: Dict[str, Dict[str, Any]], query: str
@@ -491,29 +528,41 @@ class KnowledgeBase:
         expand_deps: bool | str,
         allow_trim: bool,
         query: str,
-    ) -> Tuple[List[Dict[str, Any]], List[Tuple[List[Dict[str, Any]], float, int]], List[str]]:
-        """first-fit 装包. 返回 (selected, skipped_blocks, depth_skipped_ids).
+        refine_mode: str | None = None,
+    ) -> Tuple[List[Dict[str, Any]], List[Tuple[List[Dict[str, Any]], float, int]], Dict[str, str]]:
+        """first-fit 装包. 返回 (selected, skipped_blocks, skipped_reasons).
 
-        depth_skipped_ids: 因 expand_deps='closure' 触达 CTE 深度上限而被丢弃的 seed.
-        设计原则(§六 CTE 双保险):'宁可不召回,不给半截 hard 依赖'——丢弃 seed 而非截断闭包.
+        skipped_reasons: 因依赖闭包不完整而被丢弃的 seed 及原因.
+        设计原则(§六 hard 闭包双保险):'宁可不召回,不给半截 hard 依赖'——丢弃 seed 而非截断闭包.
         """
         selected: List[Dict[str, Any]] = []
         skipped: List[Tuple[List[Dict[str, Any]], float, int]] = []
-        depth_skipped: List[str] = []
+        skipped_reasons: Dict[str, str] = {}
         used_ids = set()
         used_tokens = 0
+        mode = refine_mode or ("trim" if allow_trim else "off")
 
         for fused_score, chunk in scored:
             cid = chunk["id"]
             if cid in used_ids:
                 continue
-            block, depth_exceeded = self._build_block(cid, expand_deps)
-            if depth_exceeded:
-                depth_skipped.append(cid)
+            block, skip_reason = self._build_block_reason(cid, expand_deps)
+            if skip_reason:
+                skipped_reasons[cid] = skip_reason
                 continue
             if not block:
                 continue
-            cost = sum((b.get("token_count") or estimate_tokens(b["content"]) or 100) for b in block)
+            if mode == "adapt" and self.refiner.available:
+                try:
+                    refined = self.refiner.refine(block, query, "adapt")
+                except Exception:
+                    refined = None
+                if refined and self._refine_intact(block, refined):
+                    block = refined
+                    for item in block:
+                        item["_refined"] = "adapt"
+            new_block = [b for b in block if b["id"] not in used_ids]
+            cost = self._block_cost(new_block)
 
             if used_tokens + cost <= budget:
                 for b in block:
@@ -524,22 +573,21 @@ class KnowledgeBase:
                 used_tokens += cost
                 continue
 
-            if allow_trim and self.refiner.available:
+            if mode == "trim" and self.refiner.available:
                 # trim: 不破坏 hard 闭包,只裁非关键段落(由 Refiner 实现)
                 try:
                     refined = self.refiner.refine(block, query, "trim")
                 except Exception:
                     refined = None
-                if refined and self._deps_intact(block, refined):
+                if refined and self._refine_intact(block, refined):
                     refined_cost = sum(
-                        (b.get("token_count") or estimate_tokens(b["content"]) or 100)
-                        for b in refined
+                        estimate_tokens(b["content"]) or 100 for b in refined
                     )
                     if used_tokens + refined_cost <= budget:
                         for b in refined:
                             if b["id"] not in used_ids:
                                 b["_fused_score"] = fused_score
-                                b["_refined"] = True
+                                b["_refined"] = "trim"
                                 selected.append(b)
                                 used_ids.add(b["id"])
                         used_tokens += refined_cost
@@ -547,23 +595,63 @@ class KnowledgeBase:
 
             skipped.append((block, fused_score, cost))
 
-        return selected, skipped, depth_skipped
+        return selected, skipped, skipped_reasons
 
     @staticmethod
-    def _deps_intact(original: List[Dict[str, Any]], refined: List[Dict[str, Any]]) -> bool:
-        """trim 只能裁块内文本,不能删除 hard 闭包成员."""
-        return {b["id"] for b in original} == {b["id"] for b in refined}
+    def _refine_intact(original: List[Dict[str, Any]], refined: List[Dict[str, Any]]) -> bool:
+        """refine 不得删除闭包成员或改写 protected 块."""
+        original_by_id = {b["id"]: b for b in original}
+        refined_by_id = {b.get("id"): b for b in refined}
+        if set(original_by_id) != set(refined_by_id):
+            return False
+        if any("content" not in b for b in refined):
+            return False
+        return all(
+            not block.get("protected")
+            or refined_by_id[chunk_id]["content"] == block["content"]
+            for chunk_id, block in original_by_id.items()
+        )
 
-    def _get_chunk_any(self, chunk_id: str) -> Dict[str, Any] | None:
-        """跨库查找 chunk."""
+    _deps_intact = _refine_intact
+
+    @staticmethod
+    def _block_cost(block: List[Dict[str, Any]]) -> int:
+        return sum(
+            (
+                estimate_tokens(item["content"])
+                if item.get("_refined")
+                else item.get("token_count") or estimate_tokens(item["content"])
+            )
+            or 100
+            for item in block
+        )
+
+    def _get_chunk_with_storage_any(
+        self, chunk_id: str
+    ) -> Tuple[Dict[str, Any] | None, Storage | None]:
+        """跨库查找 chunk 及所属存储."""
         c = self.storage.get_chunk(chunk_id)
         if c:
-            return c
+            return c, self.storage
         for st in self._shared_storages.values():
             c = st.get_chunk(chunk_id)
             if c:
-                return c
-        return None
+                return c, st
+        return None, None
+
+    def _get_available_hard_dep(
+        self, chunk_id: str, storage: Storage
+    ) -> Dict[str, Any] | None:
+        """hard dep 必须在所属库内存在、可召回且向量未过期."""
+        chunk = storage.get_chunk(chunk_id)
+        if (
+            not chunk
+            or chunk["state"] == "archived"
+            or chunk.get("origin") == "spark"
+            or chunk["embed_version"] < int(storage.get_meta("embed_version") or "1")
+        ):
+            return None
+        return chunk
 
     def _get_deps_any(self, src: str, kind: str | None = None) -> List[Dict[str, Any]]:
         """跨库查找依赖."""
@@ -576,71 +664,102 @@ class KnowledgeBase:
                 return deps
         return []
 
-    def _build_block(self, seed_id: str, expand_deps: bool | str) -> Tuple[List[Dict[str, Any]], bool]:
-        """构建不可分割块. 返回 (block, depth_exceeded).
-
-        depth_exceeded=True 表示 expand_deps='closure' 触达 CTE 深度上限,
-        调用方应丢弃 seed 而非将半截 hard 闭包送进 context(§六 CTE 双保险).
-        soft 依赖不强制装入,只作为候选加分(§四 装包只强制展开 hard 闭包).
-        """
+    def _build_block_reason(
+        self, seed_id: str, expand_deps: bool | str
+    ) -> Tuple[List[Dict[str, Any]], str | None]:
+        """构建不可分割块并返回失败原因."""
         block: List[Dict[str, Any]] = []
-        seed = self._get_chunk_any(seed_id)
-        if not seed:
-            return block, False
+        seed, storage = self._get_chunk_with_storage_any(seed_id)
+        if not seed or not storage:
+            return block, "seed_missing"
         block.append(seed)
 
         if not expand_deps:
-            return block, False
+            return block, None
 
         if expand_deps == "direct":
-            deps = self._get_deps_any(seed_id, kind="hard")
-            for d in deps:
-                c = self._get_chunk_any(d["dst"])
-                if c:
-                    block.append(c)
-            return block, False
+            deps = storage.get_deps(seed_id, kind="hard")
+            for dep in deps:
+                chunk = self._get_available_hard_dep(dep["dst"], storage)
+                if not chunk:
+                    return [], "hard_dep_unavailable"
+                block.append(chunk)
+            return block, None
 
         if expand_deps == "closure":
             visited = {seed_id}
             queue = [(seed_id, 0)]
             depth_limit = 3
             while queue:
-                sid, depth = queue.pop(0)
-                deps = self._get_deps_any(sid, kind="hard")
-                for d in deps:
-                    did = d["dst"]
-                    if did in visited:
+                src, depth = queue.pop(0)
+                for dep in storage.get_deps(src, kind="hard"):
+                    dst = dep["dst"]
+                    if dst in visited:
                         continue
                     if depth + 1 > depth_limit:
-                        return [], True
-                    visited.add(did)
-                    c = self._get_chunk_any(did)
-                    if c:
-                        block.append(c)
-                    queue.append((did, depth + 1))
-            return block, False
+                        return [], "dep_depth_limit"
+                    visited.add(dst)
+                    chunk = self._get_available_hard_dep(dst, storage)
+                    if not chunk:
+                        return [], "hard_dep_unavailable"
+                    block.append(chunk)
+                    queue.append((dst, depth + 1))
+            return block, None
 
-        return block, False
+        return [], "invalid_expand_deps"
 
-    def _soft_dep_chunks(self, seed_id: str) -> List[Dict[str, Any]]:
-        """soft 依赖块列表. 仅作提示, 不强制装入(§四)."""
-        deps = self._get_deps_any(seed_id, kind="soft")
-        chunks = []
-        for d in deps:
-            c = self._get_chunk_any(d["dst"])
-            if c:
-                chunks.append(c)
-        return chunks
+    def _build_block(self, seed_id: str, expand_deps: bool | str) -> Tuple[List[Dict[str, Any]], bool]:
+        """构建不可分割块. 返回 (block, depth_exceeded).
+
+        第二项为兼容旧调用保留:任何闭包不完整均返回 True.
+        soft 依赖不强制装入,只作为候选加分(§四 装包只强制展开 hard 闭包).
+        """
+        block, reason = self._build_block_reason(seed_id, expand_deps)
+        return block, reason is not None
+
+    def _storage_for_lib(self, lib_ref: str | None) -> Storage | None:
+        """按路径或 lib_id 找已挂载库."""
+        if lib_ref in (None, "", "personal", self.db_path):
+            return self.storage
+        if lib_ref == self.storage.get_meta("lib_id"):
+            return self.storage
+        for path, storage in self._shared_storages.items():
+            if lib_ref in (path, storage.get_meta("lib_id")):
+                return storage
+        return None
+
+    def _resolve_soft_dep(self, dep: Dict[str, Any]) -> Dict[str, Any] | None:
+        """解析已挂载库中的 soft 引用;失败不阻塞 seed."""
+        dst_ref = dep.get("dst_ref") or dep.get("dst")
+        dst_lib = dep.get("dst_lib")
+        storage = self._storage_for_lib(dst_lib) if dst_lib else None
+        if dst_lib:
+            chunk = storage.get_chunk(dst_ref) if storage else None
+        else:
+            chunk, storage = self._get_chunk_with_storage_any(dst_ref)
+        if not chunk or chunk["state"] == "archived" or chunk.get("origin") == "spark":
+            return None
+        if storage and chunk["embed_version"] < int(storage.get_meta("embed_version") or "1"):
+            return None
+        return chunk
 
     def _apply_soft_dep_bonus(self, candidates: Dict[str, Dict[str, Any]]) -> None:
-        """为有 soft dep 的 seed 加 5% fused_score 提示(§四 'soft 仅作提示:目标库在 attach 列表且预算允许时作为普通候选加分')."""
-        for cid, info in candidates.items():
+        """将可解析 soft 引用作为普通候选加入并轻量加分."""
+        for cid, info in list(candidates.items()):
             chunk = info["chunk"]
             if chunk.get("origin") == "spark":
                 continue
-            soft = self._get_deps_any(cid, kind="soft")
-            if soft:
-                info["sim_content"] = min(1.0, info.get("sim_content", 0.0) * 1.05)
+            for dep in self._get_deps_any(cid, kind="soft"):
+                target = self._resolve_soft_dep(dep)
+                if not target or target["id"] == cid:
+                    continue
+                target_info = candidates.setdefault(
+                    target["id"],
+                    {"chunk": target, "sim_content": 0.0, "sim_trigger": 0.0},
+                )
+                target_info["sim_content"] = min(
+                    1.0, target_info.get("sim_content", 0.0) + 0.05
+                )
 
     def _density_refill(
         self,
@@ -649,10 +768,7 @@ class KnowledgeBase:
         budget: int,
     ) -> List[Dict[str, Any]]:
         """价值密度回填."""
-        used_tokens = sum(
-            (b.get("token_count") or estimate_tokens(b["content"]) or 100)
-            for b in selected
-        )
+        used_tokens = self._block_cost(selected)
         if used_tokens >= budget:
             return selected
 
@@ -663,7 +779,7 @@ class KnowledgeBase:
             block = [b for b in block if b["id"] not in {x["id"] for x in selected}]
             if not block:
                 continue
-            cost2 = sum((b.get("token_count") or estimate_tokens(b["content"]) or 100) for b in block)
+            cost2 = self._block_cost(block)
             density = fscore / max(cost2, 1)
             density_items.append((density, block, cost2))
 
@@ -681,6 +797,11 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     # Public API: record
     # ------------------------------------------------------------------
+    @classmethod
+    def _validate_event_source(cls, source: str) -> None:
+        if source not in cls.EVENT_SOURCES:
+            raise InvalidStateError(f"invalid event source: {source}")
+
     def record(
         self,
         trace_id: str,
@@ -697,6 +818,10 @@ class KnowledgeBase:
         """同步极轻:写日志 + EMA 更新 confidence."""
         if outcome not in (None, "ok", "fail", "unknown"):
             raise InvalidStateError(f"invalid outcome: {outcome}")
+        self._validate_event_source(source)
+        effective_priority = (
+            self.NOMINATION_DEFAULT_PRIORITY if nomination and priority == 0 else priority
+        )
         now = utc_now_iso()
         self.storage.begin_immediate()
         try:
@@ -716,7 +841,7 @@ class KnowledgeBase:
                     "outcome": outcome,
                     "event_source": source,
                     "nomination": nomination,
-                    "priority": priority,
+                    "priority": effective_priority,
                     "distill_state": "open",
                 })
                 log = self.storage.get_log_by_trace(trace_id)
@@ -775,8 +900,8 @@ class KnowledgeBase:
                 updates["outcome"] = outcome
             if nomination is not None and nomination != log.get("nomination"):
                 updates["nomination"] = nomination
-            if priority and priority != log.get("priority"):
-                updates["priority"] = priority
+            if effective_priority and effective_priority != log.get("priority"):
+                updates["priority"] = effective_priority
             if source != log.get("event_source"):
                 updates["event_source"] = source
 
@@ -784,7 +909,8 @@ class KnowledgeBase:
             # 只对 distill_state='open' 的 log 执行,避免把已是 'new' / 'screening' 等状态的
             # log 降级为 'discarded'(§五 record() 写入逻辑第 6 步:"outcome 补完后执行").
             current_distill_state = log.get("distill_state", "open")
-            if current_distill_state == "open":
+            outcome_completed = outcome is not None or log.get("outcome") is not None
+            if current_distill_state == "open" and outcome_completed:
                 # 同时检查传入参数和 log 中已有的值,支持幂等重复调用
                 has_material = bool(
                     output_summary or log.get("output_summary")
@@ -847,7 +973,7 @@ class KnowledgeBase:
             if feedback not in ("up", "down"):
                 return
             if not used:
-                return  # 无 used 块,不更新 (设计: "若本次无 used → 只记日志")
+                return  # 无 used 块,不更新 (设计:宁可漏奖,不可错奖)
             target = 1.0 if feedback == "up" else 0.0
             strength = 1.0
             reason = "user_up" if feedback == "up" else "user_down"
@@ -860,6 +986,13 @@ class KnowledgeBase:
         elif isinstance(feedback, dict):
             # chunk 级 feedback
             for fb, cids in feedback.items():
+                if fb == "judge_score" and isinstance(cids, dict):
+                    for cid, score in cids.items():
+                        value = max(0.0, min(1.0, float(score)))
+                        self._update_confidence(
+                            cid, value, 0.8, f"judge_score:{value:.2f}", now
+                        )
+                    continue
                 if fb not in ("up", "down"):
                     continue
                 target = 1.0 if fb == "up" else 0.0
@@ -888,7 +1021,7 @@ class KnowledgeBase:
         # 时效加权(仅显式信号)
         recency_w = 1.0
         last_used = chunk.get("last_used_at")
-        if last_used and reason in ("user_up", "user_down", "judge_score"):
+        if last_used and reason.split(":", 1)[0] in ("user_up", "user_down", "judge_score"):
             from datetime import datetime
             try:
                 t1 = datetime.fromisoformat(last_used.replace("Z", "+00:00"))
@@ -908,6 +1041,17 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     # Public API: add
     # ------------------------------------------------------------------
+    def _sanitize_content(self, content: str) -> Tuple[str, str]:
+        """统一执行 sanitize 钩子并校验扩展点合同."""
+        if not self.sanitize:
+            return content, "allow"
+        cleaned, action = self.sanitize(content)
+        if action not in ("allow", "redact", "discard"):
+            raise InvalidStateError(f"invalid sanitize action: {action}")
+        if action != "discard" and not isinstance(cleaned, str):
+            raise InvalidStateError("sanitize must return string content unless discarded")
+        return cleaned or "", action
+
     def add(
         self,
         content: str,
@@ -915,23 +1059,35 @@ class KnowledgeBase:
         trigger_desc: str | None = None,
         anti_trigger_desc: str | None = None,
         source: str = "chat",
+        skill_name: str | None = None,
     ) -> str:
         """写入外部确认的知识."""
         if kind not in ("note", "skill"):
             raise InvalidStateError(f"invalid kind: {kind}")
-        if self.sanitize:
-            content, action = self.sanitize(content)
-            if action == "discard":
-                return ""  # §二·六 不写 chunk
+        if source not in ("chat", "manual", "doc", "agent"):
+            raise InvalidStateError(f"invalid source: {source}")
+        if kind == "skill":
+            try:
+                skill_path = Path(content)
+                if skill_path.is_file():
+                    content = skill_path.read_text(encoding="utf-8")
+                    skill_name = skill_name or skill_path.stem
+            except OSError:
+                pass
+        content, action = self._sanitize_content(content)
+        if action == "discard":
+            return ""  # §二·六 不写 chunk
 
         h = content_hash(content)
         if self.storage.is_invalidated(h):
             raise InvalidStateError("content hash is invalidated")
 
         # §六·五 幂等性: install 靠 content_hash 应用层去重.
-        # 同一 hash 已有非 archived chunk → 返回已有 id, 不重复写入.
+        # 同一 hash 已有非 archived knowledge chunk → 返回已有 id, 不重复写入.
+        # spark 是待孵化灵感,不能阻止同内容知识被正式捕获.
         existing = self.storage.conn.execute(
-            "SELECT id FROM chunks WHERE content_hash=? AND state IN ('active','pending') "
+            "SELECT id FROM chunks WHERE content_hash=? AND origin!='spark' "
+            "AND state IN ('active','pending') "
             "ORDER BY created_at ASC LIMIT 1",
             (h,),
         ).fetchone()
@@ -945,7 +1101,7 @@ class KnowledgeBase:
         # - add(source=manual/chat) + redact: 脱敏后可 active, conf ≤ 0.4
         # - add(source=agent) + redact: 脱敏后强制 pending, conf ≤ 0.4
         # - add + allow: 按 kind/source 默认 conf
-        sanitized = (action == "redact") if self.sanitize else False
+        sanitized = action == "redact"
         if source == "agent":
             origin = "captured"
             state = "pending"
@@ -969,6 +1125,7 @@ class KnowledgeBase:
 
         chunk = {
             "id": chunk_id,
+            "skill_name": skill_name,
             "content": content,
             "trigger_desc": trigger_desc,
             "anti_trigger_desc": anti_trigger_desc,
@@ -996,12 +1153,15 @@ class KnowledgeBase:
             chunk["state_reason"] = f"embedding_pending:target={state}"
             # 保持 state 写入,但 embed_version=0 标记待补
 
-        self.storage.insert_chunk(chunk)
         if embed_ok:
-            self.storage.insert_vec_content(chunk_id, cvec)
-            # tvec 已在 try 块中按 embed_trigger(trigger_desc or content) 计算,
-            # 无论是否有 trigger_desc 都使用正确的 trigger 向量(§三 地基#8 双向量).
-            self.storage.insert_vec_trigger(chunk_id, tvec)
+            try:
+                self.storage.insert_chunk_with_vectors(chunk, cvec, tvec)
+            except Exception:
+                chunk["embed_version"] = 0
+                chunk["state_reason"] = f"embedding_pending:target={state}"
+                self.storage.insert_chunk(chunk)
+        else:
+            self.storage.insert_chunk(chunk)
         self.storage.conn.commit()
         return chunk_id
 
@@ -1015,10 +1175,9 @@ class KnowledgeBase:
         §二·七 边界: trigger/anti_trigger 都可选(灵感往往没想清楚边界).
         保留 anti_trigger_desc 接口以便上层明确表达"不适用场景".
         """
-        if self.sanitize:
-            content, action = self.sanitize(content)
-            if action == "discard":
-                return ""
+        content, action = self._sanitize_content(content)
+        if action == "discard":
+            return ""
 
         now = utc_now_iso()
         chunk_id = gen_uuid()
@@ -1046,7 +1205,7 @@ class KnowledgeBase:
             "maturity": "seed",
             "related_ids": ",".join(related) if related else None,
             "protected": 0,
-            "state": "active",  # spark 的 state 只是占位,实际用 maturity
+            "state": "active",  # 统一 schema 要求 state;spark 生命周期由 maturity 表达
             "state_reason": None,
             "confidence": 0.5,  # 语义 NULL,不参与排序
             "confidence_reason": None,
@@ -1063,10 +1222,15 @@ class KnowledgeBase:
             chunk["embed_version"] = 0
             chunk["state_reason"] = "embedding_pending:target=active"
 
-        self.storage.insert_chunk(chunk)
         if embed_ok:
-            self.storage.insert_vec_content(chunk_id, cvec)
-            self.storage.insert_vec_trigger(chunk_id, tvec)
+            try:
+                self.storage.insert_chunk_with_vectors(chunk, cvec, tvec)
+            except Exception:
+                chunk["embed_version"] = 0
+                chunk["state_reason"] = "embedding_pending:target=active"
+                self.storage.insert_chunk(chunk)
+        else:
+            self.storage.insert_chunk(chunk)
         self.storage.conn.commit()
         return chunk_id
 
@@ -1084,14 +1248,10 @@ class KnowledgeBase:
         if to not in ("note", "skill"):
             raise InvalidStateError(f"invalid spark promotion target: {to}")
 
-        if self.sanitize:
-            content, action = self.sanitize(spark["content"])
-            if action == "discard":
-                # §二·六 拒绝晋升, maturity 保持原状(incubating/seed)
-                raise InvalidStateError("sanitize discard on promote")
-        else:
-            content = spark["content"]
-            action = "allow"
+        content, action = self._sanitize_content(spark["content"])
+        if action == "discard":
+            # §二·六 拒绝晋升, maturity 保持原状(incubating/seed)
+            raise InvalidStateError("sanitize discard on promote")
 
         promoted_hash = content_hash(content)
         if (
@@ -1101,6 +1261,21 @@ class KnowledgeBase:
             raise InvalidStateError("spark content hash is invalidated")
 
         now = utc_now_iso()
+        existing = self.storage.conn.execute(
+            """SELECT id FROM chunks
+               WHERE content_hash=? AND origin!='spark'
+                 AND state IN ('active','pending')
+               ORDER BY created_at ASC LIMIT 1""",
+            (promoted_hash,),
+        ).fetchone()
+        if existing:
+            self.storage.conn.execute(
+                "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
+                (now, spark_id),
+            )
+            self.storage.conn.commit()
+            return existing["id"]
+
         new_id = gen_uuid()
 
         # §五 kb.add 语义表: skill/note 默认参数
@@ -1118,7 +1293,7 @@ class KnowledgeBase:
             state_reason = "init:captured"
 
         # redact 后 conf 上限 0.4
-        if action == "redact" and self.sanitize:
+        if action == "redact":
             conf = 0.4
 
         chunk = {
@@ -1149,10 +1324,15 @@ class KnowledgeBase:
             chunk["embed_version"] = 0
             chunk["state_reason"] = f"embedding_pending:target={state}"
 
-        self.storage.insert_chunk(chunk)
         if embed_ok:
-            self.storage.insert_vec_content(new_id, cvec)
-            self.storage.insert_vec_trigger(new_id, tvec)
+            try:
+                self.storage.insert_chunk_with_vectors(chunk, cvec, tvec)
+            except Exception:
+                chunk["embed_version"] = 0
+                chunk["state_reason"] = f"embedding_pending:target={state}"
+                self.storage.insert_chunk(chunk)
+        else:
+            self.storage.insert_chunk(chunk)
 
         # 原 spark 标 maturity='promoted' (§二·七). state 保持 'active'(spark 永远不归档).
         self.storage.conn.execute(
@@ -1178,6 +1358,29 @@ class KnowledgeBase:
         )
         self.storage.conn.commit()
 
+    def mature_spark(self, spark_id: str, to: str) -> None:
+        """人工推进 spark 孵化阶段;只允许前向转换."""
+        spark = self.storage.get_chunk(spark_id)
+        if not spark or spark.get("origin") != "spark":
+            raise ChunkNotFoundError(f"spark {spark_id} not found")
+        current = spark.get("maturity") or "seed"
+        transitions = {
+            "seed": {"sprouting", "incubating"},
+            "sprouting": {"incubating"},
+            "incubating": set(),
+        }
+        if current == to:
+            return
+        if current not in transitions:
+            raise InvalidStateError(f"spark {spark_id} already {current}")
+        if to not in transitions[current]:
+            raise InvalidStateError(f"invalid spark maturity transition: {current} -> {to}")
+        self.storage.conn.execute(
+            "UPDATE chunks SET maturity=?, updated_at=? WHERE id=?",
+            (to, utc_now_iso(), spark_id),
+        )
+        self.storage.conn.commit()
+
     # ------------------------------------------------------------------
     # Public API: approve / archive / invalidate / restore
     # ------------------------------------------------------------------
@@ -1185,15 +1388,25 @@ class KnowledgeBase:
         chunk = self.storage.get_chunk(chunk_id)
         if not chunk:
             raise ChunkNotFoundError(chunk_id)
+        if chunk.get("origin") == "spark":
+            raise InvalidStateError("spark lifecycle uses promote_spark() or invalidate()")
+        if chunk.get("state") == "active":
+            return
+        if chunk.get("state") != "pending":
+            raise InvalidStateError("approve requires pending chunk")
         self.storage.update_chunk_state(chunk_id, "active", "approved")
+        self.storage.conn.execute(
+            "UPDATE chunks SET confidence_reason='manual_set', updated_at=? WHERE id=?",
+            (utc_now_iso(), chunk_id),
+        )
         self.storage.conn.commit()
 
     def archive(self, chunk_id: str, reason: str = "stale") -> None:
         chunk = self.storage.get_chunk(chunk_id)
         if not chunk:
             raise ChunkNotFoundError(chunk_id)
-        if chunk.get("protected"):
-            raise InvalidStateError("cannot archive protected chunk")
+        if chunk.get("origin") == "spark":
+            raise InvalidStateError("spark lifecycle uses drop_spark() or invalidate()")
         self.storage.update_chunk_state(chunk_id, "archived", reason)
         self.storage.conn.commit()
 
@@ -1205,13 +1418,19 @@ class KnowledgeBase:
         h = chunk["content_hash"]
         # 1. 归档 + confidence 归零
         self.storage.conn.execute(
-            "UPDATE chunks SET state='archived', confidence=0.0, state_reason=?, updated_at=? WHERE id=?",
-            (f"invalidated:{reason}" if reason else "invalidated", now, chunk_id),
+            """UPDATE chunks
+               SET state='archived', confidence=0.0, state_reason=?,
+                   state_updated_at=?, updated_at=?
+               WHERE id=?""",
+            (f"invalidated:{reason}" if reason else "invalidated", now, now, chunk_id),
         )
         # 2. 同 hash 连带
         self.storage.conn.execute(
-            "UPDATE chunks SET state='archived', confidence=0.0, state_reason=? WHERE content_hash=? AND id!=?",
-            (f"invalidated:same_hash", h, chunk_id),
+            """UPDATE chunks
+               SET state='archived', confidence=0.0, state_reason=?,
+                   state_updated_at=?, updated_at=?
+               WHERE content_hash=? AND id!=?""",
+            ("invalidated:same_hash", now, now, h, chunk_id),
         )
         # 3. 重入黑名单
         self.storage.insert_invalidated_hash(h, reason, now)
@@ -1221,7 +1440,15 @@ class KnowledgeBase:
         chunk = self.storage.get_chunk(chunk_id)
         if not chunk:
             raise ChunkNotFoundError(chunk_id)
+        if chunk.get("state") == "active":
+            return
+        if chunk.get("state") != "archived":
+            raise InvalidStateError("restore requires archived chunk")
         self.storage.update_chunk_state(chunk_id, "active", "restore")
+        self.storage.conn.execute(
+            "UPDATE chunks SET confidence_reason='restore', updated_at=? WHERE id=?",
+            (utc_now_iso(), chunk_id),
+        )
         self.storage.conn.commit()
 
     # ------------------------------------------------------------------
@@ -1229,6 +1456,8 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
     def evolve(self, trigger: str = "manual") -> Dict[str, Any]:
         """成长:distill + curate + aggregate + purge."""
+        if trigger not in self.EVOLVE_TRIGGERS:
+            raise InvalidStateError(f"invalid evolve trigger: {trigger}")
         result: Dict[str, Any] = {"distilled": 0, "curate": None}
 
         # threshold 检查
@@ -1278,7 +1507,7 @@ class KnowledgeBase:
                 continue
             try:
                 chunk_id = self._distill_one(log)
-                # 简化版 token 估算(实际 LLM 蒸馏时应替换为真实值)
+                # 出生版使用轻量 token 估算;注入 LLM Distiller 时仍可复用.
                 prompt_tokens = estimate_tokens(log.get("output_summary") or log.get("query") or "")
                 completion_tokens = estimate_tokens(log.get("output_summary") or "")
                 if chunk_id:
@@ -1311,23 +1540,32 @@ class KnowledgeBase:
         sanitize_discard / embed_failed 等终态由调用方 _distill_batch 统一 UPDATE,
         避免 _distill_one 与 _distill_batch 之间的状态机竞态.
         """
+        if not self.distiller.screen(log):
+            self._distill_finalize(log, "discarded", "screened_out")
+            return None
+
         result = self.distiller.distill(log, self.embedding)
         if result is None:
             return None
 
-        content = result.get("content")
+        required = {"content", "trigger_desc", "anti_trigger_desc"}
+        if not required.issubset(result):
+            missing = ", ".join(sorted(required - set(result)))
+            raise InvalidStateError(f"distiller result missing fields: {missing}")
+
+        content = result["content"]
         if not content:
             return None
 
-        if self.sanitize:
-            content, action = self.sanitize(content)
-            if action == "discard":
-                # 通知调用方:这是 sanitize_discard 终态
-                self._distill_finalize(log, "discarded", "sanitize_discard")
-                return None
+        content, action = self._sanitize_content(content)
+        if action == "discard":
+            # 通知调用方:这是 sanitize_discard 终态
+            self._distill_finalize(log, "discarded", "sanitize_discard")
+            return None
 
         h = content_hash(content)
         if self.storage.is_invalidated(h):
+            self._distill_finalize(log, "discarded", "invalidated_hash")
             return None
 
         # §六·五 幂等性: distilled_from UNIQUE 索引保证重跑不重复
@@ -1339,11 +1577,11 @@ class KnowledgeBase:
 
         now = utc_now_iso()
         chunk_id = gen_uuid()
-        trigger = result.get("trigger_desc") or log.get("query", "")[:200]
-        anti = result.get("anti_trigger_desc") or ""
+        trigger = result["trigger_desc"]
+        anti = result["anti_trigger_desc"]
 
         # §二·六 distill() redact 路径: 脱敏写 pending, conf ≤ 0.4
-        sanitized = (action == "redact") if self.sanitize else False
+        sanitized = action == "redact"
         chunk_conf = 0.4 if sanitized else 0.45
 
         chunk = {
@@ -1377,9 +1615,11 @@ class KnowledgeBase:
             self._distill_finalize(log, "failed", "embedding_failed")
             return None
 
-        self.storage.insert_chunk(chunk)
-        self.storage.insert_vec_content(chunk_id, cvec)
-        self.storage.insert_vec_trigger(chunk_id, tvec)
+        try:
+            self.storage.insert_chunk_with_vectors(chunk, cvec, tvec)
+        except Exception:
+            self._distill_finalize(log, "failed", "embedding_failed")
+            return None
         return chunk_id
 
     def _distill_finalize(self, log: Dict[str, Any], state: str, note: str | None) -> None:
@@ -1404,12 +1644,21 @@ class KnowledgeBase:
 
         cutoff_ts = now
         if not scope.dry_run:
-            # 1. aggregate (cutoff_ts 固定)
+            # 1. aggregate + watermark + raw trace purge 必须原子提交.
+            # 半开窗口配合 BEGIN IMMEDIATE:等于 cutoff 的 trace 留给下一轮.
             last_ts = self.storage.get_meta("last_agg_ts") or "1970-01-01T00:00:00.000Z"
-            self.storage.aggregate_success_traces(last_ts, cutoff_ts)
-            self.storage.aggregate_counters(last_ts, cutoff_ts)
-            self.storage.aggregate_success_counts()
-            self.storage.set_meta("last_agg_ts", cutoff_ts)
+            self.storage.begin_immediate()
+            try:
+                self.storage.aggregate_success_traces(last_ts, cutoff_ts)
+                self.storage.aggregate_counters(last_ts, cutoff_ts)
+                self.storage.aggregate_success_counts()
+                self.storage.set_meta("last_agg_ts", cutoff_ts, commit=False)
+                purged = self.storage.purge_usage_trace(cutoff_ts)
+                self.storage.commit()
+            except Exception:
+                self.storage.rollback()
+                raise
+            report.stats["purged_traces"] = purged
 
             # 2. purge_logs 前置: stale screening + open TTL
             stale = self.storage.purge_stale_screening(self.screening_timeout_minutes, now)
@@ -1431,19 +1680,21 @@ class KnowledgeBase:
         # 6. promote pending → active
         self._curate_promote(report, scope)
 
-        # 7. cycle / orphan (简化:仅检测,只读)
+        # 7. cycle / orphan 仅检测,不自动改写依赖图.
         self._curate_cycles(report, scope)
 
         if not scope.dry_run:
-            # 7. purge usage_trace
-            purged = self.storage.purge_usage_trace(cutoff_ts)
-            report.stats["purged_traces"] = purged
-
             # 8. purge old episodic_log
             old_logs = self.storage.purge_old_logs(30)
             report.stats["purged_logs"] = old_logs
 
             self.storage.conn.commit()
+        report.stats.setdefault("archived_count", len(report.archived))
+        report.stats.setdefault("deduped_count", len(report.deduped))
+        report.stats.setdefault("decayed_count", len(report.decayed))
+        report.stats.setdefault("promoted_count", 0)
+        report.stats.setdefault("cycle_count", len(report.cycles))
+        report.stats.setdefault("orphan_count", len(report.orphans))
         return report
 
     @staticmethod
@@ -1582,29 +1833,29 @@ class KnowledgeBase:
                 and float(row["confidence"] or 0) >= self.promote_confidence_min):
                 if not scope.dry_run:
                     self.storage.update_chunk_state(row["id"], "active", "repeated_success")
+                report.stats["promoted_count"] = report.stats.get("promoted_count", 0) + 1
 
     def _curate_cycles(self, report: CurateReport, scope: CurateScope) -> None:
-        # 简化环检测:DFS
+        # hard dependency 图环检测:保留遍历栈,报告每个回边形成的环.
         deps_rows = self.storage.conn.execute("SELECT src, dst FROM deps WHERE kind='hard'").fetchall()
         graph: Dict[str, List[str]] = {}
         for r in deps_rows:
             graph.setdefault(r["src"], []).append(r["dst"])
         visited = set()
-        rec_stack = set()
+        on_stack = set()
 
-        def dfs(node: str, path: List[str]) -> bool:
+        def dfs(node: str, path: List[str]) -> None:
             visited.add(node)
-            rec_stack.add(node)
+            on_stack.add(node)
             for nxt in graph.get(node, []):
                 if nxt not in visited:
-                    if dfs(nxt, path + [nxt]):
-                        return True
-                elif nxt in rec_stack:
+                    dfs(nxt, path + [nxt])
+                elif nxt in on_stack:
                     cycle_start = path.index(nxt)
-                    report.cycles.append(path[cycle_start:] + [nxt])
-                    return True
-            rec_stack.remove(node)
-            return False
+                    cycle = path[cycle_start:] + [nxt]
+                    if cycle not in report.cycles:
+                        report.cycles.append(cycle)
+            on_stack.remove(node)
 
         for node in list(graph.keys()):
             if node not in visited:
@@ -1639,13 +1890,17 @@ class KnowledgeBase:
             raise ChunkNotFoundError(chunk_id)
         # 关联/衍生(§三·六 invalidate 第 3 防护 衍生提示)
         # - parent_id: 由 promote_spark / 父子关系产生的下游
-        # - distilled_from: 由 distill 从该 chunk (作为 episodic_log.id) 派生的 chunk
+        # - distilled_from: 由召回中选中过该 chunk 的 episodic_log 派生的 chunk
         related_parent = self.storage.conn.execute(
             "SELECT id, state, confidence, 'parent_id' AS via FROM chunks WHERE parent_id=?",
             (chunk_id,),
         ).fetchall()
         related_distilled = self.storage.conn.execute(
-            "SELECT id, state, confidence, 'distilled_from' AS via FROM chunks WHERE distilled_from=?",
+            """SELECT DISTINCT c.id, c.state, c.confidence, 'distilled_from' AS via
+               FROM chunks c
+               JOIN episodic_log l ON l.id = c.distilled_from
+               JOIN json_each(l.recall_snapshot, '$.selected') selected
+               WHERE selected.value=?""",
             (chunk_id,),
         ).fetchall()
         related = [dict(r) for r in related_parent] + [dict(r) for r in related_distilled]
@@ -1684,8 +1939,7 @@ class KnowledgeBase:
         archived = stats["archived"] or 0
         total = active + pending + archived
 
-        # 僵尸块 = confidence [0.4, 0.6] 且已存在 > 7 天的 active 块(§五 inspect 五个健康信号).
-        # 时间过滤排除刚加入的 captured note(默认 conf=0.60),只标记"卡在中间"很久的块.
+        # 新写入 captured note 默认 0.60;超过缓冲期仍卡在中间才算僵尸块.
         zombie_row = self.storage.conn.execute(
             "SELECT COUNT(*) AS c FROM chunks "
             "WHERE state='active' AND origin!='spark' "
@@ -1703,7 +1957,8 @@ class KnowledgeBase:
         stale = self.storage.conn.execute(
             """SELECT COUNT(*) AS cnt FROM episodic_log
                WHERE distill_state='screening'
-                 AND distill_locked_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes')"""
+                 AND distill_locked_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)""",
+            (f"-{self.screening_timeout_minutes} minutes",),
         ).fetchone()["cnt"] or 0
 
         # distill tokens
@@ -1756,6 +2011,7 @@ class KnowledgeBase:
             "knowledge_debt_ratio": round(debt, 2),
             "pending_embed_rebuild": stats["pending_embed"] or 0,
             "stale_screening": stale,
+            "stale_screening_count": stale,
             "distill_tokens": {"prompt": tok["p"] or 0, "completion": tok["c"] or 0,
                                "max": max_distill_tokens},
             "spark_hints": spark_hints,
@@ -1769,14 +2025,23 @@ class KnowledgeBase:
     def augmented(self, budget: int = 6000):
         """装饰器:自动 recall + 注入 context."""
         def decorator(func: Callable):
+            parameters = inspect.signature(func).parameters
+            context_name = (
+                "context"
+                if "context" in parameters
+                else "_innate_context"
+                if "_innate_context" in parameters
+                else None
+            )
+
+            @functools.wraps(func)
             def wrapper(*args, **kwargs):
-                # 尝试从第一个位置参数取 query
-                query = args[0] if args else ""
+                query = args[0] if args else kwargs.get("query", "")
                 if not query:
                     return func(*args, **kwargs)
-                ctx = self.recall(query, budget=budget, trace=True)
-                # 注入 context 到 kwargs
-                kwargs["_innate_context"] = ctx
+                ctx = self.recall(query, budget=budget, trace=True, source="augmented")
+                if context_name and context_name not in kwargs:
+                    kwargs[context_name] = ctx
                 result = func(*args, **kwargs)
                 # 尝试解析 outcome
                 if isinstance(result, dict) and "outcome" in result:
@@ -1805,11 +2070,7 @@ class KnowledgeBase:
                 cvec = self.embedding.embed_content(row["content"])
                 trigger_text = row["trigger_desc"] if row["trigger_desc"] is not None else row["content"]
                 tvec = self.embedding.embed_trigger(trigger_text)
-                # 删除旧向量再插入
-                self.storage.delete_vec_content(row["id"])
-                self.storage.delete_vec_trigger(row["id"])
-                self.storage.insert_vec_content(row["id"], cvec)
-                self.storage.insert_vec_trigger(row["id"], tvec)
+                self.storage.replace_vectors(row["id"], cvec, tvec)
                 # 更新 embed_version
                 self.storage.conn.execute(
                     "UPDATE chunks SET embed_version=?, updated_at=? WHERE id=?",

@@ -6,7 +6,7 @@ import json
 import sqlite3
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 import sqlite_vec
 
@@ -16,6 +16,33 @@ from .utils import utc_now_iso
 # 期望的 schema 版本(必须与 migrations/ 链末端一致)
 EXPECTED_SCHEMA_VERSION = "4.5.1"
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+
+
+@runtime_checkable
+class VectorStore(Protocol):
+    """可注入存储后端的最小合同.
+
+    KnowledgeBase 当前仍依赖 SQL 事务与聚合 helper，因此替代实现需兼容
+    Storage 的公开方法。storage_factory 是出生版的注入入口，不在此扩展
+    为插件框架。
+    """
+
+    db_path: Path
+    conn: sqlite3.Connection
+
+    def get_meta(self, key: str, default: str | None = None) -> str | None: ...
+
+    def get_chunk(self, chunk_id: str) -> Dict[str, Any] | None: ...
+
+    def search_vec_content(
+        self, query_embedding: List[float], limit: int
+    ) -> List[Tuple[str, float]]: ...
+
+    def search_vec_trigger(
+        self, query_embedding: List[float], limit: int
+    ) -> List[Tuple[str, float]]: ...
+
+    def close(self) -> None: ...
 
 
 def _ver_tuple(v: str) -> Tuple[int, ...]:
@@ -34,11 +61,14 @@ class Storage:
         db_path: str | Path,
         content_dim: int = 1024,
         trigger_dim: int = 256,
+        read_only: bool = False,
     ):
         self.db_path = Path(db_path)
         self.content_dim = content_dim
         self.trigger_dim = trigger_dim
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
+        if not self.read_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
         self._connect()
         self._init_schema()
@@ -47,14 +77,22 @@ class Storage:
     # 连接管理
     # ------------------------------------------------------------------
     def _connect(self) -> None:
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        if self.read_only:
+            uri = self.db_path.resolve().as_uri() + "?mode=ro"
+            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        else:
+            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.enable_load_extension(True)
         sqlite_vec.load(self._conn)
         self._conn.enable_load_extension(False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        if self.read_only:
+            self._conn.execute("PRAGMA query_only=ON")
+        else:
+            self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        if not self.read_only:
+            self._conn.execute("PRAGMA synchronous=NORMAL")
 
     def _init_schema(self) -> None:
         """初始化或迁移到目标 schema 版本.
@@ -75,6 +113,8 @@ class Storage:
         ).fetchone() is not None
 
         if not has_meta:
+            if self.read_only:
+                raise RuntimeError(f"shared database has no Innate schema: {self.db_path}")
             # 全新库 — 直接 exec 完整 schema
             if not schema_file.exists():
                 raise RuntimeError("schema.sql not found")
@@ -111,6 +151,12 @@ class Storage:
                 stacklevel=2,
             )
             return
+
+        if self.read_only:
+            raise RuntimeError(
+                f"shared database schema_version={current} requires migration to "
+                f"{EXPECTED_SCHEMA_VERSION}; open it as a writable library first"
+            )
 
         # 3. cur < exp — 顺序 apply 迁移
         self._apply_migrations(current, EXPECTED_SCHEMA_VERSION)
@@ -175,11 +221,12 @@ class Storage:
         ).fetchone()
         return row["value"] if row else default
 
-    def set_meta(self, key: str, value: str) -> None:
+    def set_meta(self, key: str, value: str, *, commit: bool = True) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value)
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     # ------------------------------------------------------------------
     # chunk CRUD
@@ -201,6 +248,24 @@ class Storage:
             "INSERT INTO vec_trigger(chunk_id, embedding) VALUES (?, ?)",
             (chunk_id, sqlite_vec.serialize_float32(embedding)),
         )
+
+    def insert_chunk_with_vectors(
+        self,
+        chunk: Dict[str, Any],
+        content_embedding: List[float],
+        trigger_embedding: List[float],
+    ) -> None:
+        """原子写入 chunk 与双向量."""
+        self.conn.execute("SAVEPOINT insert_chunk_vectors")
+        try:
+            self.insert_chunk(chunk)
+            self.insert_vec_content(chunk["id"], content_embedding)
+            self.insert_vec_trigger(chunk["id"], trigger_embedding)
+            self.conn.execute("RELEASE SAVEPOINT insert_chunk_vectors")
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT insert_chunk_vectors")
+            self.conn.execute("RELEASE SAVEPOINT insert_chunk_vectors")
+            raise
 
     def get_chunk(self, chunk_id: str) -> Dict[str, Any] | None:
         row = self.conn.execute(
@@ -292,6 +357,25 @@ class Storage:
     def delete_vec_trigger(self, chunk_id: str) -> None:
         self.conn.execute("DELETE FROM vec_trigger WHERE chunk_id=?", (chunk_id,))
 
+    def replace_vectors(
+        self,
+        chunk_id: str,
+        content_embedding: List[float],
+        trigger_embedding: List[float],
+    ) -> None:
+        """原子替换双向量;失败时保留旧值."""
+        self.conn.execute("SAVEPOINT replace_vectors")
+        try:
+            self.delete_vec_content(chunk_id)
+            self.delete_vec_trigger(chunk_id)
+            self.insert_vec_content(chunk_id, content_embedding)
+            self.insert_vec_trigger(chunk_id, trigger_embedding)
+            self.conn.execute("RELEASE SAVEPOINT replace_vectors")
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT replace_vectors")
+            self.conn.execute("RELEASE SAVEPOINT replace_vectors")
+            raise
+
     # ------------------------------------------------------------------
     # usage_trace
     # ------------------------------------------------------------------
@@ -369,10 +453,18 @@ class Storage:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def insert_dep(self, src: str, dst: str, kind: str = "hard") -> None:
+    def insert_dep(
+        self,
+        src: str,
+        dst: str,
+        kind: str = "hard",
+        dst_lib: str | None = None,
+        dst_ref: str | None = None,
+    ) -> None:
         self.conn.execute(
-            "INSERT OR IGNORE INTO deps(src, dst, kind) VALUES (?, ?, ?)",
-            (src, dst, kind),
+            """INSERT OR IGNORE INTO deps(src, dst, kind, dst_lib, dst_ref)
+               VALUES (?, ?, ?, ?, ?)""",
+            (src, dst, kind, dst_lib, dst_ref),
         )
 
     # ------------------------------------------------------------------
@@ -407,10 +499,19 @@ class Storage:
             """INSERT OR IGNORE INTO chunk_success_traces(chunk_id, trace_id, ts)
                SELECT u.chunk_id, u.trace_id, MAX(u.ts)
                FROM usage_trace u
-               JOIN usage_trace t ON t.trace_id = u.trace_id AND t.event = 'task_ok'
                WHERE u.event = 'used'
-                 AND u.ts > ?
-                 AND u.ts <= ?
+                 AND u.ts >= ?
+                 AND u.ts < ?
+                 AND (
+                   EXISTS (
+                     SELECT 1 FROM usage_trace t
+                     WHERE t.trace_id = u.trace_id AND t.event = 'task_ok'
+                   )
+                   OR EXISTS (
+                     SELECT 1 FROM episodic_log l
+                     WHERE l.trace_id = u.trace_id AND l.outcome = 'ok'
+                   )
+                 )
                GROUP BY u.chunk_id, u.trace_id""",
             (last_ts, cutoff_ts),
         )
@@ -422,16 +523,16 @@ class Storage:
                selected_count = selected_count + (
                  SELECT COUNT(*) FROM usage_trace
                  WHERE chunk_id = chunks.id AND event='selected'
-                   AND ts > ? AND ts <= ?
+                   AND ts >= ? AND ts < ?
                ),
                used_count = used_count + (
                  SELECT COUNT(*) FROM usage_trace
                  WHERE chunk_id = chunks.id AND event='used'
-                   AND ts > ? AND ts <= ?
+                   AND ts >= ? AND ts < ?
                )
                WHERE id IN (
                  SELECT DISTINCT chunk_id FROM usage_trace
-                 WHERE ts > ? AND ts <= ? AND chunk_id IS NOT NULL
+                 WHERE ts >= ? AND ts < ? AND chunk_id IS NOT NULL
                )""",
             (last_ts, cutoff_ts, last_ts, cutoff_ts, last_ts, cutoff_ts),
         )
@@ -485,7 +586,7 @@ class Storage:
     def purge_usage_trace(self, cutoff_ts: str) -> int:
         cur = self.conn.execute(
             """DELETE FROM usage_trace
-               WHERE ts <= ?
+               WHERE ts < ?
                  AND NOT (
                    event='retrieved'
                    AND chunk_id IN (SELECT id FROM chunks WHERE origin='spark')

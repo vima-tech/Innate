@@ -49,6 +49,10 @@ class NullRefiner(Refiner):
 class Distiller(ABC):
     """蒸馏器(从 episodic_log 提炼 chunk dict)."""
 
+    def screen(self, log: Dict[str, Any]) -> bool:
+        """廉价初筛:False 表示原料不值得进入提炼步骤."""
+        return True
+
     @abstractmethod
     def distill(
         self,
@@ -64,6 +68,9 @@ class Distiller(ABC):
 
 class HeuristicDistiller(Distiller):
     """默认蒸馏器:启发式,无 LLM. 用 output_summary / query 直接提炼."""
+
+    def screen(self, log: Dict[str, Any]) -> bool:
+        return bool(log.get("output_summary") or log.get("query"))
 
     def distill(
         self,

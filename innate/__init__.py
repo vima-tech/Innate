@@ -15,6 +15,7 @@ from innate.core import (
     KnowledgeBase,
     OutcomeConflictError,
     RecallResult,
+    VectorStore,
 )
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "CurateReport",
     "EmbeddingProvider",
     "DummyEmbeddingProvider",
+    "VectorStore",
     "InnateError",
     "EmbeddingUnavailable",
     "OutcomeConflictError",

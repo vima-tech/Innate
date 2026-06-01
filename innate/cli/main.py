@@ -1,4 +1,4 @@
-"""CLI Adapter — SDK Public API 的 1:1 薄封装."""
+"""CLI Adapter — SDK Public API 的薄封装."""
 
 from __future__ import annotations
 
@@ -39,13 +39,18 @@ def cli(ctx: click.Context, db: str | None):
 @click.option("--top", default=None, type=int, help="最多返回 N 个块")
 @click.option("--include-sparks", is_flag=True, help="包含相关灵感")
 @click.option("--format", "fmt", default="text", type=click.Choice(["text", "json", "prompt"]))
-@click.option("--expand-deps", default="False", help="依赖展开: False | direct | closure")
+@click.option(
+    "--expand-deps",
+    default="false",
+    type=click.Choice(["false", "direct", "closure"], case_sensitive=False),
+    help="依赖展开: false | direct | closure",
+)
 @click.pass_context
 def recall(ctx, query, budget, top, include_sparks, fmt, expand_deps):
     """召回知识."""
     kb = get_kb(ctx.obj.get("db"))
     expand = expand_deps
-    if expand_deps.lower() in ("false", "0", "no"):
+    if expand_deps.lower() == "false":
         expand = False
     elif expand_deps.lower() == "direct":
         expand = "direct"
@@ -64,13 +69,16 @@ def recall(ctx, query, budget, top, include_sparks, fmt, expand_deps):
     )
 
     if fmt == "json":
+        chunks = [
+            {"id": c["id"], "content": c["content"], "confidence": c.get("confidence")}
+            for c in result.knowledge
+        ]
         out = {
             "trace_id": result.trace_id,
             "empty": result.empty,
-            "knowledge": [
-                {"id": c["id"], "content": c["content"], "confidence": c.get("confidence")}
-                for c in result.knowledge
-            ],
+            "selected": [c["id"] for c in result.knowledge],
+            "chunks": chunks,
+            "knowledge": chunks,
             "sparks": [
                 {"id": c["id"], "content": c["content"]} for c in result.sparks
             ],
@@ -104,25 +112,29 @@ def recall(ctx, query, budget, top, include_sparks, fmt, expand_deps):
 # ------------------------------------------------------------------
 @cli.command()
 @click.argument("trace_id")
+@click.option("--query", default=None, help="无 recall 预写行时的任务描述")
 @click.option("--outcome", default=None, type=click.Choice(["ok", "fail", "unknown"]))
 @click.option("--output-summary", default=None)
 @click.option("--used", default=None, help="逗号分隔 chunk_id")
 @click.option("--feedback", default=None, type=click.Choice(["up", "down"]))
 @click.option("--nomination", default=None)
+@click.option("--priority", default=0, type=int, help="蒸馏队列优先级")
 @click.option("--source", default="cli", type=click.Choice(["cli", "hook", "daemon", "augmented"]))
 @click.pass_context
-def record(ctx, trace_id, outcome, output_summary, used, feedback, nomination, source):
+def record(ctx, trace_id, query, outcome, output_summary, used, feedback, nomination, priority, source):
     """补全 trace."""
     kb = get_kb(ctx.obj.get("db"))
     used_list = used.split(",") if used else None
     try:
         kb.record(
             trace_id,
+            query=query,
             outcome=outcome,
             output_summary=output_summary,
             used=used_list,
             feedback=feedback,
             nomination=nomination,
+            priority=priority,
             source=source,
         )
         click.echo("✅ recorded")
@@ -201,12 +213,20 @@ def restore(ctx, chunk_id):
 @click.option("--kind", default="note", type=click.Choice(["note", "skill"]))
 @click.option("--trigger", default=None)
 @click.option("--anti-trigger", default=None)
+@click.option("--skill-name", default=None)
 @click.option("--source", default="manual", type=click.Choice(["chat", "manual", "doc", "agent"]))
 @click.pass_context
-def add(ctx, content, kind, trigger, anti_trigger, source):
+def add(ctx, content, kind, trigger, anti_trigger, skill_name, source):
     kb = get_kb(ctx.obj.get("db"))
-    cid = kb.add(content, kind=kind, trigger_desc=trigger, anti_trigger_desc=anti_trigger, source=source)
-    click.echo(f"✅ added {cid}")
+    cid = kb.add(
+        content,
+        kind=kind,
+        trigger_desc=trigger,
+        anti_trigger_desc=anti_trigger,
+        source=source,
+        skill_name=skill_name,
+    )
+    click.echo(f"✅ added {cid}" if cid else "⚠️ discarded by sanitize")
 
 
 @cli.command()
@@ -218,7 +238,7 @@ def spark(ctx, content, trigger, anti_trigger):
     """记录灵感."""
     kb = get_kb(ctx.obj.get("db"))
     cid = kb.spark(content, trigger_desc=trigger, anti_trigger_desc=anti_trigger)
-    click.echo(f"💡 spark {cid}")
+    click.echo(f"💡 spark {cid}" if cid else "⚠️ discarded by sanitize")
 
 
 @cli.command("promote-spark")
@@ -239,6 +259,16 @@ def drop_spark(ctx, spark_id, reason):
     kb = get_kb(ctx.obj.get("db"))
     kb.drop_spark(spark_id, reason=reason)
     click.echo("🗑️ dropped")
+
+
+@cli.command("mature-spark")
+@click.argument("spark_id")
+@click.option("--to", required=True, type=click.Choice(["sprouting", "incubating"]))
+@click.pass_context
+def mature_spark(ctx, spark_id, to):
+    kb = get_kb(ctx.obj.get("db"))
+    kb.mature_spark(spark_id, to=to)
+    click.echo(f"✅ spark maturity={to}")
 
 
 # ------------------------------------------------------------------
@@ -270,8 +300,22 @@ def _inspect_detail(kb, target: str) -> None:
     if "chunk" in info:
         cid = info["chunk"]["id"]
         state = info["chunk"]["state"]
+        origin = info["chunk"]["origin"]
+        maturity = info["chunk"].get("maturity")
         click.echo("")
         click.echo("── 相关操作 ──")
+        if origin == "spark":
+            if state == "archived":
+                click.echo(f"  → innate restore {cid}       # 恢复被作废的 spark")
+            elif maturity not in ("promoted", "dropped"):
+                if maturity == "seed":
+                    click.echo(f"  → innate mature-spark {cid} --to sprouting")
+                if maturity in ("seed", "sprouting"):
+                    click.echo(f"  → innate mature-spark {cid} --to incubating")
+                click.echo(f"  → innate promote-spark {cid} --to note|skill")
+                click.echo(f"  → innate drop-spark {cid} --reason '...'")
+                click.echo(f"  → innate invalidate {cid} --reason '...' # 立即作废")
+            return
         if state == "pending":
             click.echo(f"  → innate approve {cid}      # 批准晋升为 active")
         if state == "active":
@@ -323,7 +367,8 @@ def _inspect_library(kb) -> None:
     # 4. stale screening
     stale = info["stale_screening"]
     if stale:
-        click.echo(f"🔴 stale screening    {stale} 条日志卡死 (> 30min)")
+        timeout = info["curate_params"]["screening_timeout_minutes"]
+        click.echo(f"🔴 stale screening    {stale} 条日志卡死 (> {timeout}min)")
         click.echo(f"   → 建议执行: innate evolve --trigger manual  触发 Curate 清理")
 
     # 5. distill 成本

@@ -30,7 +30,7 @@ innate recall "<core task intent>" --top 5 --format json
 # Extract trace_id from JSON output, inject recalled chunks into context.
 # High-confidence chunks are hard constraints; low-confidence are soft guidance.
 
-# Alternative — direct system-prompt injection (no trace_id needed):
+# Alternative — direct system-prompt injection:
 innate recall "<core task intent>" --top 5 --format prompt
 # The prompt output embeds <!-- innate_trace_id: xxx --> for later extraction.
 ```
@@ -48,7 +48,7 @@ innate record <trace_id> --outcome fail
 ### Capture a structured insight
 
 ```bash
-# Confirmed knowledge (human has reviewed and approved):
+# Agent-synthesised insight after the user confirms capture:
 innate add "<insight>" --kind note --trigger "<when to recall this>" --source agent
 # Always writes pending — awaits human approve or auto-promotion via Evolve rules.
 
@@ -66,7 +66,9 @@ innate inspect                    # Health check: debt ratio, stale screening, e
 
 ## Safety Rails
 
-- **Never** run `innate invalidate` or `innate archive` — human governance only.
+- **Never** run `innate approve`, `innate archive`, `innate invalidate`, `innate restore`,
+  `innate mature-spark`, `innate promote-spark`, or `innate drop-spark` unless the human
+  explicitly requests that exact governance action.
 - `innate add --source agent` is always `pending`; bypassing review is prohibited.
 - On `exit_code != 0`: read stderr, retry once with correction. If still failing — **abandon and continue the main task**. Innate is auxiliary; knowledge failures must never block the agent.
 - Never mark agent-synthesised experience as high-confidence without human verification.

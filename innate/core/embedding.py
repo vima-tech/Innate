@@ -35,7 +35,7 @@ class EmbeddingProvider(ABC):
 
 
 class DummyEmbeddingProvider(EmbeddingProvider):
-    """占位实现:生成随机向量(仅用于测试/无网络环境)."""
+    """确定性的本地基线实现:用于测试和无网络环境."""
 
     def __init__(self, content_dim: int = 1024, trigger_dim: int = 256, seed: int = 42):
         self._content_dim = content_dim

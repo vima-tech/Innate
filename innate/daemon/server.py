@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import logging.handlers
 import os
@@ -12,7 +13,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 from innate.core.utils import utc_now_iso
 
@@ -43,6 +44,7 @@ class DaemonServer:
         self.log_backup_count = log_backup_count
         self.state_db = Path(state_db) if state_db else DEFAULT_STATE_DB
         self._running = False
+        self._error_streaks: Dict[tuple[str, str], int] = {}
 
     def _init_state_db(self) -> None:
         self.state_db.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +62,11 @@ class DaemonServer:
                 trace_id   TEXT,
                 event_type TEXT,
                 ts         TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trace_context (
+                watch_path TEXT PRIMARY KEY,
+                trace_id   TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
         """)
         conn.close()
@@ -91,7 +98,7 @@ class DaemonServer:
         self.logger = self._setup_logging()
         self.logger.info("Daemon starting")
 
-        # daemonize (简化:后台运行)
+        # 出生版使用单次 fork 进入后台运行.
         pid = os.fork()
         if pid > 0:
             self.pid_file.write_text(str(pid))
@@ -169,24 +176,48 @@ class DaemonServer:
         event_id = hashlib.sha256(
             f"{file_path}:{inode}:{offset}:{line}".encode()
         ).hexdigest()[:16]
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("event_type"):
+            self._handle_hook_event(payload, event_id, watch_path, conn)
+            return
+
         row = conn.execute("SELECT 1 FROM processed_events WHERE event_id=?", (event_id,)).fetchone()
         if row:
             return
 
-        # 简单模式匹配
+        trace_match = re.search(r"innate_trace_id\s*[:=]\s*([A-Za-z0-9_-]+)", line)
+        if trace_match:
+            self._set_active_trace(conn, watch_path, trace_match.group(1))
+
+        # 简单模式匹配 + 连续同类异常
         outcome = None
         if (
             any(k in line for k in ("Build successful", "Tests passed"))
             or re.search(r"✓\s*(?:\[\d+\]|\d+)?\s*passed", line)
         ):
             outcome = "ok"
+            self._reset_error_streaks(watch_path)
         elif any(k in line for k in ("SyntaxError", "Error:", "FAIL")):
             outcome = "fail"
+            self._reset_error_streaks(watch_path)
+        else:
+            error_match = re.search(r"\b([A-Za-z_][\w.]*(?:Error|Exception))\b", line)
+            if error_match:
+                key = (watch_path, error_match.group(1))
+                self._reset_error_streaks(watch_path, except_error=error_match.group(1))
+                self._error_streaks[key] = self._error_streaks.get(key, 0) + 1
+                if self._error_streaks[key] >= 3:
+                    outcome = "fail"
+            else:
+                self._reset_error_streaks(watch_path)
 
-        trace_id = None
+        trace_id = self._get_active_trace(conn, watch_path)
         event_type = outcome or "unknown"
         if outcome:
-            trace_id = self._ensure_trace(event_id)
+            trace_id = trace_id or self._ensure_trace(event_id)
             cmd = [
                 "innate", "--db", self.db_path, "record", trace_id,
                 "--outcome", outcome, "--source", "daemon",
@@ -200,13 +231,117 @@ class DaemonServer:
             (event_id, watch_path, trace_id, event_type, utc_now_iso()),
         )
 
+    def _handle_hook_event(
+        self,
+        payload: Dict[str, Any],
+        fallback_event_id: str,
+        watch_path: str,
+        conn: sqlite3.Connection,
+    ) -> None:
+        """处理 Hook JSON 行并映射到 CLI."""
+        event_id = str(payload.get("event_id") or fallback_event_id)
+        if conn.execute(
+            "SELECT 1 FROM processed_events WHERE event_id=?", (event_id,)
+        ).fetchone():
+            return
+
+        event_type = str(payload["event_type"])
+        trace_id = payload.get("trace_id") or self._get_active_trace(conn, watch_path)
+        ok = True
+
+        if event_type == "session_start":
+            query = str(payload.get("query") or "")
+            result = self._run_cli_result(
+                ["innate", "--db", self.db_path, "recall", query, "--format", "prompt"]
+            )
+            ok = result is not None
+            if result:
+                trace_id = self._extract_trace_id(result.stdout) or trace_id
+                if result.stdout:
+                    self.logger.info("session_start recall prompt:\n%s", result.stdout)
+            if trace_id:
+                self._set_active_trace(conn, watch_path, str(trace_id))
+        elif event_type == "session_end":
+            ok = self._run_cli(
+                ["innate", "--db", self.db_path, "evolve", "--trigger", "manual"]
+            )
+            self._clear_active_trace(conn, watch_path)
+        elif event_type in ("tool_success", "tool_error", "user_feedback"):
+            trace_id = trace_id or self._ensure_trace(event_id)
+            cmd = ["innate", "--db", self.db_path, "record", str(trace_id)]
+            outcome = payload.get("outcome")
+            if event_type == "tool_success":
+                outcome = outcome or "ok"
+            elif event_type == "tool_error":
+                outcome = outcome or "fail"
+            if outcome:
+                cmd.extend(["--outcome", str(outcome)])
+            if payload.get("query"):
+                cmd.extend(["--query", str(payload["query"])])
+            if payload.get("output_summary"):
+                cmd.extend(["--output-summary", str(payload["output_summary"])])
+            if payload.get("used"):
+                cmd.extend(["--used", ",".join(map(str, payload["used"]))])
+            if payload.get("nomination"):
+                cmd.extend(["--nomination", str(payload["nomination"])])
+            if payload.get("priority") is not None:
+                cmd.extend(["--priority", str(payload["priority"])])
+            feedback = payload.get("feedback") or (payload.get("metadata") or {}).get("feedback")
+            if feedback:
+                cmd.extend(["--feedback", str(feedback)])
+            cmd.extend(["--source", "daemon"])
+            ok = self._run_cli(cmd)
+
+        stored_event_type = event_type if ok else f"{event_type}_error"
+        conn.execute(
+            """INSERT INTO processed_events(event_id, watch_path, trace_id, event_type, ts)
+               VALUES (?, ?, ?, ?, ?)""",
+            (event_id, watch_path, trace_id, stored_event_type, utc_now_iso()),
+        )
+
+    @staticmethod
+    def _extract_trace_id(output: str) -> str | None:
+        match = re.search(r"<!--\s*innate_trace_id:\s*([A-Za-z0-9_-]+)\s*-->", output)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _get_active_trace(conn: sqlite3.Connection, watch_path: str) -> str | None:
+        row = conn.execute(
+            "SELECT trace_id FROM trace_context WHERE watch_path=?", (watch_path,)
+        ).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _set_active_trace(conn: sqlite3.Connection, watch_path: str, trace_id: str) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO trace_context(watch_path, trace_id, updated_at)
+               VALUES (?, ?, ?)""",
+            (watch_path, trace_id, utc_now_iso()),
+        )
+
+    @staticmethod
+    def _clear_active_trace(conn: sqlite3.Connection, watch_path: str) -> None:
+        conn.execute("DELETE FROM trace_context WHERE watch_path=?", (watch_path,))
+
+    def _reset_error_streaks(
+        self, watch_path: str, except_error: str | None = None
+    ) -> None:
+        """仅保留当前文件当前异常类，确保计数表达连续出现."""
+        for key in list(self._error_streaks):
+            if key[0] == watch_path and key[1] != except_error:
+                del self._error_streaks[key]
+
     def _run_cli(self, cmd: List[str]) -> bool:
         """调用 CLI,失败后退避重试一次."""
+        return self._run_cli_result(cmd) is not None
+
+    def _run_cli_result(self, cmd: List[str]) -> subprocess.CompletedProcess[str] | None:
+        """调用 CLI,成功时返回结果;失败后退避重试一次."""
         for attempt in range(2):
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if result.returncode == 0:
-                    return True
+                    return result
                 self.logger.error(
                     f"CLI failed ({result.returncode}): {result.stderr.strip()}"
                 )
@@ -214,7 +349,7 @@ class DaemonServer:
                 self.logger.error(f"CLI failed: {exc}")
             if attempt == 0:
                 time.sleep(0.1)
-        return False
+        return None
 
     def _ensure_trace(self, event_id: str) -> str:
         # Daemon 捕获事件没有上游 trace 时,以 event_id 生成稳定代理.
@@ -253,10 +388,13 @@ class DaemonServer:
             "SELECT COUNT(*) FROM processed_events WHERE event_type LIKE '%_error'"
         ).fetchone()[0]
         last_row = conn.execute("SELECT MAX(ts) FROM processed_events").fetchone()
-        watches = conn.execute("SELECT COUNT(*) FROM watch_state").fetchone()[0]
+        watch_rows = conn.execute(
+            "SELECT watch_path FROM watch_state ORDER BY watch_path"
+        ).fetchall()
         conn.close()
         last = last_row[0] if last_row and last_row[0] else "-"
+        files = ",".join(row[0] for row in watch_rows) or "-"
         return (
-            f"running (pid={pid}, watches={watches}, processed={processed}, "
-            f"last={last}, errors={errors})"
+            f"running (pid={pid}, watches={len(watch_rows)}, files={files}, "
+            f"processed={processed}, last={last}, errors={errors})"
         )
