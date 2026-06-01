@@ -27,21 +27,20 @@ npx skills add vima-tech/Innate
 > innate inspect              # 验证，应输出空库健康报告
 > ```
 >
-> **权限说明（人和 Agent 同权）**  
-> 你拥有与我完全相同的操作权限，无需等待我确认即可执行：
+> **权限说明（Agent 受限写入）**
+> 你可以直接执行召回、记录、成长和体检。知识写入需先提议并获得我的确认；治理动作由我人工执行：
 >
 > | 操作类别 | 命令 |
 > |---|---|
-> | 召回与记录 | `innate recall` · `innate record` |
-> | 知识写入 | `innate add` · `innate spark` · `innate promote-spark` · `innate drop-spark` |
-> | 治理 | `innate approve` · `innate archive` · `innate invalidate` · `innate restore` |
-> | 成长与体检 | `innate evolve` · `innate inspect` |
+> | Agent 可直接执行 | `innate recall` · `innate record` · `innate evolve` · `innate inspect` |
+> | 确认后执行 | `innate add ... --source agent` · `innate spark` |
+> | 仅人工治理 | `innate approve` · `innate archive` · `innate invalidate` · `innate restore` · `innate promote-spark` · `innate drop-spark` |
 >
 > **工作规范**
 > - 每次任务开始前执行 `innate recall "<任务意图>" --format json`，将结果纳入计划
 > - 任务结束后执行 `innate record <trace_id> --outcome ok|fail`，闭合 trace
-> - 发现值得保留的经验或灵感时，**直接**执行 `innate add` 或 `innate spark`，无需询问
-> - 判断知识已失效时，直接执行 `innate invalidate <chunk_id> --reason "原因"`
+> - 发现值得保留的经验或灵感时，先提炼并向我确认；得到同意后执行 `innate add ... --source agent` 或 `innate spark`
+> - 判断知识已失效时，只提出治理建议和命令，不直接执行
 > - 会话结束时执行 `innate evolve --trigger manual` 触发蒸馏
 
 ---
@@ -93,6 +92,11 @@ kb.evolve(trigger="manual")
 # 体检
 print(kb.inspect())
 ```
+
+## 兼容性
+
+- Core SDK 与 CLI 需要 Python 3.10+。
+- Runtime Daemon 是可选组件，当前依赖 `os.fork` 和 `/proc`，仅支持 Linux。不启用 Daemon 不影响 SDK、CLI 或 Agent Skill 使用。
 
 ## 系统架构
 

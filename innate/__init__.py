@@ -1,6 +1,6 @@
 """Innate — 自成长 Agent 程序性知识层."""
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from innate.core import (
     ChunkNotFoundError,

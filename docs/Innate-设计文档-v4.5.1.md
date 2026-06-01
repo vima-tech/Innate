@@ -1774,6 +1774,8 @@ innate daemon status [--state-db <path>]
 
 Daemon 是**外部可选进程**,独立于 SDK core。不安装 Daemon 不影响 Core SDK + CLI 正常使用。Daemon 的全部动作都通过 CLI Public API 完成——它不直接操作 DB,不拥有知识逻辑。
 
+**平台边界**:内置 Daemon 当前依赖 `os.fork` 和 `/proc`,基线仅支持 Linux。非 Linux 环境继续使用 Core SDK + CLI,或替换为平台原生 Runtime adapter。
+
 **Daemon 的职责边界**:
 - ✅ 监听日志目录 / Hook event 文件 / stdout 捕获
 - ✅ 正则/规则匹配事件模式后调 CLI
