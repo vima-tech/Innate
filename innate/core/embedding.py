@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 from abc import ABC, abstractmethod
 from typing import List
@@ -39,7 +40,7 @@ class DummyEmbeddingProvider(EmbeddingProvider):
     def __init__(self, content_dim: int = 1024, trigger_dim: int = 256, seed: int = 42):
         self._content_dim = content_dim
         self._trigger_dim = trigger_dim
-        self._rng = random.Random(seed)
+        self._seed = seed
 
     @property
     def content_dim(self) -> int:
@@ -50,7 +51,8 @@ class DummyEmbeddingProvider(EmbeddingProvider):
         return self._trigger_dim
 
     def _vec(self, text: str, dim: int) -> List[float]:
-        rng = random.Random(hash(text) & 0xFFFFFFFF)
+        digest = hashlib.sha256(f"{self._seed}:{text}".encode("utf-8")).digest()
+        rng = random.Random(int.from_bytes(digest[:8], "big"))
         vec = [rng.uniform(-1.0, 1.0) for _ in range(dim)]
         norm = sum(x * x for x in vec) ** 0.5
         if norm == 0:

@@ -1,6 +1,6 @@
 # Innate —— 自成长 Agent 程序性知识层 · 完整系统设计 v4.5.1
 
-**版本 v4.5.1 · 状态:编码基线冻结(含实现契约补全) · 最近补全:Storage 迁移验证 SQL、CLI inspect 输出格式与建议命令、Core Recall/Curate 魔法数字抽为 meta 可配参数、Runtime Daemon 日志轮转方案、Safety sanitize 默认正则规则与关闭选项;无架构改动;此后进入实现**
+**版本 v4.5.1 · 状态:编码基线冻结并完成实现校准 · 最近校准:Recall/Spark 观测闭环、Curate 顺序与 Scope、动态向量维度注入、CLI trace 详情路由、Runtime Daemon 每文件偏移与失败重试;无架构改动**
 
 > 一句话定位:一个**可嵌入可外挂、自成长、引擎可换**的 agent 程序性知识层系统。
 > 它不做编排(对 LangGraph / Claude Code / 裸 API 中立),只解一件事——
@@ -429,7 +429,7 @@ invalidate 是"人的一票否决",和 capture(人确认存入)是对偶——�
 ```
 collect logs → screen(廉价模型判是否值得学) → distill → write pending
 ```
-蒸馏输出必须含:`content` / `trigger_desc` / `anti_trigger_desc` / `confidence` / `source_log_id`。
+Distiller 输出必须含:`content` / `trigger_desc` / `anti_trigger_desc`。管线统一补齐 `confidence` 和 `source_log_id(distilled_from)`，避免把门禁逻辑下放给可替换 Distiller。
 不做:validate/score/shadow/promote 多阶段流水线——晋升靠 §二·五 的简单规则。
 
 ### Curate:内置七件事(可整体替换,非插件列表)
@@ -437,7 +437,7 @@ collect logs → screen(廉价模型判是否值得学) → distill → write pe
 1. archive   低 confidence(低于阈值 + 久未用)
 2. archive   never_used(used_count=0 且 selected_count=0 且 age>30d)
              repeated_selected_unused(selected≥10 且 used=0 且 confidence<0.5)
-3. dedupe    content_hash 相同 → 保留 confidence 高或 protected 的;其余 archived(duplicate),parent_id 指向 canonical
+3. dedupe    content_hash 相同 → 保留 confidence 高或 protected 的;其余 archived(duplicate),parent_id 指向 canonical;spark 永不参与
 4. decay     久未召回的 confidence 时间衰减
 5. cycle     依赖图环检测(仅当启用了依赖能力时才运行)
 6. **aggregate**  开始时固定 cutoff_ts(本轮截止时间戳),所有聚合用闭区间 ts > last_agg_ts AND ts <= cutoff_ts(v4.5.1:防漏计 race);
@@ -448,7 +448,8 @@ collect logs → screen(廉价模型判是否值得学) → distill → write pe
 7. **purge_logs**  开头先做 stale screening 超时恢复(distill_locked_at 超 30 分钟的 screening 行改 failed);
                物理删 distill_state∈(distilled,discarded,failed) 且 ts>30天 的 episodic_log;
                **open 行兜底**:ts 超过 TTL(默认7天)且仍为 open 的行改 discarded(reason='no_record_timeout')——防僵尸 open 行积压;
-               删 ts≤meta.last_agg_ts(即 cutoff_ts)的 usage_trace 明细(先聚合后purge,只删已聚合窗口内的明细)
+               删 ts≤meta.last_agg_ts(即 cutoff_ts)的 usage_trace 明细(先聚合后purge,只删已聚合窗口内的明细);
+               **例外**:spark 的 retrieved 明细保留,作为软孵化累计唤起次数的事实来源
 ```
 
 **计数一致性(v3.4 裁决)**:`selected_count`/`used_count` **不在 record 时同步更新**(避免热门块的"读-改-写"行锁竞争,保 record 纯 append 铁律),改由异步 aggregate 阶段批量聚合。purge 严格在 aggregate 之后、且只删已聚合(ts≤last_agg_ts)的明细——实测先聚合后 purge 计数不丢。Curate 判定直接读物化计数器,不扫 trace。
@@ -578,7 +579,7 @@ kb.drop_spark(spark_id, reason="...")   # 明确放弃 → maturity=dropped(不�
 
 ### 软孵化:反复浮现 → 提示,不自动升级(v3.8)
 有人会想"灵感被关联/唤起够多次就自动升 maturity"。**本版明确不做自动升级**:关联多 ≠ 成熟,常常只是这个灵感涉及面广,自动升会把"广而浅"误判成"熟"。改为更克制的**软孵化**:
-- `inspect()` 统计每个 spark 被 `include_sparks` **唤起的累计次数**——复用 usage_trace 的召回事件计数(唤起的 spark 记一条 `retrieved` trace,chunk_id=spark_id),**零新增结构**。
+- `inspect()` 统计每个 spark 被 `include_sparks` **唤起的累计次数**——复用 usage_trace 的召回事件计数(唤起的 spark 记一条 `retrieved` trace,chunk_id=spark_id),**零新增结构**。Curate purge 明确保留这类事实行，避免累计次数被清零。
 - 累计次数超阈值时**仅提示**:"💡 这个灵感反复浮现,要不要看看 / 考虑孵化",不自动改 maturity。
 - 是否 `promote_spark` 仍由人拍板——延续"**自动检测、人工裁定**"的一贯原则,系统绝不替你升级一个还没想清楚的想法。
 
@@ -613,7 +614,7 @@ kb.drop_spark(spark_id, reason="...")   # 明确放弃 → maturity=dropped(不�
 
 ---
 
-## 四、数据 Schema(核心路径已沙箱验证；v4.4/v4.5 新增路径需实现测试覆盖)
+## 四、数据 Schema(核心路径与 v4.4/v4.5 新增路径均已回归覆盖)
 
 ### 主库(单库单文件,WAL;chunks + deps + usage_trace + episodic_log 同库)
 - `meta` — 库元信息:lib_id / lib_role(personal|shared) / **schema_version** / content_dim / trigger_dim / embed_model / embed_version
@@ -724,6 +725,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.5.1');
 -- ⚠️ 时间格式统一约定(v4.5.1):全库所有 TEXT 时间字段统一使用 ISO 8601 UTC 格式
 --    精度统一为毫秒: YYYY-MM-DDTHH:MM:SS.mmmZ  (三位毫秒,不多不少)
 --    正确(SQL内): strftime('%Y-%m-%dT%H:%M:%fZ','now')  → "2024-01-15T08:30:00.000Z"
@@ -925,7 +927,7 @@ CREATE INDEX IF NOT EXISTS idx_log_screening_locked
   WHERE distill_state = 'screening';
 ```
 
-> 维度注入:`float[1024]` / `float[256]` 为占位,建库时按 `meta` 的 `content_dim` / `trigger_dim` 替换。
+> 维度注入:`float[1024]` / `float[256]` 为占位,新建库时按 EmbeddingProvider 的 `content_dim` / `trigger_dim` 替换并写入 `meta`。已有库若 provider 维度不匹配则明确报错，不能等到向量查询时静默失败。
 
 ### aggregate 阶段更新新字段(v4.1/v4.2)
 
@@ -1336,7 +1338,7 @@ CLI 不传 query/recall_snapshot（recall 阶段已写入），也不传 retriev
 它只负责"召回注入"和"基础 trace(retrieved/selected)"的自动记录。**任务成败和用户反馈是异步后置的,装饰器不能魔法般得知**,必须靠返回值约定或显式补 record 闭环。避免开发者对装饰器产生"全托管"的错误预期。
 
 ### inspect() 的五个健康信号
-1. **知识债务比(Knowledge Debt Ratio)** — `(pending 数 + 僵尸块数) / 有效总数`。僵尸块 = confidence [0.4, 0.6] 的块。比率走高 = 蒸馏进得多、晋升/淘汰跟不上。
+1. **知识债务比(Knowledge Debt Ratio)** — `(pending 数 + 僵尸块数) / 有效总数`。僵尸块 = confidence [0.4, 0.6] 的块。spark 完全排除，不进入分子或分母。比率走高 = 蒸馏进得多、晋升/淘汰跟不上。
 2. **反复浮现的灵感提示** — spark 被唤起累计次数超阈值时提示"💡 要不要看看"。
 3. **embed 重建状态** — `X chunks pending embed rebuild`(embed_version=0 或落后 meta 的块数)。
 4. **本周期 Distill 预估成本** — `distill_prompt_tokens` + `distill_completion_tokens` 汇总。
@@ -1380,7 +1382,7 @@ innate inspect
 EmbeddingProvider   嵌入模型(可换)
 VectorStore         存储后端(sqlite-vec 默认,libSQL 预留——地基#2)
 Refiner             在线精炼器(默认关闭;启用时提供 trim/adapt 实现)
-Distiller           蒸馏器(默认 LLM 提炼)
+Distiller           蒸馏器(出生版本默认启发式提炼;可注入 LLM 实现)
 Curator             清理器(默认内置最小集;复杂治理整体替换,见 §二·六)
 ```
 存储接口保持最小:`search_vectors / get_chunks / write_chunk / append_trace / update_state`。
@@ -1439,7 +1441,7 @@ Curator             清理器(默认内置最小集;复杂治理整体替换,见
 | 库为空(冷启动) | recall 返回空 context + 明确标志位 `empty=True` | 优雅空返回,不报错 |
 | CTE 触达深度上限(hard dep 闭包不完整) | **丢弃该 seed/block**，写一条 `skipped(reason="dep_depth_limit")` 到 usage_trace；不送半截 hard 依赖进 context | 宁可不召回，不给半截依赖 |
 | embed 版本不一致(陈旧向量) | Recall 跳过 `embed_version < meta.embed_version` 的块 + inspect 提示 pending rebuild 数量;重建期间结果偏少但不阻塞 | 不阻塞,可后台重建 |
-| Hook 重复触发(同一事件被多次调用) | Daemon 以 `event_id`(日志行 hash + 时间戳)去重,已处理 event_id 跳过;框架原生 Hook 依赖 agent 框架的幂等保障;`innate record` 对同 trace_id 多次调用是安全的(只追加,不覆盖) | event_id 幂等,多次写 trace 无害 |
+| Hook 重复触发(同一事件被多次调用) | Daemon 以 `event_id`(日志行 hash + 文件 inode + offset)去重,已处理 event_id 跳过;框架原生 Hook 依赖 agent 框架的幂等保障;`innate record` 对同 trace_id 的同 outcome 重复调用幂等 | event_id 幂等,多次写 trace 无害 |
 | Daemon 进程崩溃 | CLI 调用失败不阻塞主 Agent;Daemon 独立重启后从 `last_processed_offset` 继续,不重放已处理事件 | 知识层失败不等于任务失败 |
 
 **空库冷启动**:新建知识库默认空,recall 返回空集而非异常。建议接入时先 `kb.add(pack, kind="skill")` 导入现成包作为起点,避免"上来就没货"的体验。
@@ -1725,7 +1727,8 @@ innate recall "<query>" [--budget 6000] [--top N] [--include-sparks]
 #                  若 Agent/框架无法解析注释块,则 --format prompt 不承担 trace 交接,
 #                  后续需改用 --format json 再调 innate record
 # --format text  : 纯文本,仅供人阅读,不输出 trace_id(不用于机器集成)
-# --top N        : 最多返回 N 个召回块(默认不限,由 --budget 控制截止)
+# --top N        : 最多返回 N 个召回 seed(默认不限,由 --budget 控制截止);
+#                  开启 hard deps 时依赖闭包不受 N 截断,闭包完整优先
 
 # ── 写日志 ──────────────────────────────────────────────────
 # trace_id 由上游 recall 产生(--format json 时输出);CLI 不需传 retrieved/selected
@@ -1757,9 +1760,10 @@ innate drop-spark <spark_id>    [--reason "..."]
 innate inspect [<chunk_id>|<trace_id>]   # 无参数 = 库体检
 
 # ── Daemon 控制 ───────────────────────────────────────────────
-innate daemon start [--watch <log_dir>] [--db <path>] [--pid-file <path>]
+innate daemon start [--watch <log_dir>]... [--db <path>] [--pid-file <path>]
+                    [--state-db <path>] [--log-file <path>]
 innate daemon stop
-innate daemon status
+innate daemon status [--state-db <path>]
 ```
 
 **`--source agent` 强制 pending 的原因**:agent 自动提炼的内容未经人确认,和 distilled 一样有质量风险——不应直接污染 active 知识池。强制 pending 后,走 `innate approve` 或 Evolve 的简单晋升规则才能变 active。
@@ -1788,26 +1792,26 @@ innate daemon start \
 
 **监听事件 → 触发动作映射**:
 
-| 日志模式 | 触发动作 | source 标记 |
+| 日志模式 | 触发动作 | 接入层 / source 标记 |
 |---|---|---|
 | `Build successful` / `Tests passed` / `✓ [N] passed` | `innate record {trace_id} --outcome ok` | daemon |
 | `SyntaxError` / `Error:` / 连续 N 次同类报错 | `innate record {trace_id} --outcome fail` | daemon |
-| Session Start 信号(IDE 启动/新对话) | `innate recall "{project}" --format prompt` 结果注入 | daemon |
-| 会话关闭信号 / IDE 退出事件 | `innate evolve --trigger manual` | daemon |
+| Session Start 信号(IDE 启动/新对话) | `innate recall "{project}" --format prompt` 结果注入 | 框架 Hook / 自定义 Daemon adapter |
+| 会话关闭信号 / IDE 退出事件 | `innate evolve --trigger manual` | 框架 Hook / 自定义 Daemon adapter |
 
 **持久状态存储**:Daemon 自身状态**不进入知识库**（不污染知识层数据），单独保存在 `~/.innate/daemon_state.sqlite`（可通过 `--state-db` 覆盖路径）。结构极简：
 
 ```sql
 -- ~/.innate/daemon_state.sqlite  (Daemon 私有，不是知识库的一部分)
 CREATE TABLE IF NOT EXISTS watch_state (
-    watch_path            TEXT PRIMARY KEY,
+    watch_path            TEXT PRIMARY KEY,   -- 具体日志文件路径,不是目录
     last_processed_offset INTEGER NOT NULL DEFAULT 0,
     last_processed_inode  TEXT,
     updated_at            TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS processed_events (
-    event_id   TEXT PRIMARY KEY,   -- 日志行 hash + 时间戳
+    event_id   TEXT PRIMARY KEY,   -- 日志行 hash + 文件 inode + offset
     watch_path TEXT,
     trace_id   TEXT,
     event_type TEXT,
@@ -1815,7 +1819,7 @@ CREATE TABLE IF NOT EXISTS processed_events (
 );
 ```
 
-**幂等与去重**:每个捕获事件生成 `event_id`（日志行内容 hash + 文件 inode + offset），写入 `processed_events`（PRIMARY KEY 去重）。重启时从 `watch_state.last_processed_offset` 继续，**不重放已处理行**。多 watch 目录、多 db 各自独立记录，不会串扰。
+**幂等与去重**:每个捕获事件生成 `event_id`（日志行内容 hash + 文件 inode + offset），写入 `processed_events`（PRIMARY KEY 去重）。`watch_state.watch_path` 记录具体日志文件而非目录，因此同一目录下多个 `.log` 文件各自维护 offset/inode；文件截断或 inode 改变时从 0 继续。重启后**不重放已处理行**。多 watch 目录、多 db 各自独立记录，不会串扰。
 
 **失败策略**:CLI 调用失败时最多重试一次（指数退避），仍失败则记入 `daemon.log` + 更新 `watch_state.updated_at`，**不阻塞主 Agent 进程**。Daemon 自身崩溃不影响 SDK/CLI 正常工作，独立重启即可。
 
@@ -1842,7 +1846,7 @@ handler = logging.handlers.RotatingFileHandler(
 )
 ```
 
-实现选择：优先方案 A（零侵入 Daemon 逻辑）；若目标环境无 logrotate（如 Windows），退回方案 B，`RotatingFileHandler` 替换普通 FileHandler 即可。两种方案均不侵入 SDK Core，Daemon 逻辑独立完整。`--log-file` 参数覆盖默认路径。
+实现选择：出生版本内置方案 B，使用 Python 标准库 `RotatingFileHandler` 保证跨环境可用；部署环境可额外使用方案 A。两种方案均不侵入 SDK Core。`--log-file` 参数覆盖默认路径。
 
 **状态检查**:
 ```bash
@@ -1898,7 +1902,7 @@ innate daemon start --watch ~/.cursor/logs/ --db ~/knowledge/personal.db
 **① 元数据层 — 精准触发**
 ```yaml
 name: innate-memory
-version: 4.1.0
+version: 4.5.1
 description: >
   【读取触发】执行复杂任务前/排查历史 Bug/参考过往模式/避免重复踩坑时激活。
   【写入触发】用户要求"记录灵感"/"保存思路"/"以后就按这个来"/"记住这个教训",
@@ -1955,7 +1959,7 @@ innate add "<经验>" --kind note --source agent
 
 ---
 
-## 附:已验证事实清单(沙箱实测；v4.4/v4.5 新增路径标注待覆盖)
+## 附:已验证事实清单(沙箱实测；实现校准后更新)
 - ✅ sqlite-vec 安装可用(v 系列),Python 绑定正常
 - ✅ ATTACH 跨库 KNN:单库 + 跨库 UNION 统一排序均通过(方案B成立)
 - ✅ 双向量延迟实测:1万/3万/5万 chunk × 1024维(数据见上表)
@@ -1969,10 +1973,11 @@ innate add "<经验>" --kind note --source agent
 - ✅ **v3.1 晋升三护栏**:used_success≥3 + distinct_traces≥2 + conf≥0.65,拦住"同trace刷次数"与"低信心蒙混"两类假阳性
 - ✅ **v3.1 归档用 selected**:进过context才计数 + conf<0.5护栏,不误伤"常被检索但没进context"的块
 - ✅ **v3 Schema**:chunks 新增 anti_trigger_desc/state_reason/confidence_reason/token_count/parent_id、usage_trace 拆 retrieved/selected 加 strength/tokens/rank,建库无误
-- ⏳ **v3.8 机制**(装包回填/confidence时效加权/债务比/灵感提示):设计增量,待补沙箱回归
-- ⏳ **v4.1 新增字段**(used_success_count/success_trace_ids_count/last_success_at/usage_trace.source):DDL 已写,待沙箱建库验证 + aggregate 逻辑回归
-- ⏳ **Curator 替换接口**:接口定义已补,待集成测试验证注入替换完整性
-- ⏳ **v4.4/v4.5 新增路径**（需实现测试覆盖，未在早期沙箱中验证）:
+- ✅ **v3.8 机制**:装包回填/confidence 时效加权/债务比/灵感提示均有回归覆盖;spark 唤起事实跨 Curate purge 保留
+- ✅ **v4.1 新增字段**:used_success_count/success_trace_ids_count/last_success_at/usage_trace.source 已完成建库验证 + aggregate 回归
+- ✅ **Curator 替换接口**:CurateScope(origin/skill_name/dry_run) 已落实;dry_run 保证只读;依赖启用时输出 cycle/orphan
+- ✅ **2026-06-01 实现校准补充**:动态 vec0 维度注入、连续迁移链验证、spark Curate 全豁免、protected 去重优先级、hard deps 三跳边界、trim 闭包校验、CLI UUID trace inspect、Daemon 每文件 offset/inode 去重与失败重试
+- ✅ **v4.4/v4.5 新增路径**:
   - outcome 互斥索引（idx_trace_outcome_once）行为
   - screening 原子 claim（BEGIN IMMEDIATE + distill_run_id/distill_locked_at）
   - stale screening 超时恢复（Curate purge_logs 超时检测 SQL）

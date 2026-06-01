@@ -103,11 +103,22 @@ class KnowledgeBase:
         self.refiner = refiner or NullRefiner()
         self.distiller = distiller or HeuristicDistiller()
 
-        self.storage = Storage(db_path)
+        self.storage = Storage(
+            db_path,
+            content_dim=self.embedding.content_dim,
+            trigger_dim=self.embedding.trigger_dim,
+        )
         self._shared_storages: Dict[str, Storage] = {}
         for sp in self.shared_paths:
-            self._shared_storages[sp] = Storage(sp)
+            self._shared_storages[sp] = Storage(
+                sp,
+                content_dim=self.embedding.content_dim,
+                trigger_dim=self.embedding.trigger_dim,
+            )
         self._init_meta()
+        self._validate_embedding_dims(self.storage)
+        for st in self._shared_storages.values():
+            self._validate_embedding_dims(st)
         self._load_params()
 
     def close(self) -> None:
@@ -120,23 +131,39 @@ class KnowledgeBase:
     # 初始化
     # ------------------------------------------------------------------
     def _init_meta(self) -> None:
-        """首次建库时写入默认 meta."""
-        existing = self.storage.get_meta("schema_version")
-        if existing is None:
-            now = utc_now_iso()
-            self.storage.set_meta("lib_id", gen_uuid())
-            self.storage.set_meta("lib_role", "personal")
-            self.storage.set_meta("schema_version", "4.5.1")
-            self.storage.set_meta("content_dim", str(self.embedding.content_dim))
-            self.storage.set_meta("trigger_dim", str(self.embedding.trigger_dim))
-            self.storage.set_meta("embed_model", self.embedding.__class__.__name__)
-            self.storage.set_meta("embed_version", "1")
-            self.storage.set_meta("last_agg_ts", "1970-01-01T00:00:00.000Z")
-            for k, v in {**self.RECALL_DEFAULTS, **self.CURATE_DEFAULTS}.items():
-                self.storage.set_meta(k, str(v))
-            self.storage.set_meta("evolve.threshold_new_count", "5")
-            self.storage.set_meta("evolve.distill_batch_size", "20")
-            self.storage.conn.commit()
+        """补齐首次建库和迁移库缺失的 meta 默认值."""
+        defaults = {
+            "lib_id": gen_uuid(),
+            "lib_role": "personal",
+            "schema_version": "4.5.1",
+            "content_dim": str(self.embedding.content_dim),
+            "trigger_dim": str(self.embedding.trigger_dim),
+            "embed_model": self.embedding.__class__.__name__,
+            "embed_version": "1",
+            "last_agg_ts": "1970-01-01T00:00:00.000Z",
+            **{k: str(v) for k, v in self.RECALL_DEFAULTS.items()},
+            **{k: str(v) for k, v in self.CURATE_DEFAULTS.items()},
+            "evolve.threshold_new_count": "5",
+            "evolve.distill_batch_size": "20",
+        }
+        for key, value in defaults.items():
+            if self.storage.get_meta(key) is None:
+                self.storage.set_meta(key, value)
+        self.storage.conn.commit()
+
+    def _validate_embedding_dims(self, storage: Storage) -> None:
+        """向量表维度变更需显式迁移,不能在查询时静默失败."""
+        content_dim = int(storage.get_meta("content_dim") or self.embedding.content_dim)
+        trigger_dim = int(storage.get_meta("trigger_dim") or self.embedding.trigger_dim)
+        if (
+            content_dim != self.embedding.content_dim
+            or trigger_dim != self.embedding.trigger_dim
+        ):
+            raise InvalidStateError(
+                "embedding dimensions do not match database schema: "
+                f"db=({content_dim},{trigger_dim}) "
+                f"provider=({self.embedding.content_dim},{self.embedding.trigger_dim})"
+            )
 
     def _load_params(self) -> None:
         """从 meta 加载可配置参数到实例属性."""
@@ -216,6 +243,7 @@ class KnowledgeBase:
             selected = self._density_refill(selected, skipped, budget)
 
         knowledge = selected
+        visible_knowledge = self._limit_knowledge(knowledge, top, expand_deps)
 
         # 6. sparks 独立召回(不占用 knowledge budget)
         sparks: List[Dict[str, Any]] = []
@@ -224,13 +252,20 @@ class KnowledgeBase:
 
         # 7. 写 usage_trace + episodic_log
         if trace:
-            for rank, item in enumerate(selected, start=1):
+            retrieved = [item for _, item in scored]
+            depth_skipped_set = set(depth_skipped)
+            for rank, item in enumerate(retrieved, start=1):
                 self.storage.append_trace({
                     "trace_id": trace_id,
                     "chunk_id": item["id"],
                     "event": "retrieved",
                     "similarity": item.get("_fused_score"),
                     "rank": rank,
+                    "refine_mode": (
+                        "skipped:dep_depth_limit"
+                        if item["id"] in depth_skipped_set
+                        else None
+                    ),
                     "source": source,
                     "ts": now,
                 })
@@ -245,7 +280,7 @@ class KnowledgeBase:
                     "source": source,
                     "ts": now,
                 })
-            for rank, item in enumerate(knowledge[:top] if top else knowledge, start=1):
+            for rank, item in enumerate(visible_knowledge, start=1):
                 self.storage.append_trace({
                     "trace_id": trace_id,
                     "chunk_id": item["id"],
@@ -254,21 +289,23 @@ class KnowledgeBase:
                     "source": source,
                     "ts": now,
                 })
-            # CTE 深度上限丢弃的 seed(§六 '宁可不召回')——可观测但不进 context
-            for cid in depth_skipped:
+            # spark 独立记录 retrieved,供 inspect 累计软孵化提示.
+            for rank, item in enumerate(sparks, start=1):
                 self.storage.append_trace({
                     "trace_id": trace_id,
-                    "chunk_id": cid,
-                    "event": "retrieved",  # 计入 retrieved, 不进 selected
-                    "rank": None,
-                    "refine_mode": "skipped:dep_depth_limit",
+                    "chunk_id": item["id"],
+                    "event": "retrieved",
+                    "similarity": item.get("_fused_score"),
+                    "rank": rank,
+                    "refine_mode": "spark",
                     "source": source,
                     "ts": now,
                 })
             # episodic_log 预写
             snapshot = {
-                "retrieved": [item["id"] for item in selected] + depth_skipped,
-                "selected": [item["id"] for item in (knowledge[:top] if top else knowledge)],
+                "retrieved": [item["id"] for item in retrieved],
+                "selected": [item["id"] for item in visible_knowledge],
+                "sparks": [item["id"] for item in sparks],
                 "depth_skipped": depth_skipped,
             }
             self.storage.insert_log({
@@ -284,14 +321,47 @@ class KnowledgeBase:
             self.storage.conn.commit()
 
         result = RecallResult(
-            knowledge=knowledge[:top] if top else knowledge,
+            knowledge=visible_knowledge,
             sparks=sparks,
             trace_id=trace_id,
             depth_skipped=depth_skipped,
             empty=len(knowledge) == 0 and len(sparks) == 0,
         )
-        result._trace = {"selected_ids": [i["id"] for i in (knowledge[:top] if top else knowledge)]}
+        result._trace = {"selected_ids": [i["id"] for i in visible_knowledge]}
         return result
+
+    def _limit_knowledge(
+        self,
+        knowledge: List[Dict[str, Any]],
+        top: int | None,
+        expand_deps: bool | str,
+    ) -> List[Dict[str, Any]]:
+        """限制返回 seed 数量,但绝不截断 hard dependency 闭包."""
+        if top is None:
+            return knowledge
+        if top <= 0:
+            return []
+        if not expand_deps:
+            return knowledge[:top]
+
+        available = {chunk["id"]: chunk for chunk in knowledge}
+        visible: List[Dict[str, Any]] = []
+        added = set()
+        seed_count = 0
+        for seed in knowledge:
+            if seed["id"] in added:
+                continue
+            block, depth_exceeded = self._build_block(seed["id"], expand_deps)
+            if depth_exceeded:
+                continue
+            for chunk in block:
+                if chunk["id"] in available and chunk["id"] not in added:
+                    visible.append(available[chunk["id"]])
+                    added.add(chunk["id"])
+            seed_count += 1
+            if seed_count >= top:
+                break
+        return visible
 
     def _ann_candidates(
         self, q_content: List[float], q_trigger: List[float], libs: List[str] | None = None
@@ -301,7 +371,7 @@ class KnowledgeBase:
         storages_to_query: List[Storage] = [self.storage]
         if libs:
             for sp in self.shared_paths:
-                if sp in libs and sp in self._shared_storages:
+                if (sp in libs or "shared" in libs) and sp in self._shared_storages:
                     storages_to_query.append(self._shared_storages[sp])
 
         candidates: Dict[str, Dict[str, Any]] = {}
@@ -351,28 +421,35 @@ class KnowledgeBase:
         storages_to_query: List[Storage] = [self.storage]
         if libs:
             for sp in self.shared_paths:
-                if sp in libs and sp in self._shared_storages:
+                if (sp in libs or "shared" in libs) and sp in self._shared_storages:
                     storages_to_query.append(self._shared_storages[sp])
 
-        sparks: List[Tuple[float, Dict[str, Any]]] = []
-        seen = set()
+        spark_scores: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         for st in storages_to_query:
             meta_ev = int(st.get_meta("embed_version") or "1")
             rows = st.list_chunks(state=None, origin="spark")
-            valid = {r["id"]: r for r in rows if r["embed_version"] >= meta_ev and r.get("maturity") not in ("promoted", "dropped")}
+            valid = {
+                r["id"]: r
+                for r in rows
+                if r["embed_version"] >= meta_ev
+                and r["state"] != "archived"
+                and r.get("maturity") not in ("promoted", "dropped")
+            }
 
             content_res = st.search_vec_content(q_content, self.top_k_candidates)
             trigger_res = st.search_vec_trigger(q_trigger, self.top_k_candidates)
 
             for cid, dist in content_res + trigger_res:
-                if cid not in valid or cid in seen:
+                if cid not in valid:
                     continue
-                seen.add(cid)
                 sim = 1.0 - dist
                 chunk = valid[cid]
-                chunk["_fused_score"] = sim
-                sparks.append((sim, chunk))
+                previous = spark_scores.get(cid)
+                if previous is None or sim > previous[0]:
+                    chunk["_fused_score"] = sim
+                    spark_scores[cid] = (sim, chunk)
 
+        sparks = list(spark_scores.values())
         sparks.sort(key=lambda x: x[0], reverse=True)
         return [chunk for _, chunk in sparks[: self.top_k_candidates]]
 
@@ -449,8 +526,11 @@ class KnowledgeBase:
 
             if allow_trim and self.refiner.available:
                 # trim: 不破坏 hard 闭包,只裁非关键段落(由 Refiner 实现)
-                refined = self.refiner.refine(block, query, "trim")
-                if refined:
+                try:
+                    refined = self.refiner.refine(block, query, "trim")
+                except Exception:
+                    refined = None
+                if refined and self._deps_intact(block, refined):
                     refined_cost = sum(
                         (b.get("token_count") or estimate_tokens(b["content"]) or 100)
                         for b in refined
@@ -468,6 +548,11 @@ class KnowledgeBase:
             skipped.append((block, fused_score, cost))
 
         return selected, skipped, depth_skipped
+
+    @staticmethod
+    def _deps_intact(original: List[Dict[str, Any]], refined: List[Dict[str, Any]]) -> bool:
+        """trim 只能裁块内文本,不能删除 hard 闭包成员."""
+        return {b["id"] for b in original} == {b["id"] for b in refined}
 
     def _get_chunk_any(self, chunk_id: str) -> Dict[str, Any] | None:
         """跨库查找 chunk."""
@@ -517,29 +602,22 @@ class KnowledgeBase:
 
         if expand_deps == "closure":
             visited = {seed_id}
-            queue = [seed_id]
-            depth = 0
+            queue = [(seed_id, 0)]
             depth_limit = 3
-            truncated = False
             while queue:
-                depth += 1
-                if depth > depth_limit:
-                    truncated = True
-                    break
-                nxt: List[str] = []
-                for sid in queue:
-                    deps = self._get_deps_any(sid, kind="hard")
-                    for d in deps:
-                        did = d["dst"]
-                        if did not in visited:
-                            visited.add(did)
-                            c = self._get_chunk_any(did)
-                            if c:
-                                block.append(c)
-                            nxt.append(did)
-                queue = nxt
-            if truncated:
-                return [], True
+                sid, depth = queue.pop(0)
+                deps = self._get_deps_any(sid, kind="hard")
+                for d in deps:
+                    did = d["dst"]
+                    if did in visited:
+                        continue
+                    if depth + 1 > depth_limit:
+                        return [], True
+                    visited.add(did)
+                    c = self._get_chunk_any(did)
+                    if c:
+                        block.append(c)
+                    queue.append((did, depth + 1))
             return block, False
 
         return block, False
@@ -617,6 +695,8 @@ class KnowledgeBase:
         source: str = "sdk",
     ) -> None:
         """同步极轻:写日志 + EMA 更新 confidence."""
+        if outcome not in (None, "ok", "fail", "unknown"):
+            raise InvalidStateError(f"invalid outcome: {outcome}")
         now = utc_now_iso()
         self.storage.begin_immediate()
         try:
@@ -697,6 +777,8 @@ class KnowledgeBase:
                 updates["nomination"] = nomination
             if priority and priority != log.get("priority"):
                 updates["priority"] = priority
+            if source != log.get("event_source"):
+                updates["event_source"] = source
 
             # open → new / discarded 判断
             # 只对 distill_state='open' 的 log 执行,避免把已是 'new' / 'screening' 等状态的
@@ -835,6 +917,8 @@ class KnowledgeBase:
         source: str = "chat",
     ) -> str:
         """写入外部确认的知识."""
+        if kind not in ("note", "skill"):
+            raise InvalidStateError(f"invalid kind: {kind}")
         if self.sanitize:
             content, action = self.sanitize(content)
             if action == "discard":
@@ -862,18 +946,18 @@ class KnowledgeBase:
         # - add(source=agent) + redact: 脱敏后强制 pending, conf ≤ 0.4
         # - add + allow: 按 kind/source 默认 conf
         sanitized = (action == "redact") if self.sanitize else False
-        if kind == "skill":
-            origin = "installed"
-            state = "active"
-            conf = 0.4 if sanitized else 0.85
-            prot = 1
-            state_reason = "init:installed"
-        elif source == "agent":
+        if source == "agent":
             origin = "captured"
             state = "pending"
             conf = 0.4 if sanitized else 0.60
             prot = 0
             state_reason = "init:captured_agent"
+        elif kind == "skill":
+            origin = "installed"
+            state = "active"
+            conf = 0.4 if sanitized else 0.85
+            prot = 1
+            state_reason = "init:installed"
         else:
             origin = "captured"
             state = "active"
@@ -946,13 +1030,8 @@ class KnowledgeBase:
         # 入库时自动 recall 一次,找 related_ids
         related = []
         try:
-            # 轻量召回:只用 content_vec
-            qvec = self.embedding.embed_content(content)
-            res = self.storage.search_vec_content(qvec, 5)
-            for cid, _ in res:
-                c = self.storage.get_chunk(cid)
-                if c and c.get("origin") != "spark":
-                    related.append(cid)
+            result = self.recall(content, budget=2000, trace=False)
+            related = [c["id"] for c in result.knowledge[:5]]
         except Exception:
             pass
 
@@ -1000,6 +1079,10 @@ class KnowledgeBase:
         spark = self.storage.get_chunk(spark_id)
         if not spark or spark.get("origin") != "spark":
             raise ChunkNotFoundError(f"spark {spark_id} not found")
+        if spark.get("maturity") in ("promoted", "dropped"):
+            raise InvalidStateError(f"spark {spark_id} already {spark['maturity']}")
+        if to not in ("note", "skill"):
+            raise InvalidStateError(f"invalid spark promotion target: {to}")
 
         if self.sanitize:
             content, action = self.sanitize(spark["content"])
@@ -1010,7 +1093,11 @@ class KnowledgeBase:
             content = spark["content"]
             action = "allow"
 
-        if self.storage.is_invalidated(spark["content_hash"]):
+        promoted_hash = content_hash(content)
+        if (
+            self.storage.is_invalidated(spark["content_hash"])
+            or self.storage.is_invalidated(promoted_hash)
+        ):
             raise InvalidStateError("spark content hash is invalidated")
 
         now = utc_now_iso()
@@ -1039,8 +1126,8 @@ class KnowledgeBase:
             "content": content,
             "trigger_desc": spark.get("trigger_desc"),
             "anti_trigger_desc": spark.get("anti_trigger_desc"),
-            "content_hash": spark["content_hash"],
-            "token_count": spark.get("token_count"),
+            "content_hash": promoted_hash,
+            "token_count": estimate_tokens(content),
             "origin": origin,
             "source": "manual",
             "protected": prot,
@@ -1080,6 +1167,10 @@ class KnowledgeBase:
         spark = self.storage.get_chunk(spark_id)
         if not spark or spark.get("origin") != "spark":
             raise ChunkNotFoundError(f"spark {spark_id} not found")
+        if spark.get("maturity") == "promoted":
+            raise InvalidStateError(f"spark {spark_id} already promoted")
+        if spark.get("maturity") == "dropped":
+            return
         now = utc_now_iso()
         self.storage.conn.execute(
             "UPDATE chunks SET maturity='dropped', state_reason=?, updated_at=? WHERE id=?",
@@ -1311,36 +1402,37 @@ class KnowledgeBase:
         report = CurateReport()
         now = utc_now_iso()
 
-        # 0. purge_logs 前置: stale screening + open TTL
-        stale = self.storage.purge_stale_screening(self.screening_timeout_minutes, now)
-        if stale:
-            report.warnings.append(f"recovered {stale} stale screening rows")
-        open_purged = self.storage.purge_open_timeout(self.open_ttl_days, "no_record_timeout")
-        if open_purged:
-            report.warnings.append(f"purged {open_purged} open timeout rows")
+        cutoff_ts = now
+        if not scope.dry_run:
+            # 1. aggregate (cutoff_ts 固定)
+            last_ts = self.storage.get_meta("last_agg_ts") or "1970-01-01T00:00:00.000Z"
+            self.storage.aggregate_success_traces(last_ts, cutoff_ts)
+            self.storage.aggregate_counters(last_ts, cutoff_ts)
+            self.storage.aggregate_success_counts()
+            self.storage.set_meta("last_agg_ts", cutoff_ts)
 
-        # 1. aggregate (cutoff_ts 固定)
-        last_ts = self.storage.get_meta("last_agg_ts") or "1970-01-01T00:00:00.000Z"
-        cutoff_ts = utc_now_iso()
-        self.storage.aggregate_success_traces(last_ts, cutoff_ts)
-        self.storage.aggregate_counters(last_ts, cutoff_ts)
-        self.storage.aggregate_success_counts()
-        self.storage.set_meta("last_agg_ts", cutoff_ts)
+            # 2. purge_logs 前置: stale screening + open TTL
+            stale = self.storage.purge_stale_screening(self.screening_timeout_minutes, now)
+            if stale:
+                report.warnings.append(f"recovered {stale} stale screening rows")
+            open_purged = self.storage.purge_open_timeout(self.open_ttl_days, "no_record_timeout")
+            if open_purged:
+                report.warnings.append(f"purged {open_purged} open timeout rows")
 
-        # 2. decay
-        self._curate_decay(report, now, dry_run=scope.dry_run)
+        # 3. archive rules:必须先于 decay,避免低分失效块被拉回中性下限后逃过归档.
+        self._curate_archive(report, now, scope)
 
-        # 3. dedupe
-        self._curate_dedupe(report, now, dry_run=scope.dry_run)
+        # 4. dedupe
+        self._curate_dedupe(report, now, scope)
 
-        # 4. archive rules
-        self._curate_archive(report, now, dry_run=scope.dry_run)
+        # 5. decay
+        self._curate_decay(report, now, scope)
 
-        # 5. promote pending → active
-        self._curate_promote(report, dry_run=scope.dry_run)
+        # 6. promote pending → active
+        self._curate_promote(report, scope)
 
-        # 6. cycle / orphan (简化:仅检测,只读)
-        self._curate_cycles(report)
+        # 7. cycle / orphan (简化:仅检测,只读)
+        self._curate_cycles(report, scope)
 
         if not scope.dry_run:
             # 7. purge usage_trace
@@ -1354,12 +1446,24 @@ class KnowledgeBase:
             self.storage.conn.commit()
         return report
 
-    def _curate_decay(self, report: CurateReport, now_iso: str, dry_run: bool = False) -> None:
+    @staticmethod
+    def _matches_scope(row: Any, scope: CurateScope) -> bool:
+        """CurateScope 只限制治理目标,不改变全库聚合."""
+        if scope.origin and row["origin"] != scope.origin:
+            return False
+        if scope.skill_name and row["skill_name"] != scope.skill_name:
+            return False
+        return True
+
+    def _curate_decay(self, report: CurateReport, now_iso: str, scope: CurateScope) -> None:
         from datetime import datetime
         rows = self.storage.conn.execute(
-            "SELECT id, confidence, last_used_at FROM chunks WHERE state='active' AND origin!='spark'"
+            """SELECT id, origin, skill_name, confidence, last_used_at
+               FROM chunks WHERE state='active' AND origin!='spark'"""
         ).fetchall()
         for row in rows:
+            if not self._matches_scope(row, scope):
+                continue
             last = row["last_used_at"]
             if not last:
                 continue
@@ -1376,16 +1480,18 @@ class KnowledgeBase:
             new_conf = floor + (conf - floor) * (0.5 ** (idle_days / 90.0))
             new_conf = round(new_conf, 4)
             if abs(new_conf - conf) > 0.001:
-                if not dry_run:
+                if not scope.dry_run:
                     self.storage.update_chunk_confidence(
                         row["id"], new_conf, f"decay:{int(idle_days)}d"
                     )
                 report.decayed.append(row["id"])
 
-    def _curate_dedupe(self, report: CurateReport, now_iso: str, dry_run: bool = False) -> None:
+    def _curate_dedupe(self, report: CurateReport, now_iso: str, scope: CurateScope) -> None:
         rows = self.storage.conn.execute(
-            """SELECT id, content_hash, confidence, protected, state
-               FROM chunks WHERE state IN ('active','pending') ORDER BY confidence DESC"""
+            """SELECT id, origin, skill_name, content_hash, confidence, protected, state
+               FROM chunks
+               WHERE state IN ('active','pending') AND origin!='spark'
+               ORDER BY protected DESC, confidence DESC"""
         ).fetchall()
         seen: Dict[str, str] = {}  # hash → canonical id
         for row in rows:
@@ -1393,9 +1499,10 @@ class KnowledgeBase:
             if h in seen:
                 canonical = seen[h]
                 if row["protected"]:
-                    seen[h] = row["id"]
                     continue
-                if not dry_run:
+                if not self._matches_scope(row, scope):
+                    continue
+                if not scope.dry_run:
                     self.storage.update_chunk_state(
                         row["id"], "archived", f"duplicate:{canonical}"
                     )
@@ -1408,7 +1515,7 @@ class KnowledgeBase:
             else:
                 seen[h] = row["id"]
 
-    def _curate_archive(self, report: CurateReport, now_iso: str, dry_run: bool = False) -> None:
+    def _curate_archive(self, report: CurateReport, now_iso: str, scope: CurateScope) -> None:
         from datetime import datetime
         t2 = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
 
@@ -1419,6 +1526,8 @@ class KnowledgeBase:
             if row["protected"]:
                 continue
             if row["origin"] == "spark":
+                continue
+            if not self._matches_scope(row, scope):
                 continue
 
             cid = row["id"]
@@ -1435,14 +1544,14 @@ class KnowledgeBase:
                 except Exception:
                     idle_days = 0
                 if conf < self.low_conf_threshold and idle_days > self.low_conf_idle_days:
-                    if not dry_run:
+                    if not scope.dry_run:
                         self.storage.update_chunk_state(cid, "archived", "low_confidence")
                     report.archived.append(cid)
                     continue
 
             # repeated_selected_unused
             if selected_cnt >= self.repeat_select_min and used_cnt == 0 and conf < self.repeat_select_conf_max:
-                if not dry_run:
+                if not scope.dry_run:
                     self.storage.update_chunk_state(cid, "archived", "repeated_selected_unused")
                 report.archived.append(cid)
                 continue
@@ -1456,23 +1565,25 @@ class KnowledgeBase:
                 except Exception:
                     age_days = 0
                 if age_days > self.never_used_age_days:
-                    if not dry_run:
+                    if not scope.dry_run:
                         self.storage.update_chunk_state(cid, "archived", "never_used")
                     report.archived.append(cid)
 
-    def _curate_promote(self, report: CurateReport, dry_run: bool = False) -> None:
+    def _curate_promote(self, report: CurateReport, scope: CurateScope) -> None:
         rows = self.storage.conn.execute(
-            """SELECT id, used_success_count, success_trace_ids_count, confidence
+            """SELECT id, origin, skill_name, used_success_count, success_trace_ids_count, confidence
                FROM chunks WHERE state='pending'"""
         ).fetchall()
         for row in rows:
+            if not self._matches_scope(row, scope):
+                continue
             if (int(row["used_success_count"] or 0) >= self.promote_used_success_min
                 and int(row["success_trace_ids_count"] or 0) >= 2
                 and float(row["confidence"] or 0) >= self.promote_confidence_min):
-                if not dry_run:
+                if not scope.dry_run:
                     self.storage.update_chunk_state(row["id"], "active", "repeated_success")
 
-    def _curate_cycles(self, report: CurateReport) -> None:
+    def _curate_cycles(self, report: CurateReport, scope: CurateScope) -> None:
         # 简化环检测:DFS
         deps_rows = self.storage.conn.execute("SELECT src, dst FROM deps WHERE kind='hard'").fetchall()
         graph: Dict[str, List[str]] = {}
@@ -1498,6 +1609,19 @@ class KnowledgeBase:
         for node in list(graph.keys()):
             if node not in visited:
                 dfs(node, [node])
+        if graph:
+            connected = set(graph)
+            for destinations in graph.values():
+                connected.update(destinations)
+            rows = self.storage.conn.execute(
+                """SELECT id, origin, skill_name FROM chunks
+                   WHERE state IN ('active','pending') AND origin!='spark'"""
+            ).fetchall()
+            report.orphans.extend(
+                row["id"]
+                for row in rows
+                if self._matches_scope(row, scope) and row["id"] not in connected
+            )
 
     # ------------------------------------------------------------------
     # Public API: inspect
@@ -1547,8 +1671,12 @@ class KnowledgeBase:
                SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending,
                SUM(CASE WHEN state='archived' THEN 1 ELSE 0 END) AS archived,
                SUM(CASE WHEN origin='spark' THEN 1 ELSE 0 END) AS sparks,
-               SUM(CASE WHEN embed_version=0 THEN 1 ELSE 0 END) AS pending_embed
+               SUM(CASE WHEN embed_version < ? THEN 1 ELSE 0 END) AS pending_embed,
+               SUM(CASE WHEN origin!='spark' AND state='active' THEN 1 ELSE 0 END) AS knowledge_active,
+               SUM(CASE WHEN origin!='spark' AND state='pending' THEN 1 ELSE 0 END) AS knowledge_pending
                FROM chunks"""
+            ,
+            (int(self.storage.get_meta("embed_version") or "1"),),
         ).fetchone()
 
         active = stats["active"] or 0
@@ -1566,9 +1694,10 @@ class KnowledgeBase:
         ).fetchone()
         zombie = zombie_row["c"] or 0
 
-        # 有效总数 = active + pending(不含 archived)
-        valid = active + pending
-        debt = (pending + zombie) / max(valid, 1)
+        # spark 不参与知识债务比.
+        knowledge_pending = stats["knowledge_pending"] or 0
+        valid = (stats["knowledge_active"] or 0) + knowledge_pending
+        debt = (knowledge_pending + zombie) / max(valid, 1)
 
         # stale screening
         stale = self.storage.conn.execute(
@@ -1588,7 +1717,9 @@ class KnowledgeBase:
             """SELECT c.id, COUNT(*) AS cnt
                FROM chunks c
                JOIN usage_trace u ON u.chunk_id = c.id AND u.event='retrieved'
-               WHERE c.origin='spark' AND c.maturity='seed'
+               WHERE c.origin='spark'
+                 AND c.state!='archived'
+                 AND c.maturity NOT IN ('promoted','dropped')
                GROUP BY c.id HAVING cnt > 3"""
         ).fetchall()
         for r in spark_rows:

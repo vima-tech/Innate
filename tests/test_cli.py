@@ -55,7 +55,11 @@ def test_cli_spark_promote_drop(db_path):
     r = run(["promote-spark", spark_id, "--to", "note"], env=env)
     assert r.returncode == 0, r.stderr
 
-    r = run(["drop-spark", spark_id, "--reason", "不可行"], env=env)
+    r = run(["spark", "另一个灵感"], env=env)
+    assert r.returncode == 0, r.stderr
+    drop_id = r.stdout.strip().split()[-1]
+
+    r = run(["drop-spark", drop_id, "--reason", "不可行"], env=env)
     assert r.returncode == 0, r.stderr
 
 

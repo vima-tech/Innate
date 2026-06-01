@@ -196,19 +196,21 @@ def test_migration_runner_newer_warns():
 # =====================================================================
 
 def test_cte_depth_limit_drops_seed(kb):
-    """depth=3 触达 → 丢弃 seed,不送半截 hard 依赖."""
-    # 建一个 4 层深的链 a→b→c→d
+    """depth>3 触达 → 丢弃 seed,不送半截 hard 依赖."""
+    # 建一个 4 跳深的链 a→b→c→d→e
     a = kb.add("a", kind="note")
     b = kb.add("b", kind="note")
     c = kb.add("c", kind="note")
     d = kb.add("d", kind="note")
+    e = kb.add("e", kind="note")
     kb.storage.insert_dep(a, b, kind="hard")
     kb.storage.insert_dep(b, c, kind="hard")
     kb.storage.insert_dep(c, d, kind="hard")
+    kb.storage.insert_dep(d, e, kind="hard")
     kb.storage.conn.commit()
 
     # closure 展开,深度上限 3
-    # seed=a 走 closure 需要展开 3 层(a→b→c),再下一层(c→d)超限 → 丢弃
+    # seed=a 走 closure 允许 3 跳(a→b→c→d),再下一跳(d→e)超限 → 丢弃
     block, exceeded = kb._build_block(a, "closure")
     assert exceeded is True
     assert block == []
@@ -224,9 +226,11 @@ def test_cte_depth_limit_recorded_in_recall(kb):
     b = kb.add("b", kind="note")
     c = kb.add("c", kind="note")
     d = kb.add("d", kind="note")
+    e = kb.add("e", kind="note")
     kb.storage.insert_dep(a, b, kind="hard")
     kb.storage.insert_dep(b, c, kind="hard")
     kb.storage.insert_dep(c, d, kind="hard")
+    kb.storage.insert_dep(d, e, kind="hard")
     kb.storage.conn.commit()
 
     # 让 a 成为 recall 命中 — 改用更激进的嵌入
@@ -247,9 +251,11 @@ def test_cte_depth_limit_recorded_in_recall(kb):
     b2 = k.add("b", kind="note")
     c2 = k.add("c", kind="note")
     d2 = k.add("d", kind="note")
+    e2 = k.add("e", kind="note")
     k.storage.insert_dep(a2, b2, kind="hard")
     k.storage.insert_dep(b2, c2, kind="hard")
     k.storage.insert_dep(c2, d2, kind="hard")
+    k.storage.insert_dep(d2, e2, kind="hard")
     k.storage.conn.commit()
 
     result = k.recall("anything", budget=100000, expand_deps="closure", trace=True)

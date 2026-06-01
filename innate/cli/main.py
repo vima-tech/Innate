@@ -90,7 +90,7 @@ def recall(ctx, query, budget, top, include_sparks, fmt, expand_deps):
         lines.append(f"<!-- innate_selected: {','.join([c['id'] for c in result.knowledge])} -->")
         click.echo("\n".join(lines))
     else:
-        click.echo(f"📚 召回结果 (trace_id={result.trace_id})")
+        click.echo("📚 召回结果")
         for c in result.knowledge:
             click.echo(f"  [{c['id']}] conf={c.get('confidence',0.5):.2f} | {c['content'][:120]}...")
         if result.sparks:
@@ -258,7 +258,9 @@ def inspect(ctx, target):
 
 def _inspect_detail(kb, target: str) -> None:
     """chunk_id / trace_id 详情 — 末尾附相关操作提示(§五)."""
-    if target.startswith("trace_"):
+    if kb.storage.get_chunk(target):
+        info = kb.inspect(chunk_id=target)
+    elif kb.storage.get_log_by_trace(target):
         info = kb.inspect(trace_id=target)
     else:
         info = kb.inspect(chunk_id=target)
@@ -363,18 +365,20 @@ def daemon():
 
 
 @daemon.command()
-@click.option("--watch", default=None, help="监听日志目录")
+@click.option("--watch", multiple=True, help="监听日志目录,可重复传入")
 @click.option("--db", "db_path", default=None)
 @click.option("--pid-file", default="/tmp/innate-daemon.pid")
 @click.option("--log-file", default=None)
+@click.option("--state-db", default=None)
 @click.pass_context
-def start(ctx, watch, db_path, pid_file, log_file):
+def start(ctx, watch, db_path, pid_file, log_file, state_db):
     from innate.daemon.server import DaemonServer
     srv = DaemonServer(
         db_path=db_path or DEFAULT_DB,
-        watch_dirs=[watch] if watch else [],
+        watch_dirs=list(watch),
         pid_file=pid_file,
         log_file=log_file,
+        state_db=state_db,
     )
     srv.start()
     click.echo("🚀 Daemon started")
@@ -390,9 +394,10 @@ def stop(pid_file):
 
 @daemon.command()
 @click.option("--pid-file", default="/tmp/innate-daemon.pid")
-def status(pid_file):
+@click.option("--state-db", default=None)
+def status(pid_file, state_db):
     from innate.daemon.server import DaemonServer
-    st = DaemonServer.status(pid_file)
+    st = DaemonServer.status(pid_file, state_db=state_db)
     click.echo(st)
 
 

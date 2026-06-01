@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import logging.handlers
 import os
+import re
 import signal
 import sqlite3
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import List
@@ -32,6 +31,7 @@ class DaemonServer:
         watch_dirs: List[str],
         pid_file: str = "/tmp/innate-daemon.pid",
         log_file: str | None = None,
+        state_db: str | None = None,
         log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
         log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
     ):
@@ -41,7 +41,7 @@ class DaemonServer:
         self.log_file = Path(log_file) if log_file else DEFAULT_LOG
         self.log_max_bytes = log_max_bytes
         self.log_backup_count = log_backup_count
-        self.state_db = Path(DEFAULT_STATE_DB)
+        self.state_db = Path(state_db) if state_db else DEFAULT_STATE_DB
         self._running = False
 
     def _init_state_db(self) -> None:
@@ -120,63 +120,105 @@ class DaemonServer:
 
     def _process_watch(self, wd: Path) -> None:
         conn = sqlite3.connect(str(self.state_db))
-        row = conn.execute(
-            "SELECT last_processed_offset FROM watch_state WHERE watch_path=?",
-            (str(wd),)
-        ).fetchone()
-        offset = row[0] if row else 0
-
         for log_file in sorted(wd.glob("*.log")):
             try:
                 st = log_file.stat()
                 inode = f"{st.st_ino}"
+                row = conn.execute(
+                    """SELECT last_processed_offset, last_processed_inode
+                       FROM watch_state WHERE watch_path=?""",
+                    (str(log_file),),
+                ).fetchone()
+                offset = row[0] if row else 0
+                previous_inode = row[1] if row else None
+                if previous_inode != inode or st.st_size < offset:
+                    offset = 0
                 with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
                     f.seek(offset)
-                    for line in f:
+                    while True:
+                        line_offset = f.tell()
+                        line = f.readline()
+                        if not line:
+                            break
                         offset = f.tell()
-                        self._handle_line(line, str(wd), str(log_file), conn)
+                        self._handle_line(
+                            line, str(log_file), str(log_file), inode, line_offset, conn
+                        )
                 conn.execute(
                     """INSERT OR REPLACE INTO watch_state(watch_path, last_processed_offset, last_processed_inode, updated_at)
                        VALUES (?, ?, ?, ?)""",
-                    (str(wd), offset, inode, utc_now_iso()),
+                    (str(log_file), offset, inode, utc_now_iso()),
                 )
             except Exception as exc:
                 self.logger.warning(f"process {log_file} error: {exc}")
         conn.commit()
         conn.close()
 
-    def _handle_line(self, line: str, watch_path: str, file_path: str, conn: sqlite3.Connection) -> None:
+    def _handle_line(
+        self,
+        line: str,
+        watch_path: str,
+        file_path: str,
+        inode: str,
+        offset: int,
+        conn: sqlite3.Connection,
+    ) -> None:
         line = line.strip()
         if not line:
             return
-        event_id = hashlib.sha256(f"{file_path}:{line}".encode()).hexdigest()[:16]
+        event_id = hashlib.sha256(
+            f"{file_path}:{inode}:{offset}:{line}".encode()
+        ).hexdigest()[:16]
         row = conn.execute("SELECT 1 FROM processed_events WHERE event_id=?", (event_id,)).fetchone()
         if row:
             return
 
         # 简单模式匹配
         outcome = None
-        if any(k in line for k in ("Build successful", "Tests passed", "✓ passed")):
+        if (
+            any(k in line for k in ("Build successful", "Tests passed"))
+            or re.search(r"✓\s*(?:\[\d+\]|\d+)?\s*passed", line)
+        ):
             outcome = "ok"
         elif any(k in line for k in ("SyntaxError", "Error:", "FAIL")):
             outcome = "fail"
 
+        trace_id = None
+        event_type = outcome or "unknown"
         if outcome:
-            trace_id = self._ensure_trace(line)
-            cmd = ["innate", "record", trace_id, "--outcome", outcome, "--source", "daemon"]
-            try:
-                subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            except Exception as exc:
-                self.logger.error(f"record failed: {exc}")
+            trace_id = self._ensure_trace(event_id)
+            cmd = [
+                "innate", "--db", self.db_path, "record", trace_id,
+                "--outcome", outcome, "--source", "daemon",
+            ]
+            if not self._run_cli(cmd):
+                event_type = f"{outcome}_error"
 
         conn.execute(
-            "INSERT INTO processed_events(event_id, watch_path, event_type, ts) VALUES (?, ?, ?, ?)",
-            (event_id, watch_path, outcome or "unknown", utc_now_iso()),
+            """INSERT INTO processed_events(event_id, watch_path, trace_id, event_type, ts)
+               VALUES (?, ?, ?, ?, ?)""",
+            (event_id, watch_path, trace_id, event_type, utc_now_iso()),
         )
 
-    def _ensure_trace(self, line: str) -> str:
-        # 简化:用 hash 做 trace_id 代理
-        return "trace_" + hashlib.sha256(line.encode()).hexdigest()[:16]
+    def _run_cli(self, cmd: List[str]) -> bool:
+        """调用 CLI,失败后退避重试一次."""
+        for attempt in range(2):
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    return True
+                self.logger.error(
+                    f"CLI failed ({result.returncode}): {result.stderr.strip()}"
+                )
+            except Exception as exc:
+                self.logger.error(f"CLI failed: {exc}")
+            if attempt == 0:
+                time.sleep(0.1)
+        return False
+
+    def _ensure_trace(self, event_id: str) -> str:
+        # Daemon 捕获事件没有上游 trace 时,以 event_id 生成稳定代理.
+        return "trace_" + event_id
 
     @staticmethod
     def stop(pid_file: str) -> None:
@@ -194,11 +236,27 @@ class DaemonServer:
             print("Daemon was not running")
 
     @staticmethod
-    def status(pid_file: str) -> str:
+    def status(pid_file: str, state_db: str | None = None) -> str:
         pf = Path(pid_file)
         if not pf.exists():
             return "stopped"
         pid = pf.read_text().strip()
-        if Path(f"/proc/{pid}").exists():
+        if not Path(f"/proc/{pid}").exists():
+            return "stopped (stale pid file)"
+
+        state_path = Path(state_db) if state_db else DEFAULT_STATE_DB
+        if not state_path.exists():
             return f"running (pid={pid})"
-        return "stopped (stale pid file)"
+        conn = sqlite3.connect(str(state_path))
+        processed = conn.execute("SELECT COUNT(*) FROM processed_events").fetchone()[0]
+        errors = conn.execute(
+            "SELECT COUNT(*) FROM processed_events WHERE event_type LIKE '%_error'"
+        ).fetchone()[0]
+        last_row = conn.execute("SELECT MAX(ts) FROM processed_events").fetchone()
+        watches = conn.execute("SELECT COUNT(*) FROM watch_state").fetchone()[0]
+        conn.close()
+        last = last_row[0] if last_row and last_row[0] else "-"
+        return (
+            f"running (pid={pid}, watches={watches}, processed={processed}, "
+            f"last={last}, errors={errors})"
+        )
