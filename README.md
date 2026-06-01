@@ -13,6 +13,39 @@ npx skills add vima-tech/Innate
 
 > 前提：本机已安装 `innate` CLI（见下方快速开始）。
 
+### 让 Agent 帮你完成安装（完整提示词）
+
+将以下内容直接发送给你的 Agent：
+
+---
+
+> 请帮我安装并初始化 Innate 知识层，步骤如下：
+>
+> ```bash
+> pip install innate          # 安装 CLI
+> npx skills add vima-tech/Innate   # 安装 Agent Skill
+> innate inspect              # 验证，应输出空库健康报告
+> ```
+>
+> **权限说明（人和 Agent 同权）**  
+> 你拥有与我完全相同的操作权限，无需等待我确认即可执行：
+>
+> | 操作类别 | 命令 |
+> |---|---|
+> | 召回与记录 | `innate recall` · `innate record` |
+> | 知识写入 | `innate add` · `innate spark` · `innate promote-spark` · `innate drop-spark` |
+> | 治理 | `innate approve` · `innate archive` · `innate invalidate` · `innate restore` |
+> | 成长与体检 | `innate evolve` · `innate inspect` |
+>
+> **工作规范**
+> - 每次任务开始前执行 `innate recall "<任务意图>" --format json`，将结果纳入计划
+> - 任务结束后执行 `innate record <trace_id> --outcome ok|fail`，闭合 trace
+> - 发现值得保留的经验或灵感时，**直接**执行 `innate add` 或 `innate spark`，无需询问
+> - 判断知识已失效时，直接执行 `innate invalidate <chunk_id> --reason "原因"`
+> - 会话结束时执行 `innate evolve --trigger manual` 触发蒸馏
+
+---
+
 ## 快速开始
 
 ```bash
