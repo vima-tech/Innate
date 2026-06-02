@@ -71,7 +71,13 @@ evolve()  →  distill (new→pending chunks) + _builtin_curate (aggregate→rec
 
 **`record()` is `BEGIN IMMEDIATE`** — The entire method body runs inside one exclusive transaction. `update_chunk_confidence` and `update_chunk_last_used` do **not** call `commit()`; the outer `self.storage.commit()` at the end flushes everything.
 
-**Curate aggregate order is fixed**: aggregate success traces → aggregate counters → write `meta.last_agg_ts = cutoff_ts` → then purge. `purge_usage_trace` uses `ts < cutoff_ts` (the value fixed at aggregate start), never a fresh `now()`.
+**Curate aggregate order is fixed** (§四 四步 BEGIN IMMEDIATE 原子执行):
+1. `aggregate_success_traces` — 幂等写入 `chunk_success_traces` 事实表
+2. `aggregate_success_counts` — 从事实表派生 `used_success_count / success_trace_ids_count / last_success_at`
+3. `aggregate_counters` — 从 `usage_trace` 增量聚合 `selected_count / used_count`
+4. 写 `meta.last_agg_ts = cutoff_ts` → `purge_usage_trace(ts < cutoff_ts)`
+
+`cutoff_ts` 在 aggregate 开始时固定为 `utc_now_iso()`，四步使用同一值；`purge_usage_trace` 严格用 `ts < cutoff_ts`，绝不用新鲜 `now()`。
 
 **`add()` trigger vector** — `tvec` is always computed as `embed_trigger(trigger_desc or content)`. Use `tvec` unconditionally for `insert_vec_trigger`; never fall back to truncating `cvec`.
 
