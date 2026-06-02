@@ -43,6 +43,21 @@ UPDATE chunks
 UPDATE chunks
   SET last_success_at = replace(last_success_at, ' ', 'T') || '.000Z'
   WHERE last_success_at IS NOT NULL AND last_success_at GLOB '????-??-?? ??:??:??';
+UPDATE chunks
+  SET state_updated_at = replace(state_updated_at, ' ', 'T') || '.000Z'
+  WHERE state_updated_at IS NOT NULL AND state_updated_at GLOB '????-??-?? ??:??:??';
+UPDATE chunks
+  SET last_agg_ts = replace(last_agg_ts, ' ', 'T') || '.000Z'
+  WHERE last_agg_ts IS NOT NULL AND last_agg_ts GLOB '????-??-?? ??:??:??';
+
+CREATE TABLE IF NOT EXISTS invalidated_hashes (
+  content_hash TEXT PRIMARY KEY,
+  reason       TEXT,
+  ts           TEXT NOT NULL
+);
+UPDATE invalidated_hashes
+  SET ts = replace(ts, ' ', 'T') || '.000Z'
+  WHERE ts GLOB '????-??-?? ??:??:??';
 
 UPDATE chunk_success_traces
   SET ts = replace(ts, ' ', 'T') || '.000Z'

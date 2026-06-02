@@ -497,7 +497,7 @@ class KnowledgeBase:
         scored = []
         for cid, info in candidates.items():
             chunk = info["chunk"]
-            conf = float(chunk.get("confidence") or 0.5)
+            conf = float(chunk["confidence"] if chunk.get("confidence") is not None else 0.5)
             fused = (
                 self.w_content * info["sim_content"]
                 + self.w_trigger * info["sim_trigger"]
@@ -1033,7 +1033,7 @@ class KnowledgeBase:
                 pass
 
         effective_alpha = alpha * strength * recency_w
-        conf = float(chunk.get("confidence") or 0.5)
+        conf = float(chunk["confidence"] if chunk.get("confidence") is not None else 0.5)
         new_conf = conf + effective_alpha * (target - conf)
         new_conf = max(0.0, min(1.0, new_conf))
         self.storage.update_chunk_confidence(chunk_id, new_conf, reason)
@@ -1726,7 +1726,7 @@ class KnowledgeBase:
                 continue
             if idle_days <= 0:
                 continue
-            conf = float(row["confidence"] or 0.5)
+            conf = float(row["confidence"] if row["confidence"] is not None else 0.5)
             floor = 0.3
             new_conf = floor + (conf - floor) * (0.5 ** (idle_days / 90.0))
             new_conf = round(new_conf, 4)
@@ -1782,7 +1782,7 @@ class KnowledgeBase:
                 continue
 
             cid = row["id"]
-            conf = float(row["confidence"] or 0.5)
+            conf = float(row["confidence"] if row["confidence"] is not None else 0.5)
             last_used = row["last_used_at"]
             selected_cnt = int(row["selected_count"] or 0)
             used_cnt = int(row["used_count"] or 0)

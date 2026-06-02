@@ -310,7 +310,7 @@ def _inspect_detail(kb, target: str) -> None:
             elif maturity not in ("promoted", "dropped"):
                 if maturity == "seed":
                     click.echo(f"  → innate mature-spark {cid} --to sprouting")
-                if maturity in ("seed", "sprouting"):
+                if maturity == "sprouting":
                     click.echo(f"  → innate mature-spark {cid} --to incubating")
                 click.echo(f"  → innate promote-spark {cid} --to note|skill")
                 click.echo(f"  → innate drop-spark {cid} --reason '...'")
