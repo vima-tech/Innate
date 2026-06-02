@@ -75,7 +75,7 @@ def test_stale_screening_recovery(kb):
     })
     kb.storage.conn.commit()
     # 直接调用 purge_stale_screening
-    n = kb.storage.purge_stale_screening(30, utc_now_iso())
+    n = kb.storage.purge_stale_screening(30)
     assert n == 1
     row = kb.storage.conn.execute(
         "SELECT distill_state, distill_note FROM episodic_log WHERE id=?", (log_id,)

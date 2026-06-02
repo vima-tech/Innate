@@ -365,7 +365,7 @@ def _inspect_library(kb) -> None:
             click.echo(f"   → 建议执行: innate inspect <spark_id>  查看详情")
 
     # 4. stale screening
-    stale = info["stale_screening"]
+    stale = info["stale_screening_count"]
     if stale:
         timeout = info["curate_params"]["screening_timeout_minutes"]
         click.echo(f"🔴 stale screening    {stale} 条日志卡死 (> {timeout}min)")

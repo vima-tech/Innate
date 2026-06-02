@@ -1365,7 +1365,7 @@ class KnowledgeBase:
             raise ChunkNotFoundError(f"spark {spark_id} not found")
         current = spark.get("maturity") or "seed"
         transitions = {
-            "seed": {"sprouting", "incubating"},
+            "seed": {"sprouting"},
             "sprouting": {"incubating"},
             "incubating": set(),
         }
@@ -1650,8 +1650,8 @@ class KnowledgeBase:
             self.storage.begin_immediate()
             try:
                 self.storage.aggregate_success_traces(last_ts, cutoff_ts)
-                self.storage.aggregate_counters(last_ts, cutoff_ts)
                 self.storage.aggregate_success_counts()
+                self.storage.aggregate_counters(last_ts, cutoff_ts)
                 self.storage.set_meta("last_agg_ts", cutoff_ts, commit=False)
                 purged = self.storage.purge_usage_trace(cutoff_ts)
                 self.storage.commit()
@@ -1661,7 +1661,7 @@ class KnowledgeBase:
             report.stats["purged_traces"] = purged
 
             # 2. purge_logs 前置: stale screening + open TTL
-            stale = self.storage.purge_stale_screening(self.screening_timeout_minutes, now)
+            stale = self.storage.purge_stale_screening(self.screening_timeout_minutes)
             if stale:
                 report.warnings.append(f"recovered {stale} stale screening rows")
             open_purged = self.storage.purge_open_timeout(self.open_ttl_days, "no_record_timeout")
@@ -1710,7 +1710,7 @@ class KnowledgeBase:
         from datetime import datetime
         rows = self.storage.conn.execute(
             """SELECT id, origin, skill_name, confidence, last_used_at
-               FROM chunks WHERE state='active' AND origin!='spark'"""
+               FROM chunks WHERE state IN ('active', 'pending') AND origin!='spark'"""
         ).fetchall()
         for row in rows:
             if not self._matches_scope(row, scope):
@@ -1755,7 +1755,7 @@ class KnowledgeBase:
                     continue
                 if not scope.dry_run:
                     self.storage.update_chunk_state(
-                        row["id"], "archived", f"duplicate:{canonical}"
+                        row["id"], "archived", f"duplicate:{canonical}", commit=False
                     )
                     # parent_id 指向 canonical,保留血缘关系
                     self.storage.conn.execute(
@@ -1796,14 +1796,14 @@ class KnowledgeBase:
                     idle_days = 0
                 if conf < self.low_conf_threshold and idle_days > self.low_conf_idle_days:
                     if not scope.dry_run:
-                        self.storage.update_chunk_state(cid, "archived", "low_confidence")
+                        self.storage.update_chunk_state(cid, "archived", "low_confidence", commit=False)
                     report.archived.append(cid)
                     continue
 
             # repeated_selected_unused
             if selected_cnt >= self.repeat_select_min and used_cnt == 0 and conf < self.repeat_select_conf_max:
                 if not scope.dry_run:
-                    self.storage.update_chunk_state(cid, "archived", "repeated_selected_unused")
+                    self.storage.update_chunk_state(cid, "archived", "repeated_selected_unused", commit=False)
                 report.archived.append(cid)
                 continue
 
@@ -1817,7 +1817,7 @@ class KnowledgeBase:
                     age_days = 0
                 if age_days > self.never_used_age_days:
                     if not scope.dry_run:
-                        self.storage.update_chunk_state(cid, "archived", "never_used")
+                        self.storage.update_chunk_state(cid, "archived", "never_used", commit=False)
                     report.archived.append(cid)
 
     def _curate_promote(self, report: CurateReport, scope: CurateScope) -> None:
@@ -1832,7 +1832,7 @@ class KnowledgeBase:
                 and int(row["success_trace_ids_count"] or 0) >= 2
                 and float(row["confidence"] or 0) >= self.promote_confidence_min):
                 if not scope.dry_run:
-                    self.storage.update_chunk_state(row["id"], "active", "repeated_success")
+                    self.storage.update_chunk_state(row["id"], "active", "repeated_success", commit=False)
                 report.stats["promoted_count"] = report.stats.get("promoted_count", 0) + 1
 
     def _curate_cycles(self, report: CurateReport, scope: CurateScope) -> None:
@@ -2010,7 +2010,6 @@ class KnowledgeBase:
                        "zombie": zombie},
             "knowledge_debt_ratio": round(debt, 2),
             "pending_embed_rebuild": stats["pending_embed"] or 0,
-            "stale_screening": stale,
             "stale_screening_count": stale,
             "distill_tokens": {"prompt": tok["p"] or 0, "completion": tok["c"] or 0,
                                "max": max_distill_tokens},

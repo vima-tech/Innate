@@ -273,7 +273,9 @@ class Storage:
         ).fetchone()
         return dict(row) if row else None
 
-    def update_chunk_state(self, chunk_id: str, state: str, state_reason: str | None = None) -> None:
+    def update_chunk_state(
+        self, chunk_id: str, state: str, state_reason: str | None = None, *, commit: bool = True
+    ) -> None:
         now = utc_now_iso()
         if state_reason:
             self.conn.execute(
@@ -285,7 +287,8 @@ class Storage:
                 "UPDATE chunks SET state=?, state_updated_at=?, updated_at=? WHERE id=?",
                 (state, now, now, chunk_id),
             )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def update_chunk_confidence(
         self, chunk_id: str, confidence: float, confidence_reason: str
@@ -549,7 +552,7 @@ class Storage:
     # ------------------------------------------------------------------
     # purge helpers
     # ------------------------------------------------------------------
-    def purge_stale_screening(self, timeout_minutes: int, now_iso: str) -> int:
+    def purge_stale_screening(self, timeout_minutes: int) -> int:
         cur = self.conn.execute(
             """UPDATE episodic_log
                SET distill_state='failed',
@@ -572,7 +575,6 @@ class Storage:
         return cur.rowcount
 
     def purge_open_timeout(self, ttl_days: int, reason: str) -> int:
-        now = utc_now_iso()
         cur = self.conn.execute(
             """UPDATE episodic_log
                SET distill_state='discarded',
