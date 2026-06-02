@@ -39,7 +39,7 @@ Runtime Daemon  (innate/daemon/)← calls CLI only for knowledge; private runtim
 | File | Role |
 |---|---|
 | `kb.py` | `KnowledgeBase` — all 8 Public APIs live here |
-| `storage.py` | sqlite-vec backend; schema init + migration runner; all SQL |
+| `storage.py` | sqlite-vec backend; schema init + migration runner + shared SQL helpers |
 | `utils.py` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `default_sanitize()` |
 | `embedding.py` | `EmbeddingProvider` ABC + `DummyEmbeddingProvider` (hash-based, for tests) |
 | `refine.py` | `Refiner`/`Distiller` ABCs + `NullRefiner`/`HeuristicDistiller` defaults |
@@ -67,7 +67,7 @@ evolve()  →  distill (new→pending chunks) + _builtin_curate (aggregate→rec
 
 **`record()` fresh-insert path** — When there is no pre-existing `episodic_log` row (Hook/Daemon direct record without a prior `recall()`), `is_fresh_insert = True` must be set before re-reading the inserted log. This flag makes `_apply_outcome_implicit` fire even though `existing_outcome == outcome` after the insert.
 
-**`spark` chunks are Curate-exempt** — Any code reading `confidence` or running archive/decay logic must first filter out `origin='spark'`. Sparks use the sequential `maturity` lifecycle (`seed→sprouting→incubating→promoted/dropped`), not `state`/`confidence`.
+**`spark` chunks are Curate-exempt** — Any code reading `confidence` or running archive/decay logic must first filter out `origin='spark'`. `mature_spark()` advances sequentially (`seed→sprouting→incubating`); explicit human `promote_spark()` / `drop_spark()` may terminate any non-terminal maturity. Sparks do not use `state`/`confidence` for gradual lifecycle decisions.
 
 **`record()` is `BEGIN IMMEDIATE`** — The entire method body runs inside one exclusive transaction. `update_chunk_confidence` and `update_chunk_last_used` do **not** call `commit()`; the outer `self.storage.commit()` at the end flushes everything.
 
@@ -78,6 +78,7 @@ evolve()  →  distill (new→pending chunks) + _builtin_curate (aggregate→rec
 4. 写 `meta.last_agg_ts = cutoff_ts` → `purge_usage_trace(ts < cutoff_ts)`
 
 `cutoff_ts` 在 aggregate 开始时固定为 `utc_now_iso()`，四步使用同一值；`purge_usage_trace` 严格用 `ts < cutoff_ts`，绝不用新鲜 `now()`。
+后续 stale-screening recovery、open TTL 和 old-log purge 同样复用本轮固定 `now_iso`。治理后半轮正常时一次提交，任一步失败时回滚未提交的治理写入。
 
 **`add()` trigger vector** — `tvec` is always computed as `embed_trigger(trigger_desc or content)`. Use `tvec` unconditionally for `insert_vec_trigger`; never fall back to truncating `cvec`.
 

@@ -1270,11 +1270,15 @@ class KnowledgeBase:
             (promoted_hash,),
         ).fetchone()
         if existing:
-            self.storage.conn.execute(
-                "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
-                (now, spark_id),
-            )
-            self.storage.conn.commit()
+            try:
+                self.storage.conn.execute(
+                    "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
+                    (now, spark_id),
+                )
+                self.storage.conn.commit()
+            except Exception:
+                self.storage.conn.rollback()
+                raise
             return existing["id"]
 
         new_id = gen_uuid()
@@ -1325,22 +1329,26 @@ class KnowledgeBase:
             chunk["embed_version"] = 0
             chunk["state_reason"] = f"embedding_pending:target={state}"
 
-        if embed_ok:
-            try:
-                self.storage.insert_chunk_with_vectors(chunk, cvec, tvec)
-            except Exception:
-                chunk["embed_version"] = 0
-                chunk["state_reason"] = f"embedding_pending:target={state}"
+        try:
+            if embed_ok:
+                try:
+                    self.storage.insert_chunk_with_vectors(chunk, cvec, tvec)
+                except Exception:
+                    chunk["embed_version"] = 0
+                    chunk["state_reason"] = f"embedding_pending:target={state}"
+                    self.storage.insert_chunk(chunk)
+            else:
                 self.storage.insert_chunk(chunk)
-        else:
-            self.storage.insert_chunk(chunk)
 
-        # 原 spark 标 maturity='promoted' (§二·七). state 保持 'active'(spark 永远不归档).
-        self.storage.conn.execute(
-            "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
-            (now, spark_id),
-        )
-        self.storage.conn.commit()
+            # 原 spark 标 maturity='promoted' (§二·七). state 保持 'active'(spark 永远不归档).
+            self.storage.conn.execute(
+                "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
+                (now, spark_id),
+            )
+            self.storage.conn.commit()
+        except Exception:
+            self.storage.conn.rollback()
+            raise
         return new_id
 
     def drop_spark(self, spark_id: str, reason: str = "") -> None:
@@ -1395,12 +1403,18 @@ class KnowledgeBase:
             return
         if chunk.get("state") != "pending":
             raise InvalidStateError("approve requires pending chunk")
-        self.storage.update_chunk_state(chunk_id, "active", "approved")
-        self.storage.conn.execute(
-            "UPDATE chunks SET confidence_reason='manual_set', updated_at=? WHERE id=?",
-            (utc_now_iso(), chunk_id),
-        )
-        self.storage.conn.commit()
+        try:
+            self.storage.update_chunk_state(
+                chunk_id, "active", "approved", commit=False
+            )
+            self.storage.conn.execute(
+                "UPDATE chunks SET confidence_reason='manual_set', updated_at=? WHERE id=?",
+                (utc_now_iso(), chunk_id),
+            )
+            self.storage.conn.commit()
+        except Exception:
+            self.storage.conn.rollback()
+            raise
 
     def archive(self, chunk_id: str, reason: str = "stale") -> None:
         chunk = self.storage.get_chunk(chunk_id)
@@ -1417,25 +1431,29 @@ class KnowledgeBase:
             raise ChunkNotFoundError(chunk_id)
         now = utc_now_iso()
         h = chunk["content_hash"]
-        # 1. 归档 + confidence 归零
-        self.storage.conn.execute(
-            """UPDATE chunks
-               SET state='archived', confidence=0.0, state_reason=?,
-                   state_updated_at=?, updated_at=?
-               WHERE id=?""",
-            (f"invalidated:{reason}" if reason else "invalidated", now, now, chunk_id),
-        )
-        # 2. 同 hash 连带
-        self.storage.conn.execute(
-            """UPDATE chunks
-               SET state='archived', confidence=0.0, state_reason=?,
-                   state_updated_at=?, updated_at=?
-               WHERE content_hash=? AND id!=?""",
-            ("invalidated:same_hash", now, now, h, chunk_id),
-        )
-        # 3. 重入黑名单
-        self.storage.insert_invalidated_hash(h, reason, now)
-        self.storage.conn.commit()
+        try:
+            # 1. 归档 + confidence 归零
+            self.storage.conn.execute(
+                """UPDATE chunks
+                   SET state='archived', confidence=0.0, state_reason=?,
+                       state_updated_at=?, updated_at=?
+                   WHERE id=?""",
+                (f"invalidated:{reason}" if reason else "invalidated", now, now, chunk_id),
+            )
+            # 2. 同 hash 连带
+            self.storage.conn.execute(
+                """UPDATE chunks
+                   SET state='archived', confidence=0.0, state_reason=?,
+                       state_updated_at=?, updated_at=?
+                   WHERE content_hash=? AND id!=?""",
+                ("invalidated:same_hash", now, now, h, chunk_id),
+            )
+            # 3. 重入黑名单
+            self.storage.insert_invalidated_hash(h, reason, now)
+            self.storage.conn.commit()
+        except Exception:
+            self.storage.conn.rollback()
+            raise
 
     def restore(self, chunk_id: str) -> None:
         chunk = self.storage.get_chunk(chunk_id)
@@ -1490,7 +1508,11 @@ class KnowledgeBase:
                 "SELECT COALESCE(SUM(distill_prompt_tokens),0) + COALESCE(SUM(distill_completion_tokens),0) AS total FROM episodic_log"
             ).fetchone()
             if tok and tok["total"] and tok["total"] > max_tokens:
-                result["curate"] = CurateReport(warnings=[f"token budget exceeded: {tok['total']} > {max_tokens}"])
+                # §六·五 token 熔断:跳过蒸馏,但 curate(aggregate/purge/维护)仍执行
+                scope = CurateScope()
+                report = self._curator.run(self, scope)
+                report.warnings.append(f"distillation skipped: token budget exceeded ({tok['total']} > {max_tokens})")
+                result["curate"] = report
                 return result
 
         # 1. distill
@@ -1674,35 +1696,43 @@ class KnowledgeBase:
                 raise
             report.stats["purged_traces"] = purged
 
-            # 2. purge_logs 前置: stale screening + open TTL
-            stale = self.storage.purge_stale_screening(self.screening_timeout_minutes)
-            if stale:
-                report.warnings.append(f"recovered {stale} stale screening rows")
-            open_purged = self.storage.purge_open_timeout(self.open_ttl_days, "no_record_timeout")
-            if open_purged:
-                report.warnings.append(f"purged {open_purged} open timeout rows")
+        try:
+            if not scope.dry_run:
+                # 2. purge_logs 前置: stale screening + open TTL
+                stale = self.storage.purge_stale_screening(self.screening_timeout_minutes, now)
+                if stale:
+                    report.warnings.append(f"recovered {stale} stale screening rows")
+                open_purged = self.storage.purge_open_timeout(
+                    self.open_ttl_days, "no_record_timeout", now
+                )
+                if open_purged:
+                    report.warnings.append(f"purged {open_purged} open timeout rows")
 
-        # 3. archive rules:必须先于 decay,避免低分失效块被拉回中性下限后逃过归档.
-        self._curate_archive(report, now, scope)
+            # 3. archive rules:必须先于 decay,避免低分失效块被拉回中性下限后逃过归档.
+            self._curate_archive(report, now, scope)
 
-        # 4. dedupe
-        self._curate_dedupe(report, now, scope)
+            # 4. dedupe
+            self._curate_dedupe(report, now, scope)
 
-        # 5. decay
-        self._curate_decay(report, now, scope)
+            # 5. decay
+            self._curate_decay(report, now, scope)
 
-        # 6. promote pending → active
-        self._curate_promote(report, scope)
+            # 6. promote pending → active
+            self._curate_promote(report, scope)
 
-        # 7. cycle / orphan 仅检测,不自动改写依赖图.
-        self._curate_cycles(report, scope)
+            # 7. cycle / orphan 仅检测,不自动改写依赖图.
+            self._curate_cycles(report, scope)
 
-        if not scope.dry_run:
-            # 8. purge old episodic_log
-            old_logs = self.storage.purge_old_logs(30)
-            report.stats["purged_logs"] = old_logs
+            if not scope.dry_run:
+                # 8. purge old episodic_log
+                old_logs = self.storage.purge_old_logs(30, now)
+                report.stats["purged_logs"] = old_logs
 
-            self.storage.conn.commit()
+                self.storage.conn.commit()
+        except Exception:
+            if not scope.dry_run:
+                self.storage.conn.rollback()
+            raise
         report.stats.setdefault("archived_count", len(report.archived))
         report.stats.setdefault("deduped_count", len(report.deduped))
         report.stats.setdefault("decayed_count", len(report.decayed))
@@ -2089,6 +2119,7 @@ class KnowledgeBase:
         ).fetchall()
         count = 0
         for row in rows:
+            self.storage.conn.execute("SAVEPOINT rebuild_embedding")
             try:
                 cvec = self.embedding.embed_content(row["content"])
                 trigger_text = row["trigger_desc"] if row["trigger_desc"] is not None else row["content"]
@@ -2107,8 +2138,11 @@ class KnowledgeBase:
                         "UPDATE chunks SET state=?, state_reason='embedding_rebuilt' WHERE id=?",
                         (target, row["id"]),
                     )
+                self.storage.conn.execute("RELEASE SAVEPOINT rebuild_embedding")
                 count += 1
             except Exception:
+                self.storage.conn.execute("ROLLBACK TO SAVEPOINT rebuild_embedding")
+                self.storage.conn.execute("RELEASE SAVEPOINT rebuild_embedding")
                 continue
         self.storage.conn.commit()
         return count
