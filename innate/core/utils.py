@@ -51,16 +51,17 @@ def default_sanitize(content: str | None) -> tuple[str | None, str]:
     if content is None:
         return None, "allow"
 
-    for pat in _SECRET_PATTERNS:
-        if pat.search(content):
-            cleaned = pat.sub("[REDACTED]", content)
-            return cleaned, "redact"
-
     for pat in _INJECTION_PATTERNS:
         if pat.search(content):
             return content, "discard"
 
-    return content, "allow"
+    cleaned = content
+    redacted = False
+    for pat in _SECRET_PATTERNS:
+        cleaned, count = pat.subn("[REDACTED]", cleaned)
+        redacted = redacted or count > 0
+
+    return cleaned, "redact" if redacted else "allow"
 
 
 def estimate_tokens(text: str | None) -> int | None:

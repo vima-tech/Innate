@@ -204,6 +204,36 @@ def test_refiner_failure_falls_back_without_breaking_recall(kb):
     assert selected == []
 
 
+def test_trim_only_charges_new_members_when_dependency_is_already_selected(kb):
+    """共享 hard dep 已入包后,trim 预算只应计算新加入的闭包成员."""
+    class TrimToOneToken(Refiner):
+        @property
+        def available(self):
+            return True
+
+        def refine(self, blocks, query, mode):
+            return [{**block, "content": "x"} for block in blocks]
+
+    kb.refiner = TrimToOneToken()
+    dependency = kb.add("d" * 40)
+    seed = kb.add("s" * 40)
+    kb.storage.insert_dep(seed, dependency, kind="hard")
+    kb.storage.conn.commit()
+
+    selected, _, _ = kb._pack(
+        [
+            (1.0, kb.storage.get_chunk(dependency)),
+            (0.9, kb.storage.get_chunk(seed)),
+        ],
+        budget=11,
+        expand_deps="direct",
+        allow_trim=True,
+        query="seed",
+    )
+
+    assert {chunk["id"] for chunk in selected} == {dependency, seed}
+
+
 def test_top_limit_keeps_hard_dependency_closure(kb):
     """--top 限制 seed 数量,不能把 hard dependency 从返回结果切掉."""
     seed = kb.add("seed", trigger_desc="seed")

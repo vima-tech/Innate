@@ -39,10 +39,13 @@ innate recall "<core task intent>" --top 5 --format prompt
 
 ```bash
 # Close the trace so the experience can be distilled later:
-innate record <trace_id> --outcome ok --used <chunk_id1>,<chunk_id2> --feedback up
+innate record <trace_id> --outcome ok --used <chunk_id1>,<chunk_id2>
 
 # If the task failed:
 innate record <trace_id> --outcome fail
+
+# Add strong feedback only when the human explicitly provides it:
+innate record <trace_id> --feedback up --used <chunk_id1>,<chunk_id2>
 ```
 
 ### Capture a structured insight
@@ -70,6 +73,7 @@ innate inspect                    # Health check: debt ratio, stale screening, e
   `innate mature-spark`, `innate promote-spark`, or `innate drop-spark` unless the human
   explicitly requests that exact governance action.
 - `innate add --source agent` is always `pending`; bypassing review is prohibited.
+- Pass `--feedback up|down` only when the human explicitly provides that feedback. Never infer strong feedback from task outcome.
 - On `exit_code != 0`: read stderr, retry once with correction. If still failing — **abandon and continue the main task**. Innate is auxiliary; knowledge failures must never block the agent.
 - Never mark agent-synthesised experience as high-confidence without human verification.
 

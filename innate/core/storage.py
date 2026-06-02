@@ -191,8 +191,14 @@ class Storage:
             if t_v > tgt_t:
                 raise RuntimeError(f"Migration {f.name} overshoots target {target}")
             sql = f.read_text(encoding="utf-8")
-            # migrations 自身不带事务包裹;executescript 隐式管理
-            self._conn.executescript(sql)  # type: ignore[union-attr]
+            # executescript 不会隐式包裹整段脚本;每个升级 step 必须原子提交.
+            try:
+                self._conn.executescript(  # type: ignore[union-attr]
+                    f"BEGIN IMMEDIATE;\n{sql}\nCOMMIT;"
+                )
+            except Exception:
+                self._conn.rollback()  # type: ignore[union-attr]
+                raise
             cur_t = t_v
         self._conn.commit()  # type: ignore[union-attr]
         final = self.get_meta("schema_version")
@@ -485,6 +491,11 @@ class Storage:
             (content_hash, reason, ts),
         )
 
+    def delete_invalidated_hash(self, content_hash: str) -> None:
+        self.conn.execute(
+            "DELETE FROM invalidated_hashes WHERE content_hash=?", (content_hash,)
+        )
+
     # ------------------------------------------------------------------
     # chunk_success_traces
     # ------------------------------------------------------------------
@@ -553,6 +564,7 @@ class Storage:
     # purge helpers
     # ------------------------------------------------------------------
     def purge_stale_screening(self, timeout_minutes: int) -> int:
+        now_iso = utc_now_iso()
         cur = self.conn.execute(
             """UPDATE episodic_log
                SET distill_state='failed',
@@ -560,8 +572,8 @@ class Storage:
                    distill_run_id=NULL,
                    distill_locked_at=NULL
                WHERE distill_state='screening'
-                 AND distill_locked_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)""",
-            (f"-{timeout_minutes} minutes",),
+                 AND distill_locked_at < strftime('%Y-%m-%dT%H:%M:%fZ', ?, ?)""",
+            (now_iso, f"-{timeout_minutes} minutes"),
         )
         return cur.rowcount
 
@@ -575,13 +587,14 @@ class Storage:
         return cur.rowcount
 
     def purge_open_timeout(self, ttl_days: int, reason: str) -> int:
+        now = utc_now_iso()
         cur = self.conn.execute(
             """UPDATE episodic_log
                SET distill_state='discarded',
                    distill_note=?
                WHERE distill_state='open'
-                 AND ts < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)""",
-            (reason, f"-{ttl_days} days"),
+                 AND ts < strftime('%Y-%m-%dT%H:%M:%fZ', ?, ?)""",
+            (reason, now, f"-{ttl_days} days"),
         )
         return cur.rowcount
 

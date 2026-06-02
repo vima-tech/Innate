@@ -31,6 +31,26 @@ def test_confidence_ema_bounded(kb):
     assert 0.0 <= chunk["confidence"] <= 1.0
 
 
+def test_zero_confidence_is_not_replaced_by_default(kb):
+    """合法的 confidence=0 必须参与 Curate 低分归档,不能回退为默认值."""
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=90)).strftime(
+        "%Y-%m-%dT%H:%M:%S."
+    ) + "000Z"
+    cid = kb.add("zero confidence")
+    kb.storage.conn.execute(
+        "UPDATE chunks SET confidence=0, last_used_at=? WHERE id=?",
+        (old, cid),
+    )
+    kb.storage.conn.commit()
+
+    report = kb._builtin_curate(CurateScope())
+
+    assert cid in report.archived
+    assert kb.storage.get_chunk(cid)["state_reason"] == "low_confidence"
+
+
 def test_curate_rules_non_overlapping(kb):
     """Curate 三归档规则对象不重叠."""
     from datetime import datetime, timedelta, timezone
@@ -73,6 +93,22 @@ def test_curate_rules_non_overlapping(kb):
 
     # 验证不重叠:每个 chunk 只归档一次
     assert len(report.archived) == len(archived)
+
+
+def test_curate_decay_exempts_protected_chunk(kb):
+    """protected 块对 Curate 永久豁免,不能被时间衰减改写 confidence."""
+    cid = kb.add("protected skill", kind="skill")
+    kb.storage.conn.execute(
+        "UPDATE chunks SET last_used_at='2020-01-01T00:00:00.000Z' WHERE id=?",
+        (cid,),
+    )
+    kb.storage.conn.commit()
+    before = kb.storage.get_chunk(cid)["confidence"]
+
+    report = kb._builtin_curate(CurateScope())
+
+    assert cid not in report.decayed
+    assert kb.storage.get_chunk(cid)["confidence"] == before
 
 
 def test_promote_three_barriers(kb):

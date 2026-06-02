@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import innate.core.storage as storage_module
 from innate.cli.main import cli
 from innate.core import CurateScope, KnowledgeBase
 from innate.core.embedding import EmbeddingProvider
@@ -222,6 +223,28 @@ def test_duplicate_trace_migration_preserves_rows_and_builds_unique_index(tmp_pa
         ("dup:migration_dedup:b", "discarded", "migration_dedup"),
     ]
     conn.close()
+
+
+def test_migration_step_rolls_back_partial_schema_on_failure(kb, tmp_path, monkeypatch):
+    migration_dir = tmp_path / "migrations"
+    migration_dir.mkdir()
+    (migration_dir / "4.5.1_to_4.5.2.sql").write_text(
+        """
+        CREATE TABLE partial_migration(id TEXT);
+        SELECT * FROM missing_table;
+        INSERT OR REPLACE INTO meta VALUES ('schema_version', '4.5.2');
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(storage_module, "MIGRATIONS_DIR", migration_dir)
+
+    with pytest.raises(sqlite3.OperationalError, match="missing_table"):
+        kb.storage._apply_migrations("4.5.1", "4.5.2")
+
+    assert kb.storage.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='partial_migration'"
+    ).fetchone() is None
+    assert kb.storage.get_meta("schema_version") == "4.5.1"
 
 
 def test_archive_rejects_spark(kb):
@@ -447,6 +470,16 @@ def test_cycle_detection_reports_independent_cycles(kb):
     assert len(report.cycles) == 2
 
 
+def test_cycle_detection_handles_deep_dependency_chain_without_recursion(kb):
+    for index in range(1200):
+        kb.storage.insert_dep(f"node-{index}", f"node-{index + 1}", kind="hard")
+    kb.storage.conn.commit()
+
+    report = kb._builtin_curate(CurateScope(dry_run=True))
+
+    assert report.cycles == []
+
+
 def test_recall_rejects_unknown_dependency_mode(kb):
     with pytest.raises(InvalidStateError, match="expand_deps"):
         kb.recall("query", expand_deps="recursive")
@@ -514,6 +547,34 @@ def test_restore_sets_confidence_reason(kb):
     kb.restore(chunk_id)
 
     assert kb.storage.get_chunk(chunk_id)["confidence_reason"] == "restore"
+
+
+def test_restore_invalidated_chunk_removes_hash_blacklist(kb):
+    chunk_id = kb.add("restore invalidated")
+    chunk_hash = kb.storage.get_chunk(chunk_id)["content_hash"]
+    kb.invalidate(chunk_id, reason="mistake")
+    assert kb.storage.is_invalidated(chunk_hash)
+
+    kb.restore(chunk_id)
+
+    assert kb.storage.get_chunk(chunk_id)["state"] == "active"
+    assert not kb.storage.is_invalidated(chunk_hash)
+    assert kb.add("restore invalidated") == chunk_id
+
+
+def test_restore_repairs_legacy_active_chunk_with_stale_hash_blacklist(kb):
+    chunk_id = kb.add("legacy restored invalidation")
+    chunk_hash = kb.storage.get_chunk(chunk_id)["content_hash"]
+    kb.invalidate(chunk_id, reason="mistake")
+    kb.storage.conn.execute(
+        "UPDATE chunks SET state='active', state_reason='restore' WHERE id=?",
+        (chunk_id,),
+    )
+    kb.storage.conn.commit()
+
+    kb.restore(chunk_id)
+
+    assert not kb.storage.is_invalidated(chunk_hash)
 
 
 def test_restore_cannot_bypass_pending_review(kb):
@@ -589,6 +650,15 @@ def test_spark_maturity_can_only_move_forward(kb):
     assert kb.storage.get_chunk(spark_id)["maturity"] == "incubating"
     with pytest.raises(InvalidStateError, match="transition"):
         kb.mature_spark(spark_id, "sprouting")
+
+
+def test_spark_maturity_cannot_skip_stage(kb):
+    spark_id = kb.spark("incubate sequentially")
+
+    with pytest.raises(InvalidStateError, match="transition"):
+        kb.mature_spark(spark_id, "incubating")
+
+    assert kb.storage.get_chunk(spark_id)["maturity"] == "seed"
 
 
 def test_cli_can_advance_spark_maturity(kb):
@@ -783,10 +853,12 @@ def test_v451_migration_normalizes_legacy_space_separated_timestamps(tmp_path):
     legacy = "2026-01-02 03:04:05"
     kb.storage.conn.execute(
         """UPDATE chunks
-           SET created_at=?, updated_at=?, last_used_at=?, last_success_at=?
+           SET created_at=?, updated_at=?, last_used_at=?, last_success_at=?,
+               state_updated_at=?, last_agg_ts=?
            WHERE id=?""",
-        (legacy, legacy, legacy, legacy, chunk_id),
+        (legacy, legacy, legacy, legacy, legacy, legacy, chunk_id),
     )
+    kb.storage.insert_invalidated_hash("legacy-hash", "legacy", legacy)
     kb.storage.append_trace(
         {
             "trace_id": "legacy-usage",
@@ -821,6 +893,11 @@ def test_v451_migration_normalizes_legacy_space_separated_timestamps(tmp_path):
     assert chunk["updated_at"] == expected
     assert chunk["last_used_at"] == expected
     assert chunk["last_success_at"] == expected
+    assert chunk["state_updated_at"] == expected
+    assert chunk["last_agg_ts"] == expected
+    assert reopened.storage.conn.execute(
+        "SELECT ts FROM invalidated_hashes WHERE content_hash='legacy-hash'"
+    ).fetchone()[0] == expected
     assert reopened.storage.conn.execute(
         "SELECT ts FROM usage_trace WHERE trace_id='legacy-usage'"
     ).fetchone()[0] == expected

@@ -15,7 +15,7 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 - **治理**: `usage → confidence → curate`(EMA 置信度更新 + Curate 归档)
 - **安全**: `pending/archived/不物理删`(默认 sanitize 钩子零重依赖, 黑名单 + 红action)
 
-> 同步召回路径**绝不调用任何 LLM/小模型**——Innate 是图书管理员, 不是阅读者兼编辑。路由、动态裁剪、归因的权力交还上层编排框架。
+> 默认同步召回路径**绝不调用任何 LLM/小模型**——Innate 是图书管理员, 不是阅读者兼编辑。只有调用方显式开启可选 Refiner 时才执行 trim/adapt。路由、动态裁剪、归因的权力交还上层编排框架。
 
 ---
 
@@ -76,7 +76,9 @@ innate add "Python 列表推导式比 map/filter 更易读" --kind note --trigge
 innate recall "python 列表优化" --budget 2000 --format json
 
 # 3. 补全 trace (闭合经验链路)
-innate record <trace_id> --outcome ok --used <chunk_id1>,<chunk_id2> --feedback up
+innate record <trace_id> --outcome ok --used <chunk_id1>,<chunk_id2>
+# 仅当人明确给出反馈时再补强信号:
+innate record <trace_id> --feedback up --used <chunk_id1>,<chunk_id2>
 
 # 4. 触发成长 (蒸馏 + 治理)
 innate evolve --trigger manual
@@ -136,7 +138,7 @@ print("distilled:", result["distilled"], "curate:", result["curate"])
 kb.approve(pending_id)             # pending → active
 kb.archive(note_id, reason="stale")
 kb.invalidate(note_id, reason="逻辑错误")  # 归档 + 黑名单
-kb.restore(archived_id)
+kb.restore(archived_id)                  # 若此前 invalidate, 同步撤销 hash 黑名单
 
 # 6. 灵感生命周期
 kb.mature_spark(spark_id, to="sprouting")    # seed → sprouting
@@ -179,14 +181,14 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 | `innate approve <id>` | 治理 | pending → active |
 | `innate archive <id>` | 治理 | `--reason` |
 | `innate invalidate <id>` | 治理 | `--reason` (归档 + 黑名单) |
-| `innate restore <id>` | 治理 | archived → active |
+| `innate restore <id>` | 治理 | archived → active; 若此前 invalidate, 同步撤销 hash 黑名单 |
 | `innate daemon start` | 守护 | `--watch <dir>` (可重复) · `--db` · `--pid-file` · `--log-file` · `--state-db` |
 | `innate daemon stop` | 守护 | `--pid-file` |
 | `innate daemon status` | 守护 | `--pid-file` · `--state-db` |
 
 ### `recall` 输出格式
 
-- `text` — 人类可读, 末尾带 trace 信息
+- `text` — 人类可读, 不输出 trace 信息
 - `json` — 机器可读, 含 `trace_id` / `selected` / `chunks` / `sparks` 字段
 - `prompt` — 可直接拼进 system prompt, 末尾含 HTML 注释 `<!-- innate_trace_id: xxx -->` 供后续提取
 
@@ -236,7 +238,7 @@ Innate System
     └── npx skills add vima-tech/Innate
 ```
 
-**依赖方向严格向下**: `daemon → CLI → core`。Daemon 自身不直接操作知识库, 全部通过 `subprocess` 调 `innate` CLI。Core 是唯一能读写 SQLite 的层。
+**依赖方向严格向下**: `daemon → CLI → core`。Daemon 自身不直接操作知识库, 全部通过 `subprocess` 调 `innate` CLI。Core 是唯一能读写知识库 SQLite 的层;Daemon 仅可读写自身私有状态 SQLite。
 
 ---
 
@@ -247,7 +249,7 @@ Innate System
 - **hard dep fail-closed**: 召回时若 hard 依赖不可用/被归档/跨库, 直接丢弃整个 seed, **绝不返回半截闭包**
 - **soft dep 提示式**: soft 依赖仅作候选加分, 不强制装包, 跨库引用解析失败不阻塞 seed
 - **零主动行为**: SDK 永不自发行动, 所有成长由外部触发 (evolve trigger: manual / scheduled / threshold)
-- **零重依赖**: 默认 sanitize 仅 5 条正则, 知识写入路径全部经过钩子; 不绑定 Presidio 等重型库
+- **零重依赖**: 默认 sanitize 仅用 5 条密钥规则 + 3 条 injection 规则, 知识写入路径全部经过钩子; 不绑定 Presidio 等重型库
 - **sanitize 三态合同**: 钩子返回 `(cleaned, action)`, `action ∈ {allow, redact, discard}`; `discard` 拒绝写入, `redact` 落点 confidence 上限 0.4
 - **spark 独立生命周期**: maturity = `seed → sprouting → incubating`, 仅 `promote` / `drop` 时离场; 不参与 confidence 排序, 不被低分归档, 不算知识债务
 - **多库挂载**: `KnowledgeBase("personal.db", shared=["shared.db"])` — 个人库可读写, 共享库只读 (read-only PRAGMA + 缺少 Innate schema 时拒绝打开)

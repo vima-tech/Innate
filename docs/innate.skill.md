@@ -63,6 +63,7 @@ innate add "<经验>" --kind note --source agent
   `mature-spark` / `promote-spark` / `drop-spark`
   (人工治理专属; 仅在人明确要求该动作时执行)
 - `innate add --source agent` 只写 pending, 不得绕过审核
+- `--feedback up|down` 仅在人明确给出反馈时传入, 不得从任务成败自行推断强反馈
 - CLI 返回 `exit_code != 0`: 读 stderr 修正一次, 仍失败则放弃, **绝不阻塞主任务**
 - 禁止在未经测试验证的情况下将 Agent 总结的经验标记为高置信度
 

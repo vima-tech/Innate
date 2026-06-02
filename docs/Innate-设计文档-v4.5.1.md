@@ -432,7 +432,7 @@ else:                                                      → 保留
 2. **重入黑名单**:作废的 content_hash 进 `invalidated_hashes` 表;后续 add/distill 写入同 hash 内容被拦。
 3. **衍生提示**:顺 `parent_id`/`distilled_from` 查出由它衍生的块,**提示但不自动删**(自动删有误伤风险,交人裁定)。`inspect(chunk_id)` 可查一条知识的全部关联/衍生,便于一次清干净。
 
-invalidate 是"人的一票否决",和 capture(人确认存入)是对偶——都是**人的显式判断直接作用于库,不被迫走渐进自动机制**。它仍不物理删除:保留"我曾判定这是错的"本身有价值,且防误删可恢复。
+invalidate 是"人的一票否决",和 capture(人确认存入)是对偶——都是**人的显式判断直接作用于库,不被迫走渐进自动机制**。它仍不物理删除:保留"我曾判定这是错的"本身有价值,且防误删可恢复。人工 `restore()` 一个被 invalidate 的块时同步删除对应 `invalidated_hashes` 行，表示人工撤销此前的一票否决；`confidence=0.0` 保留，恢复后的块重新靠反馈建立信任。
 
 ---
 
@@ -526,15 +526,18 @@ sanitize(content) -> (cleaned_content, action)   # action: allow | redact | disc
   ]
 
   def default_sanitize(content: str):
-      for pat in _SECRET_PATTERNS:
-          if re.search(pat, content):
-              cleaned = re.sub(pat, '[REDACTED]', content)
-              return cleaned, 'redact'
       for pat in _INJECTION_PATTERNS:
           if re.search(pat, content):
               return content, 'discard'
-      return content, 'allow'
+      cleaned = content
+      redacted = False
+      for pat in _SECRET_PATTERNS:
+          cleaned, count = re.subn(pat, '[REDACTED]', cleaned)
+          redacted = redacted or count > 0
+      return cleaned, 'redact' if redacted else 'allow'
   ```
+
+  injection 命中优先 `discard`，不能因同一内容还包含密钥而降级为 `redact`；密钥脱敏遍历全部模式，避免一次写入中残留第二类密钥。
 
 - **可替换**:用户注入更强的 scanner(接 Presidio 等)。
 - **可关闭**:`KnowledgeBase(sanitize=None)` 显式传 `None` 完全跳过，**不建议用于生产**；适用于受控内网环境或性能敏感场景。中间态：传入 `sanitize=my_fn` 替换而非叠加。
@@ -564,7 +567,7 @@ seed(火花) → sprouting(在长) → incubating(孵化中)
                                       └→ dropped(明确放弃)
 ```
 - spark **豁免 Curate 的 confidence 淘汰**(实测:Curate 见 origin='spark' 直接保留)。灵感只在**显式 drop**(放弃)或 **promote**(孵化)时离场,绝不因"低分久未用"被归档误杀。
-- maturity 由用户推进,系统不自动改(零主动行为)。
+- maturity 由用户逐级推进(`seed → sprouting → incubating`),系统不自动改、不允许跨级跳过(零主动行为)。
 - **spark 的 confidence 字段存在但语义为 NULL/无效**——schema 统一存储,但任何读取 confidence 的逻辑(Curate/fused_score加权/debt_ratio)必须先过滤 origin='spark'。
 
 ### 记录:kb.spark()(capture 的低门槛变体)
@@ -660,7 +663,7 @@ episodic_log 与 chunks 同库后,Distill 是**单库内操作**,流程更简单
 -- Python 层生成唯一 run_id
 -- run_id = str(uuid.uuid4())
 -- batch_size = 20(可配置)
--- locked_at = datetime.utcnow().isoformat() + 'Z'
+-- locked_at = utc_now_iso()
 
 BEGIN IMMEDIATE;
 
@@ -695,8 +698,9 @@ SET distill_state  = 'failed',
     distill_run_id = NULL,
     distill_locked_at = NULL
 WHERE distill_state = 'screening'
-  AND distill_locked_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes');
+  AND distill_locked_at < strftime('%Y-%m-%dT%H:%M:%fZ', :now_iso, '-30 minutes');
 ```
+- `:now_iso` 由本轮 Curate 开始时的 `utc_now_iso()` 固定生成；同轮 recovery 使用同一 UTC 边界，不在 SQL 执行过程中漂移
 - 超时行改 `failed`（终态），`distill_note` 记录是哪个 run_id 超时
 - 不自动重试（防无限循环）；需人工或运维脚本将 `distill_state` 重置为 `new`
 - `inspect()` 输出 `stale_screening_count`（当前 screening 且 locked_at 超阈值的行数）作为健康信号
@@ -970,7 +974,7 @@ CREATE INDEX IF NOT EXISTS idx_cst_chunk ON chunk_success_traces(chunk_id);
 -- 0. 固定本轮窗口边界(v4.5.1:cutoff_ts 防漏计 race)
 --    在 Python 里读取:
 --      last_ts    = db.execute(
---          "SELECT COALESCE(value,'1970-01-01T00:00:00Z') FROM meta WHERE key='last_agg_ts'"
+--          "SELECT COALESCE(value,'1970-01-01T00:00:00.000Z') FROM meta WHERE key='last_agg_ts'"
 --      ).fetchone()[0]
 --      cutoff_ts  = utc_now_iso()   # 统一封装函数,见 §六·七
 --      -- (等价 SQL: SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -1041,7 +1045,7 @@ INSERT OR REPLACE INTO meta VALUES ('last_agg_ts', :cutoff_ts);
 3. 版本低于预期 → 执行对应迁移脚本(migrations/ 目录),迁移后更新 `schema_version`。
 4. 版本高于预期 → 警告但不阻塞(向前兼容),新字段 SDK 不识别则忽略。
 
-**迁移原则**:所有迁移仅 ADD COLUMN / CREATE INDEX / CREATE TABLE,**永不 DROP COLUMN / ALTER TABLE 改类型**——保持向后兼容且可回滚。新列均有 DEFAULT 值,迁移后老数据立即可用。
+**迁移原则**:所有结构变更仅使用 ADD COLUMN / CREATE INDEX / CREATE TABLE,**永不 DROP COLUMN / ALTER TABLE 改类型**——保持向后兼容且可回滚。允许为兼容历史数据执行必要的 UPDATE 归一化,以及在建立幂等唯一索引前删除重复 usage_trace 明细。新增的必填列提供 DEFAULT;可空列直接兼容老数据。runner 对每个迁移 step 显式包裹 `BEGIN IMMEDIATE ... COMMIT`；任何语句失败都回滚整个 step，不能留下半迁移结构。
 
 v4.0 → v4.1 迁移示例:
 ```sql
@@ -1229,6 +1233,21 @@ UPDATE chunks
 UPDATE chunks
   SET last_success_at = replace(last_success_at, ' ', 'T') || '.000Z'
   WHERE last_success_at IS NOT NULL AND last_success_at GLOB '????-??-?? ??:??:??';
+UPDATE chunks
+  SET state_updated_at = replace(state_updated_at, ' ', 'T') || '.000Z'
+  WHERE state_updated_at IS NOT NULL AND state_updated_at GLOB '????-??-?? ??:??:??';
+UPDATE chunks
+  SET last_agg_ts = replace(last_agg_ts, ' ', 'T') || '.000Z'
+  WHERE last_agg_ts IS NOT NULL AND last_agg_ts GLOB '????-??-?? ??:??:??';
+
+CREATE TABLE IF NOT EXISTS invalidated_hashes (
+  content_hash TEXT PRIMARY KEY,
+  reason       TEXT,
+  ts           TEXT NOT NULL
+);
+UPDATE invalidated_hashes
+  SET ts = replace(ts, ' ', 'T') || '.000Z'
+  WHERE ts GLOB '????-??-?? ??:??:??';
 
 UPDATE chunk_success_traces
   SET ts = replace(ts, ' ', 'T') || '.000Z'
@@ -1986,6 +2005,7 @@ innate add "<经验>" --kind note --source agent
 - 禁止自行执行 innate approve / archive / invalidate / restore / mature-spark / promote-spark / drop-spark
   (人工治理专属；仅在人明确要求该动作时执行)
 - innate add --source agent 只写 pending,不得绕过审核
+- --feedback up|down 仅在人明确给出反馈时传入,不得从任务成败自行推断强反馈
 - CLI 返回 exit_code != 0:读 stderr 修正一次,仍失败则放弃,绝不阻塞主任务
 - 禁止在未经测试验证的情况下将 Agent 总结的经验标记为高置信度
 ```
@@ -2030,6 +2050,8 @@ innate add "<经验>" --kind note --source agent
 - ✅ **2026-06-01 完整性复核补充**:chunk+双向量原子写入、向量重建失败保留旧值、共享库只读且不隐式创建、重复 trace 迁移安全去重、hard dep 不可用 fail-closed、跨库 soft dep 解析、trim/adapt protected 防改写、spark maturity 人工前向推进、VectorStore 工厂注入、Hook JSON 会话 trace 贯穿与结束清理、CLI JSON `selected/chunks` 合同
 - ✅ **2026-06-01 严格复核补充**:record 两阶段补全保持 open、nomination 默认高优先级且 CLI/Hook 可覆盖、aggregate 水位推进与 raw trace 清理原子提交、人工 archive 与 Curate protected 豁免分层、inspect 展示配置化 screening timeout
 - ✅ **2026-06-01 边界复核补充**:hard dep 严格所属库内闭包、aggregate 改半开窗口避免同毫秒漏计、延迟补录 used 关联持久化 outcome、v4.5.1 时间迁移使用正确 GLOB 通配符、`recall(top=0)` empty 标志按可见结果计算
+- ✅ **2026-06-02 再次严格复核补充**:`confidence=0` 不再误回退默认值、trim 对已入包共享 hard dep 只计算增量成本、v4.5.1 时间迁移覆盖保留时间列并兼容缺少黑名单表的旧库、默认 sanitize 组合输入按 injection 优先拒绝且全量脱敏
+- ✅ **2026-06-02 独立复核补充**:invalidate 后 restore 同步撤销 hash 黑名单并修复历史不一致、spark maturity 逐级推进、protected 块完全豁免 Curate decay、recovery 使用同轮固定 UTC 边界、迁移 step 失败原子回滚、cycle 检测改显式栈支持深依赖链、Skill 禁止从 outcome 自行推断强 feedback
 - ✅ **v4.4/v4.5 新增路径**:
   - outcome 互斥索引（idx_trace_outcome_once）行为
   - screening 原子 claim（BEGIN IMMEDIATE + distill_run_id/distill_locked_at）

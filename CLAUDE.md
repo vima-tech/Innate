@@ -29,9 +29,9 @@ innate evolve --trigger manual
 Three-layer system — each layer may only interact downward:
 
 ```
-Core SDK  (innate/core/)        ← only layer allowed to read/write the DB
+Core SDK  (innate/core/)        ← only layer allowed to read/write the knowledge DB
 CLI Adapter  (innate/cli/)      ← thin Click wrapper, 1:1 maps to Core Public API
-Runtime Daemon  (innate/daemon/)← external process, calls CLI only, never DB directly
+Runtime Daemon  (innate/daemon/)← calls CLI only for knowledge; private runtime-state DB only
 ```
 
 ### Core SDK (`innate/core/`)
@@ -45,44 +45,45 @@ Runtime Daemon  (innate/daemon/)← external process, calls CLI only, never DB d
 | `refine.py` | `Refiner`/`Distiller` ABCs + `NullRefiner`/`HeuristicDistiller` defaults |
 | `exceptions.py` | `EmbeddingUnavailable`, `OutcomeConflictError`, `ChunkNotFoundError`, `InvalidStateError` |
 
-**`schema.sql` lives in `migrations/`** (not inside the package). `Storage._init_schema()` finds it at `../../migrations/schema.sql` relative to `storage.py`, then auto-applies incremental migrations (`4.x_to_4.y.sql`).
+**`schema.sql` is mirrored in `migrations/` and `innate/migrations/`**. Runtime uses the packaged `innate/migrations/schema.sql` fallback and auto-applies packaged incremental migrations (`4.x_to_4.y.sql`).
 
 ### The 8 Public APIs (on `KnowledgeBase`)
 
-`recall` → `record` → `evolve` → `approve/archive/invalidate/restore` → `add` → `spark/promote_spark/drop_spark` → `inspect` → `@augmented`
+`recall` → `record` → `evolve` → `approve/archive/invalidate/restore` → `add` → `spark/mature_spark/promote_spark/drop_spark` → `inspect` → `@augmented`
 
 ### Key Data Flow
 
 ```
 recall()  →  writes usage_trace(retrieved/selected) + episodic_log(distill_state='open')
 record()  →  appends usage_trace(used/task_ok/task_fail) + updates episodic_log → 'new' or 'discarded'
-evolve()  →  distill (new→pending chunks) + _builtin_curate (aggregate→decay→dedupe→archive→promote→purge)
+evolve()  →  distill (new→pending chunks) + _builtin_curate (aggregate→recover→archive→dedupe→decay→promote→cycle/orphan→purge)
 ```
 
 ## Non-Obvious Implementation Constraints
 
-**Time functions** — `utc_now_iso()` in `utils.py` is the **only** allowed Python time source. Never call `datetime.utcnow()`, `time.time()`, or SQLite `datetime('now')` directly. All SQL time generation must use `strftime('%Y-%m-%dT%H:%M:%fZ','now')`. This is enforced for SQLite TEXT dictionary-order comparisons.
+**Time functions** — `utc_now_iso()` in `utils.py` is the **only** allowed Python time source. Never call `datetime.utcnow()`, `time.time()`, or SQLite `datetime('now')` directly. SQL-generated timestamps and comparison cutoffs must use `strftime('%Y-%m-%dT%H:%M:%fZ', ...)` with either `'now'` or a fixed `utc_now_iso()` parameter. This is enforced for SQLite TEXT dictionary-order comparisons.
 
 **`record()` distill_state transition** — The `open→new/discarded` judgment runs **only when `distill_state == 'open'`**. Calling `record()` a second time (e.g., to add feedback) must not downgrade a log already in `'new'` or `'screening'` state.
 
 **`record()` fresh-insert path** — When there is no pre-existing `episodic_log` row (Hook/Daemon direct record without a prior `recall()`), `is_fresh_insert = True` must be set before re-reading the inserted log. This flag makes `_apply_outcome_implicit` fire even though `existing_outcome == outcome` after the insert.
 
-**`spark` chunks are Curate-exempt** — Any code reading `confidence` or running archive/decay logic must first filter out `origin='spark'`. Sparks use `maturity` lifecycle (`seed→incubating→promoted/dropped`), not `state`/`confidence`.
+**`spark` chunks are Curate-exempt** — Any code reading `confidence` or running archive/decay logic must first filter out `origin='spark'`. Sparks use the sequential `maturity` lifecycle (`seed→sprouting→incubating→promoted/dropped`), not `state`/`confidence`.
 
 **`record()` is `BEGIN IMMEDIATE`** — The entire method body runs inside one exclusive transaction. `update_chunk_confidence` and `update_chunk_last_used` do **not** call `commit()`; the outer `self.storage.commit()` at the end flushes everything.
 
-**Curate aggregate order is fixed**: aggregate success traces → aggregate counters → write `meta.last_agg_ts = cutoff_ts` → then purge. `purge_usage_trace` uses `ts <= cutoff_ts` (the value fixed at aggregate start), never a fresh `now()`.
+**Curate aggregate order is fixed**: aggregate success traces → aggregate counters → write `meta.last_agg_ts = cutoff_ts` → then purge. `purge_usage_trace` uses `ts < cutoff_ts` (the value fixed at aggregate start), never a fresh `now()`.
 
 **`add()` trigger vector** — `tvec` is always computed as `embed_trigger(trigger_desc or content)`. Use `tvec` unconditionally for `insert_vec_trigger`; never fall back to truncating `cvec`.
 
 ## Extension Points
 
-Five pluggable objects injected at `KnowledgeBase(...)`:
+Six injectable extension points at `KnowledgeBase(...)`:
 - `embedding: EmbeddingProvider` — swap embedding model
 - `curator: Curator` — replace entire Curate logic (single `run()` method)
 - `refiner: Refiner` — online trim/adapt (default `NullRefiner`, off)
 - `distiller: Distiller` — episodic log → chunk extraction (default `HeuristicDistiller`)
 - `sanitize: Callable` — content safety hook (default regex-only; `None` disables)
+- `storage_factory: Callable[..., Storage]` — SQL-compatible VectorStore factory
 
 ## Configurable Parameters
 

@@ -580,8 +580,9 @@ class KnowledgeBase:
                 except Exception:
                     refined = None
                 if refined and self._refine_intact(block, refined):
+                    new_refined = [b for b in refined if b["id"] not in used_ids]
                     refined_cost = sum(
-                        estimate_tokens(b["content"]) or 100 for b in refined
+                        estimate_tokens(b["content"]) or 100 for b in new_refined
                     )
                     if used_tokens + refined_cost <= budget:
                         for b in refined:
@@ -1441,15 +1442,28 @@ class KnowledgeBase:
         if not chunk:
             raise ChunkNotFoundError(chunk_id)
         if chunk.get("state") == "active":
+            if (
+                chunk.get("state_reason") == "restore"
+                and self.storage.is_invalidated(chunk["content_hash"])
+            ):
+                self.storage.delete_invalidated_hash(chunk["content_hash"])
+                self.storage.conn.commit()
             return
         if chunk.get("state") != "archived":
             raise InvalidStateError("restore requires archived chunk")
-        self.storage.update_chunk_state(chunk_id, "active", "restore")
-        self.storage.conn.execute(
-            "UPDATE chunks SET confidence_reason='restore', updated_at=? WHERE id=?",
-            (utc_now_iso(), chunk_id),
-        )
-        self.storage.conn.commit()
+        was_invalidated = (chunk.get("state_reason") or "").startswith("invalidated")
+        try:
+            self.storage.update_chunk_state(chunk_id, "active", "restore", commit=False)
+            if was_invalidated:
+                self.storage.delete_invalidated_hash(chunk["content_hash"])
+            self.storage.conn.execute(
+                "UPDATE chunks SET confidence_reason='restore', updated_at=? WHERE id=?",
+                (utc_now_iso(), chunk_id),
+            )
+            self.storage.conn.commit()
+        except Exception:
+            self.storage.conn.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # Public API: evolve
@@ -1709,10 +1723,12 @@ class KnowledgeBase:
     def _curate_decay(self, report: CurateReport, now_iso: str, scope: CurateScope) -> None:
         from datetime import datetime
         rows = self.storage.conn.execute(
-            """SELECT id, origin, skill_name, confidence, last_used_at
+            """SELECT id, origin, skill_name, confidence, last_used_at, protected
                FROM chunks WHERE state IN ('active', 'pending') AND origin!='spark'"""
         ).fetchall()
         for row in rows:
+            if row["protected"]:
+                continue
             if not self._matches_scope(row, scope):
                 continue
             last = row["last_used_at"]
@@ -1843,23 +1859,31 @@ class KnowledgeBase:
             graph.setdefault(r["src"], []).append(r["dst"])
         visited = set()
         on_stack = set()
-
-        def dfs(node: str, path: List[str]) -> None:
-            visited.add(node)
-            on_stack.add(node)
-            for nxt in graph.get(node, []):
+        for root in list(graph.keys()):
+            if root in visited:
+                continue
+            path: List[str] = []
+            stack = [(root, iter(graph.get(root, [])))]
+            while stack:
+                node, children = stack[-1]
+                if node not in visited:
+                    visited.add(node)
+                    on_stack.add(node)
+                    path.append(node)
+                try:
+                    nxt = next(children)
+                except StopIteration:
+                    stack.pop()
+                    on_stack.remove(node)
+                    path.pop()
+                    continue
                 if nxt not in visited:
-                    dfs(nxt, path + [nxt])
+                    stack.append((nxt, iter(graph.get(nxt, []))))
                 elif nxt in on_stack:
                     cycle_start = path.index(nxt)
                     cycle = path[cycle_start:] + [nxt]
                     if cycle not in report.cycles:
                         report.cycles.append(cycle)
-            on_stack.remove(node)
-
-        for node in list(graph.keys()):
-            if node not in visited:
-                dfs(node, [node])
         if graph:
             connected = set(graph)
             for destinations in graph.values():

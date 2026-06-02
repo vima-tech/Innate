@@ -140,6 +140,9 @@ def test_migration_runner_picks_up_mid_version():
         "SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_success_traces'"
     ).fetchall()]
     assert "chunk_success_traces" in tbls
+    assert k.storage.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='invalidated_hashes'"
+    ).fetchone() is not None
     # v4.5 加的字段
     assert "event_source" in cols_ep
     assert "distill_run_id" in cols_ep
