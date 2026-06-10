@@ -21,18 +21,45 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 
 ## 安装
 
-```bash
-pip install innate-ai            # Core SDK + CLI
-python -m innate --help         # 也可通过 python -m 入口
-```
-
-可选安装 Agent Skill(Claude Code 等支持 [Agent Skills 开放标准](https://agentskills.io/specification) 的 Agent):
+### Rust 核心 (推荐)
 
 ```bash
-npx skills add vima-tech/Innate
+# 从源码编译
+cd innate-rs && cargo build --release
+cp target/release/innate ~/.local/bin/   # 加入 PATH
+
+# 验证
+innate inspect
 ```
 
-安装后 Agent 会自动获得 `innate-memory` skill, 知道何时召回、何时记录、何时成长, 无需手动配置。
+### Python SDK
+
+```bash
+pip install innate-py   # 或 pip install -e sdks/python/
+```
+
+### TypeScript SDK
+
+```bash
+npm install @innate/sdk  # 或 npm install ./sdks/typescript/
+```
+
+### MCP 服务 (Claude Code / Claude Desktop)
+
+在 `.claude/settings.json` 中添加:
+
+```json
+{
+  "mcpServers": {
+    "innate": {
+      "command": "innate",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+配置后 Agent 可直接使用 `innate_recall`、`innate_record` 等 MCP 工具, 无需 CLI 命令。
 
 ---
 

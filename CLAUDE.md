@@ -1,120 +1,141 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
 ## Commands
 
 ```bash
-# Install (editable + dev deps)
-pip install -e ".[dev]"
+# Build the binary
+cd innate-rs && cargo build --release
+# Binary: innate-rs/target/release/innate
 
-# Run all tests
-python -m pytest tests/
+# Run tests
+cd innate-rs && cargo test
 
-# Run a single test
-python -m pytest tests/test_v451_compliance.py::test_record_second_call_does_not_downgrade_new_state -x
-
-# Run the CLI
+# Run the CLI (after adding to PATH or using full path)
 innate recall "query" --format json
 innate inspect
 innate evolve --trigger manual
+
+# Start MCP server (for Claude Code / Claude Desktop integration)
+innate mcp
+```
+
+## MCP Integration
+
+Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "innate": {
+      "command": "/path/to/innate-rs/target/release/innate",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
 ## Authoritative Design Reference
 
-`docs/Innate-设计文档-v4.5.1.md` is the **编码基线**. Every design decision references a section (§一–§九). When behavior is ambiguous, consult the doc first. The schema, API contracts, confidence formulas, and Curate rules in the doc are authoritative.
+`docs/Innate-设计文档-v4.5.1.md` is the **编码基线**. Every design decision references a section (§一–§九). When behavior is ambiguous, consult the doc first.
 
 ## Architecture
 
-Three-layer system — each layer may only interact downward:
+Single Rust binary (`innate-rs/`) — three modes, one process:
 
 ```
-Core SDK  (innate/core/)        ← only layer allowed to read/write the knowledge DB
-CLI Adapter  (innate/cli/)      ← thin Click wrapper, 1:1 maps to Core Public API
-Runtime Daemon  (innate/daemon/)← calls CLI only for knowledge; private runtime-state DB only
+innate recall/record/...  ← CLI adapter (clap, thin wrapper over KnowledgeBase)
+innate mcp                ← MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
+KnowledgeBase (lib)       ← core: all 8 Public APIs, SQLite + pure-Rust vector search
 ```
 
-### Core SDK (`innate/core/`)
+### Crate layout (`innate-rs/crates/innate-core/src/`)
 
 | File | Role |
 |---|---|
-| `kb.py` | `KnowledgeBase` — all 8 Public APIs live here |
-| `storage.py` | sqlite-vec backend; schema init + migration runner + shared SQL helpers |
-| `utils.py` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `default_sanitize()` |
-| `embedding.py` | `EmbeddingProvider` ABC + `DummyEmbeddingProvider` (hash-based, for tests) |
-| `refine.py` | `Refiner`/`Distiller` ABCs + `NullRefiner`/`HeuristicDistiller` defaults |
-| `exceptions.py` | `EmbeddingUnavailable`, `OutcomeConflictError`, `ChunkNotFoundError`, `InvalidStateError` |
-
-**`schema.sql` is mirrored in `migrations/` and `innate/migrations/`**. Runtime uses the packaged `innate/migrations/schema.sql` fallback and auto-applies packaged incremental migrations (`4.x_to_4.y.sql`).
+| `kb.rs` | `KnowledgeBase` — all 8 Public APIs |
+| `storage.rs` | rusqlite backend; schema init, BLOB-vector search, SQL helpers |
+| `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `default_sanitize()`, cosine similarity |
+| `embedding.rs` | `EmbeddingProvider` trait + `DummyEmbeddingProvider` (hash-based, for tests) |
+| `refine.rs` | `Refiner`/`Distiller` traits + `NullRefiner`/`HeuristicDistiller` defaults |
+| `errors.rs` | `InnateError` enum covering all error kinds |
+| `mcp/mod.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
+| `cli/mod.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
+| `schema.sql` | Embedded schema (v4.5.1); `include_str!` at compile time |
 
 ### The 8 Public APIs (on `KnowledgeBase`)
 
-`recall` → `record` → `evolve` → `approve/archive/invalidate/restore` → `add` → `spark/mature_spark/promote_spark/drop_spark` → `inspect` → `@augmented`
+`recall` → `record` → `evolve` → `approve/archive/invalidate/restore` → `add` → `spark/mature_spark/promote_spark/drop_spark` → `inspect`
 
 ### Key Data Flow
 
 ```
 recall()  →  writes usage_trace(retrieved/selected) + episodic_log(distill_state='open')
 record()  →  appends usage_trace(used/task_ok/task_fail) + updates episodic_log → 'new' or 'discarded'
-evolve()  →  distill (new→pending chunks) + _builtin_curate (aggregate→recover→archive→dedupe→decay→promote→cycle/orphan→purge)
+evolve()  →  distill (new→pending chunks) + builtin_curate (aggregate→archive→promote→purge)
 ```
+
+### Vector Search
+
+No sqlite-vec dependency. Embeddings stored as raw `f32` BLOBs in `vec_content` / `vec_trigger` tables. `storage.rs` loads all embeddings into memory and computes cosine similarity in Rust. Suitable for moderate corpus sizes; swap `EmbeddingProvider` and `Storage` for HNSW if scale demands it.
 
 ## Non-Obvious Implementation Constraints
 
-**Time functions** — `utc_now_iso()` in `utils.py` is the **only** allowed Python time source. Never call `datetime.utcnow()`, `time.time()`, or SQLite `datetime('now')` directly. SQL-generated timestamps and comparison cutoffs must use `strftime('%Y-%m-%dT%H:%M:%fZ', ...)` with either `'now'` or a fixed `utc_now_iso()` parameter. This is enforced for SQLite TEXT dictionary-order comparisons.
+**Time functions** — `utc_now_iso()` in `utils.rs` is the **only** time source. Format: `YYYY-MM-DDTHH:MM:SS.mmmZ` (fixed 3-digit ms). Never use system time directly. All SQL cutoff comparisons rely on lexicographic ordering of this format.
 
-**`record()` distill_state transition** — The `open→new/discarded` judgment runs **only when `distill_state == 'open'`**. Calling `record()` a second time (e.g., to add feedback) must not downgrade a log already in `'new'` or `'screening'` state.
+**`record()` distill_state transition** — `open→new/discarded` judgment runs **only when `distill_state == 'open'`**. Second call must not downgrade a log already in `'new'` or `'screening'` state.
 
-**`record()` fresh-insert path** — When there is no pre-existing `episodic_log` row (Hook/Daemon direct record without a prior `recall()`), `is_fresh_insert = True` must be set before re-reading the inserted log. This flag makes `_apply_outcome_implicit` fire even though `existing_outcome == outcome` after the insert.
+**`record()` fresh-insert path** — When no pre-existing `episodic_log` row exists (Hook/Daemon direct record), `is_fresh_insert = true` triggers `apply_outcome_implicit` even though `existing_outcome == outcome` after insert.
 
-**`spark` chunks are Curate-exempt** — Any code reading `confidence` or running archive/decay logic must first filter out `origin='spark'`. `mature_spark()` advances sequentially (`seed→sprouting→incubating`); explicit human `promote_spark()` / `drop_spark()` may terminate any non-terminal maturity. Sparks do not use `state`/`confidence` for gradual lifecycle decisions.
+**`spark` chunks are Curate-exempt** — Archive/decay/confidence logic must filter `origin='spark'`. `mature_spark()` advances sequentially (`seed→sprouting→incubating`). Sparks use `maturity`, not `state`/`confidence`.
 
-**`record()` is `BEGIN IMMEDIATE`** — The entire method body runs inside one exclusive transaction. `update_chunk_confidence` and `update_chunk_last_used` do **not** call `commit()`; the outer `self.storage.commit()` at the end flushes everything.
+**`record()` is `BEGIN IMMEDIATE`** — Entire method body runs in one exclusive transaction. Confidence and last_used updates inside do **not** issue their own commits.
 
-**Curate aggregate order is fixed** (§四 四步 BEGIN IMMEDIATE 原子执行):
-1. `aggregate_success_traces` — 幂等写入 `chunk_success_traces` 事实表
-2. `aggregate_success_counts` — 从事实表派生 `used_success_count / success_trace_ids_count / last_success_at`
-3. `aggregate_counters` — 从 `usage_trace` 增量聚合 `selected_count / used_count`
-4. 写 `meta.last_agg_ts = cutoff_ts` → `purge_usage_trace(ts < cutoff_ts)`
+**Curate aggregate order is fixed** (§四, atomic BEGIN IMMEDIATE):
+1. `aggregate_success_traces` — upsert into `chunk_success_traces` fact table
+2. `aggregate_success_counts` — derive `used_success_count / last_success_at`
+3. `aggregate_counters` — derive `selected_count / used_count` from `usage_trace`
+4. Write `meta.last_agg_ts = cutoff_ts` → `purge_usage_trace(ts < cutoff_ts)`
 
-`cutoff_ts` 在 aggregate 开始时固定为 `utc_now_iso()`，四步使用同一值；`purge_usage_trace` 严格用 `ts < cutoff_ts`，绝不用新鲜 `now()`。
-后续 stale-screening recovery、open TTL 和 old-log purge 同样复用本轮固定 `now_iso`。治理后半轮正常时一次提交，任一步失败时回滚未提交的治理写入。
+`cutoff_ts` is fixed once at the start of curate; all steps share the same value.
 
-**`add()` trigger vector** — `tvec` is always computed as `embed_trigger(trigger_desc or content)`. Use `tvec` unconditionally for `insert_vec_trigger`; never fall back to truncating `cvec`.
+**`add()` trigger vector** — `tvec = embed_trigger(trigger_desc or content)` always. Never fall back to truncating `cvec`.
 
 ## Extension Points
 
-Six injectable extension points at `KnowledgeBase(...)`:
-- `embedding: EmbeddingProvider` — swap embedding model
-- `curator: Curator` — replace entire Curate logic (single `run()` method)
-- `refiner: Refiner` — online trim/adapt (default `NullRefiner`, off)
-- `distiller: Distiller` — episodic log → chunk extraction (default `HeuristicDistiller`)
-- `sanitize: Callable` — content safety hook (default regex-only; `None` disables)
-- `storage_factory: Callable[..., Storage]` — SQL-compatible VectorStore factory
+Injectable at `KnowledgeBase::open_with(...)`:
+- `embedding: Arc<dyn EmbeddingProvider>` — swap embedding model
+- `refiner: Arc<dyn Refiner>` — online trim/adapt
+- `distiller: Arc<dyn Distiller>` — episodic log → chunk extraction
 
 ## Configurable Parameters
 
-All tuning knobs live in the `meta` table (keys prefixed `recall.*` and `curate.*`). They are loaded once at `KnowledgeBase.__init__` into instance attributes; changing them requires a new instance. `innate inspect` prints current values.
+All tuning knobs in the `meta` table (keys `recall.*` and `curate.*`). Loaded once at `KnowledgeBase::open`. `innate inspect` prints current values.
 
-## Skill File (`skills/innate-memory/SKILL.md`)
+## SDKs
 
-Follows the [Agent Skills open standard](https://agentskills.io/specification). Enables `npx skills add vima-tech/Innate` to install the skill into Claude Code and other compatible agents.
-
-**Rules when editing:**
-- `name:` in frontmatter must exactly match the directory name (`innate-memory`)
-- `description:` is the activation signal the agent uses — keep it precise about WHEN to activate (read vs. write triggers)
-- Body is plain markdown agent instructions; no code execution, no SDK calls — CLI only
-- If adding a second skill, create `skills/<new-name>/SKILL.md`; never put two skills in one file
-
-## Test Layout
-
-| File | What it covers |
+| Path | Description |
 |---|---|
-| `test_core.py` | Core recall/record/evolve/curate round-trips |
-| `test_v451_compliance.py` | Design-doc compliance (sanitize paths, spark lifecycle, invalidate cascade, `record()` state machine) |
-| `test_v451_gaps.py` | v4.5.1 checklist items (aggregate cutoff_ts, outcome conflict, stale screening, embed rebuild) |
-| `test_boundaries.py` | Budget packing, dependency closure, first-fit + density refill |
-| `test_v4_paths.py` | CLI output formats, Hook/Daemon record paths |
-| `test_cross_lib.py` | Multi-library shared recall |
-| `test_augmented.py` | `@augmented` decorator |
-| `test_cli.py` | Click CLI commands |
+| `sdks/python/` | Python SDK (`innate-py`) — subprocess wrapper, zero deps, API-compatible with core |
+| `sdks/typescript/` | TypeScript SDK (`@innate/sdk`) — CLI subprocess + async MCP client |
+
+## MCP Tool Reference (`innate mcp`)
+
+| Tool | Rust method |
+|---|---|
+| `innate_recall` | `KnowledgeBase::recall` |
+| `innate_record` | `KnowledgeBase::record` |
+| `innate_add` | `KnowledgeBase::add` |
+| `innate_spark` | `KnowledgeBase::spark` |
+| `innate_evolve` | `KnowledgeBase::evolve` |
+| `innate_inspect` | `KnowledgeBase::inspect` |
+| `innate_approve/archive/invalidate/restore` | governance APIs |
+| `innate_mature_spark/promote_spark/drop_spark` | spark lifecycle |
+
+## SKILL.md (`skills/innate-memory/SKILL.md`)
+
+- `name:` must match directory name (`innate-memory`)
+- `description:` is the agent activation signal — keep precise about WHEN to activate
+- MCP tools are the primary interface; CLI is the fallback
+- Body is plain markdown agent instructions; no code execution
