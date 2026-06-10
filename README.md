@@ -9,19 +9,19 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 
 五个核心闭环必须完整, 缺一就不算"知识层":
 
-- **召回**: `query → recall → context`(双向量 ANN + 标量过滤 + 可选依赖闭包, 同步纯数学)
+- **召回**: `query → recall → context`(双向量余弦相似度 + 标量过滤, 同步纯数学)
 - **观测**: `context → use → trace`(记录哪些块被用了、结果如何)
 - **成长**: `trace → distill → pending`(离线蒸馏新经验)
 - **治理**: `usage → confidence → curate`(EMA 置信度更新 + Curate 归档)
-- **安全**: `pending/archived/不物理删`(默认 sanitize 钩子零重依赖, 黑名单 + 红action)
+- **安全**: `pending/archived/不物理删`(默认 sanitize 钩子, 黑名单 + red action)
 
-> 默认同步召回路径**绝不调用任何 LLM/小模型**——Innate 是图书管理员, 不是阅读者兼编辑。只有调用方显式开启可选 Refiner 时才执行 trim/adapt。路由、动态裁剪、归因的权力交还上层编排框架。
+> 默认同步召回路径**绝不调用任何 LLM/小模型**——Innate 是图书管理员, 不是阅读者兼编辑。只有调用方显式开启可选 Refiner 时才执行 trim/adapt。
 
 ---
 
 ## 安装
 
-### Rust 核心 (推荐)
+### Rust 核心 (唯一运行时)
 
 ```bash
 # 从源码编译
@@ -59,44 +59,70 @@ npm install @innate/sdk  # 或 npm install ./sdks/typescript/
 }
 ```
 
-配置后 Agent 可直接使用 `innate_recall`、`innate_record` 等 MCP 工具, 无需 CLI 命令。
+配置后 Agent 可直接使用 `innate_recall`、`innate_record` 等 MCP 工具, 无需手动调用 CLI。
 
 ---
 
-## 接入 Agent (一键配置)
+## 接入 Agent (MCP 配置)
 
-将以下提示词直接发送给你的 Agent:
+**推荐方式: MCP 服务** — Agent 通过 MCP 工具直接操作知识库, 无需 CLI 权限。
 
-> 请帮我安装并初始化 Innate 知识层, 步骤如下:
+### 步骤
+
+1. 编译并安装 Rust 二进制:
+
+```bash
+cd innate-rs && cargo build --release
+cp target/release/innate ~/.local/bin/
+```
+
+2. 在 `.claude/settings.json` 添加 MCP 配置:
+
+```json
+{
+  "mcpServers": {
+    "innate": {
+      "command": "innate",
+      "args": ["mcp"],
+      "env": {
+        "INNATE_DB": "/path/to/your/personal.db"
+      }
+    }
+  }
+}
+```
+
+3. 验证初始化:
+
+```bash
+innate inspect   # 应输出空库健康报告
+```
+
+### Agent 工作规范
+
+配置完成后, 将以下工作规范发送给 Agent:
+
+> **知识层使用规范**
 >
-> ```bash
-> pip install innate-ai              # 安装 CLI
-> npx skills add vima-tech/Innate    # 安装 Agent Skill
-> innate inspect                     # 验证, 应输出空库健康报告
-> ```
->
-> **权限说明 (Agent 受限写入)**
-> 你可以直接执行召回、记录、成长和体检。知识写入需先提议并获得我的确认; 治理动作由我人工执行:
->
-> | 操作类别 | 命令 |
+> | 操作类别 | MCP 工具 |
 > |---|---|
-> | Agent 可直接执行 | `innate recall` · `innate record` · `innate evolve` · `innate inspect` |
-> | 确认后执行 | `innate add ... --source agent` · `innate spark` |
-> | 仅人工治理 | `innate approve` · `innate archive` · `innate invalidate` · `innate restore` · `innate mature-spark` · `innate promote-spark` · `innate drop-spark` |
+> | Agent 可直接执行 | `innate_recall` · `innate_record` · `innate_evolve` · `innate_inspect` |
+> | 确认后执行 | `innate_add` · `innate_spark` |
+> | 仅人工治理 | `innate_approve` · `innate_archive` · `innate_invalidate` · `innate_restore` · `innate_mature_spark` · `innate_promote_spark` · `innate_drop_spark` |
 >
-> **工作规范**
-> - 每次任务开始前执行 `innate recall "<任务意图>" --format json`, 将结果纳入计划
-> - 任务结束后执行 `innate record <trace_id> --outcome ok|fail`, 闭合 trace
-> - 发现值得保留的经验或灵感时, 先提炼并向我确认; 得到同意后执行 `innate add ... --source agent` 或 `innate spark`
-> - 判断知识已失效时, 只提出治理建议和命令, 不直接执行
-> - 会话结束时执行 `innate evolve --trigger manual` 触发蒸馏
+> **工作流程**
+> - 每次任务开始前调用 `innate_recall(query="<任务意图>")`, 将结果纳入计划
+> - 任务结束后调用 `innate_record(trace_id=..., outcome="ok"|"fail")`, 闭合 trace
+> - 发现值得保留的经验或灵感时, 先提炼并向用户确认; 得到同意后调用 `innate_add` 或 `innate_spark`
+> - 判断知识已失效时, 只提出治理建议, 不直接执行治理动作
+> - 会话结束时调用 `innate_evolve(trigger="manual")` 触发蒸馏
 
 ---
 
 ## 快速开始
 
 ```bash
-# 1. 写入知识 (note 写为 active, skill 写为 active+protected)
+# 1. 写入知识
 innate add "Python 列表推导式比 map/filter 更易读" --kind note --trigger "python 列表处理"
 
 # 2. 召回知识 (返回 top 块, 含 trace_id)
@@ -104,19 +130,12 @@ innate recall "python 列表优化" --budget 2000 --format json
 
 # 3. 补全 trace (闭合经验链路)
 innate record <trace_id> --outcome ok --used <chunk_id1>,<chunk_id2>
-# 仅当人明确给出反馈时再补强信号:
-innate record <trace_id> --feedback up --used <chunk_id1>,<chunk_id2>
 
 # 4. 触发成长 (蒸馏 + 治理)
 innate evolve --trigger manual
-# 或: 重建缺失的 embedding 向量
-innate evolve --rebuild-embeddings
 
 # 5. 体检 (健康信号 + 建议命令)
 innate inspect
-# 或查看某个 chunk / trace 详情
-innate inspect <chunk_id>
-innate inspect <trace_id>
 ```
 
 ---
@@ -126,66 +145,74 @@ innate inspect <trace_id>
 ```python
 from innate import KnowledgeBase
 
-# 多库: 个人库可读写, 共享库只读挂载
-kb = KnowledgeBase("personal.db", shared=["shared.db"])
+kb = KnowledgeBase("personal.db")  # 或通过 INNATE_DB 环境变量指定
 
 # 1. 写入
 note_id = kb.add("经验内容", kind="note", trigger_desc="触发场景")
-skill_id = kb.add("./erp-parsing.skill", kind="skill")  # 自动读文件 + 设 skill_name
-spark_id = kb.spark("一个待探索的灵感")  # 走独立 maturity 生命周期
+spark_id = kb.spark("一个待探索的灵感", trigger_desc="相关场景")
 
 # 2. 召回 (同步纯数学)
 ctx = kb.recall(
     "任务描述",
     budget=6000,
-    include_sparks=True,         # 同步带出相关灵感 (不占 knowledge budget)
-    expand_deps="closure",       # false | direct | closure (hard 闭包)
-    libs=["personal", "shared"], # 跨库检索
+    include_sparks=True,
 )
 for chunk in ctx.knowledge:
     print(chunk["id"], chunk["content"])
-for spark in ctx.sparks:
-    print("💡", spark["content"])
 
 # 3. 记录使用
 kb.record(
     ctx.trace_id,
     outcome="ok",
     used=[note_id],
-    feedback="up",                 # 显式 👍/👎 (强信号, 主导 confidence)
+    output_summary="解决了 X",
 )
 
 # 4. 成长
 result = kb.evolve(trigger="manual")
-print("distilled:", result["distilled"], "curate:", result["curate"])
 
-# 5. 治理 (人工操作; 下列 *_id 均为示例占位符, 实际取自 inspect 或 record 返回)
-# pending_id  = inspect() 查到的 state='pending' 的 chunk id
-# archived_id = inspect() 查到的 state='archived' 的 chunk id
-kb.approve(pending_id)             # pending → active
+# 5. 治理 (人工操作)
+kb.approve(pending_id)
 kb.archive(note_id, reason="stale")
-kb.invalidate(note_id, reason="逻辑错误")  # 归档 + 黑名单
-kb.restore(archived_id)                  # 若此前 invalidate, 同步撤销 hash 黑名单
+kb.invalidate(note_id, reason="逻辑错误")
+kb.restore(archived_id)
 
 # 6. 灵感生命周期
-kb.mature_spark(spark_id, to="sprouting")    # seed → sprouting
-kb.mature_spark(spark_id, to="incubating")   # sprouting → incubating
-new_id = kb.promote_spark(spark_id, to="note")  # 转正为 captured note
-kb.drop_spark(spark_id, reason="已证伪")       # 放弃
+kb.mature_spark(spark_id, to="sprouting")
+kb.mature_spark(spark_id, to="incubating")
+new_id = kb.promote_spark(spark_id, to="note")
+kb.drop_spark(spark_id, reason="已证伪")
 
 # 7. 体检
-report = kb.inspect()              # 库健康信号
-detail = kb.inspect(chunk_id=note_id)  # 块详情 (含 parent / distilled_from 衍生)
-trace  = kb.inspect(trace_id=ctx.trace_id)  # trace 详情 (含 usage_trace 时序)
+report = kb.inspect()
+```
 
-# 8. 装饰器模式: 自动 recall + 注入 context + 解析 outcome
-@kb.augmented(budget=6000)
-def answer(query: str, context) -> dict:
-    chunks = "\n".join(c["content"] for c in context.knowledge)
-    # ... 用 context 决策 ...
-    return {"outcome": "ok", "output_summary": "解决了 X"}
+---
 
-answer("如何在 FastAPI 里流式返回 SSE?")
+## TypeScript SDK
+
+```typescript
+import { KnowledgeBase, McpClient } from "@innate/sdk";
+
+// CLI subprocess 模式 (同步, 适合脚本)
+const kb = new KnowledgeBase({ dbPath: "personal.db" });
+
+const ctx = kb.recall("任务描述", { budget: 6000 });
+kb.record(ctx.trace_id, { outcome: "ok", used: [chunkId] });
+kb.add("经验内容", { kind: "note", triggerDesc: "触发场景" });
+kb.evolve("manual");
+const report = kb.inspect();
+
+// MCP 客户端模式 (异步, 适合 Agent 集成)
+const client = new McpClient({ dbPath: "personal.db" });
+await client.initialize();
+
+const result = await client.recall("任务描述", { budget: 6000 });
+await client.record(result.trace_id, { outcome: "ok" });
+await client.add("新知识", { kind: "note" });
+await client.inspect();
+
+client.close();
 ```
 
 ---
@@ -196,40 +223,49 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 
 | 子命令 | 能力域 | 说明 |
 |---|---|---|
-| `innate recall <query>` | 读 | `--budget` · `--top` · `--include-sparks` · `--expand-deps` · `--format text\|json\|prompt` |
-| `innate record <trace_id>` | 写 | `--query` · `--outcome ok\|fail\|unknown` · `--output-summary` · `--used` · `--feedback up\|down` · `--nomination` · `--priority` · `--source cli\|hook\|daemon\|augmented` |
-| `innate evolve` | 成长 | `--trigger manual\|scheduled\|threshold` · `--rebuild-embeddings` |
-| `innate inspect [target]` | 调试 | 无参=库体检; 传 chunk_id / trace_id 查详情 |
-| `innate add <content>` | 写入 | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source chat\|manual\|doc\|agent` |
-| `innate spark <content>` | 灵感 | `--trigger` · `--anti-trigger` |
-| `innate mature-spark <id>` | 治理 | `--to sprouting\|incubating` (只允许前向) |
+| `innate recall <query>` | 读 | `--budget` · `--top` · `--include-sparks` · `--format text\|json` |
+| `innate record <trace_id>` | 写 | `--outcome ok\|fail\|unknown` · `--used` · `--output-summary` · `--nomination` · `--source` |
+| `innate evolve` | 成长 | `--trigger manual\|scheduled\|threshold` |
+| `innate inspect` | 调试 | 库体检: 5 个健康信号 + 当前参数 |
+| `innate add <content>` | 写入 | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source` |
+| `innate spark <content>` | 灵感 | `--trigger` |
+| `innate mature-spark <id> <to>` | 治理 | to: `sprouting\|incubating` (只允许前向) |
 | `innate promote-spark <id>` | 治理 | `--to note\|skill` |
 | `innate drop-spark <id>` | 治理 | `--reason` |
 | `innate approve <id>` | 治理 | pending → active |
 | `innate archive <id>` | 治理 | `--reason` |
 | `innate invalidate <id>` | 治理 | `--reason` (归档 + 黑名单) |
 | `innate restore <id>` | 治理 | archived → active; 若此前 invalidate, 同步撤销 hash 黑名单 |
-| `innate daemon start` | 守护 | `--watch <dir>` (可重复) · `--db` · `--pid-file` · `--log-file` · `--state-db` |
-| `innate daemon stop` | 守护 | `--pid-file` |
-| `innate daemon status` | 守护 | `--pid-file` · `--state-db` |
+| `innate mcp` | 集成 | 启动 MCP stdio 服务 (JSON-RPC 2.0), 供 Claude Code / Desktop 使用 |
 
 ### `recall` 输出格式
 
-- `text` — 人类可读, 不输出 trace 信息
-- `json` — 机器可读, 含 `trace_id` / `selected` / `chunks` / `sparks` 字段
-- `prompt` — 可直接拼进 system prompt, 末尾含 HTML 注释 `<!-- innate_trace_id: xxx -->` 供后续提取
+- `text` — 人类可读, 不含 trace 信息
+- `json` — 机器可读, 含 `trace_id` / `knowledge` / `sparks` / `empty` 字段
 
-### `inspect` 三种视图
+### `inspect` 输出
 
-1. **库体检 (无参)** — 5 个健康信号:
-   - 知识债务比 (含僵尸块, < 0.3 正常)
-   - embed 重建队列 (待补向量的 chunk 数)
-   - 灵感提示 (反复浮现的 spark id)
-   - stale screening (卡死的 distill 日志)
-   - 本周期蒸馏成本 (token 估算)
-   - 末尾打印当前 `recall_params` / `curate_params` 便于调参
-2. **chunk 详情** — 块基础信息 + `related`(parent 衍生 + distilled_from 衍生) + 末尾建议操作命令
-3. **trace 详情** — episodic_log 主体 + usage_trace 时序 + 末尾建议补全/蒸馏命令
+库体检 (无参) — 5 个健康信号:
+- 知识债务比 (含僵尸块, < 0.3 正常)
+- embed 重建队列 (待补向量的 chunk 数)
+- 灵感提示 (反复浮现的 spark id)
+- stale screening (卡死的 distill 日志)
+- 本周期蒸馏成本 (token 估算)
+
+末尾打印当前 `recall_params` / `curate_params` 便于调参。
+
+### MCP 工具 (`innate mcp` 暴露的 13 个工具)
+
+| MCP 工具 | 对应能力 |
+|---|---|
+| `innate_recall` | 召回知识 |
+| `innate_record` | 记录 trace |
+| `innate_add` | 写入知识块 |
+| `innate_spark` | 创建灵感 |
+| `innate_evolve` | 触发成长 |
+| `innate_inspect` | 库体检 |
+| `innate_approve` / `innate_archive` / `innate_invalidate` / `innate_restore` | 治理 |
+| `innate_mature_spark` / `innate_promote_spark` / `innate_drop_spark` | 灵感生命周期 |
 
 ---
 
@@ -237,84 +273,75 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 
 ```
 Innate System
-├── Core SDK              唯一拥有知识层逻辑 (recall/record/evolve/curate/confidence)
-│   ├── Public API        8 类核心能力域:
-│   │                     1. recall  2. record  3. evolve  4. add/spark
-│   │                     5. 治理 (approve/archive/invalidate/restore/spark 生命周期)
-│   │                     6. inspect  7. @augmented 装饰器  8. 多库挂载 (shared)
-│   └── Storage           sqlite-vec 默认实现, 5 个可替换扩展点:
-│                         · EmbeddingProvider (默认 DummyEmbeddingProvider)
-│                         · VectorStore (Protocol, 通过 storage_factory 注入)
-│                         · Refiner (默认 NullRefiner; allow_trim/adapt 时启用)
-│                         · Distiller (默认 HeuristicDistiller, 启发式无 LLM)
-│                         · Curator (整体替换对象, 不是插件列表)
+├── Rust 核心 (innate-rs/)
+│   ├── KnowledgeBase (lib)     8 类 Public API, SQLite + 纯 Rust 余弦相似度
+│   ├── CLI (innate <cmd>)      clap 薄封装, 参数解析 → KnowledgeBase 调用
+│   └── MCP Server (innate mcp) JSON-RPC 2.0 over stdio, 13 个 MCP 工具
 │
-├── Migrations            schema.sql + 4.0→4.1→4.2→4.3→4.4→4.5→4.5.1 自动迁移
-│                         (innate/migrations/, 随包安装)
+├── 向量搜索                    f32 BLOB 存储 + 全扫描余弦相似度 (零 native 扩展)
+│   ├── vec_content             内容向量 (BLOB)
+│   └── vec_trigger             触发向量 (BLOB)
 │
-├── CLI Adapter           Core SDK 的命令行薄封装 (不新增知识层逻辑)
-│   └── innate <command>  跨语言调用入口; Shell/CI 均可调
+├── SDKs
+│   ├── sdks/python/            innate-py  — subprocess wrapper, 零额外依赖
+│   └── sdks/typescript/        @innate/sdk — CLI subprocess + async MCP client
 │
-├── Runtime (Daemon)      可选外部进程, Linux only (os.fork + /proc)
-│   ├── 日志监听          扫 *.log, 提取 innate_trace_id 关联 active trace
-│   ├── 错误汇聚          同类异常连续 3 次自动记 fail
-│   ├── Hook JSON         session_start / session_end / tool_success / tool_error / user_feedback
-│   └── 日志轮转          RotatingFileHandler 默认 10MB × 5 份
-│
-└── skills/innate-memory/ Agent Skills 标准接入层
-    └── npx skills add vima-tech/Innate
+└── skills/innate-memory/       SKILL.md (MCP 工具为主, CLI 为 fallback)
 ```
 
-**依赖方向严格向下**: `daemon → CLI → core`。Daemon 自身不直接操作知识库, 全部通过 `subprocess` 调 `innate` CLI。Core 是唯一能读写知识库 SQLite 的层;Daemon 仅可读写自身私有状态 SQLite。
+**依赖方向严格向下**: `SDK → CLI → KnowledgeBase`。SDKs 通过 subprocess 调用 CLI 二进制; MCP server 直接调用 KnowledgeBase lib。
 
 ---
 
 ## 核心特性
 
-- **双向量召回**: `content_vec` (默认 1024 维) + `trigger_vec` (默认 256 维), 按 `w_content / w_trigger / w_confidence` 融合排序
+- **双向量召回**: `content_vec` + `trigger_vec`, 按 `w_content / w_trigger / w_confidence` 融合排序
 - **置信度驱动**: EMA 更新 + 时效加权 (显式信号) + 时间衰减, 知识越用越准
-- **hard dep fail-closed**: 召回时若 hard 依赖不可用/被归档/跨库, 直接丢弃整个 seed, **绝不返回半截闭包**
-- **soft dep 提示式**: soft 依赖仅作候选加分, 不强制装包, 跨库引用解析失败不阻塞 seed
+- **零 native 扩展**: 向量存为 f32 BLOB, Rust 原生余弦相似度, 无 sqlite-vec / C 扩展依赖
+- **MCP 原生集成**: `innate mcp` 暴露 13 个工具, Claude Code / Claude Desktop 开箱可用
+- **hard dep fail-closed**: 召回时若 hard 依赖不可用/被归档, 直接丢弃整个 seed, **绝不返回半截闭包**
 - **零主动行为**: SDK 永不自发行动, 所有成长由外部触发 (evolve trigger: manual / scheduled / threshold)
-- **零重依赖**: 默认 sanitize 仅用 5 条密钥规则 + 3 条 injection 规则, 知识写入路径全部经过钩子; 不绑定 Presidio 等重型库
 - **sanitize 三态合同**: 钩子返回 `(cleaned, action)`, `action ∈ {allow, redact, discard}`; `discard` 拒绝写入, `redact` 落点 confidence 上限 0.4
-- **spark 独立生命周期**: maturity = `seed → sprouting → incubating`, 仅 `promote` / `drop` 时离场; 不参与 confidence 排序, 不被低分归档, 不算知识债务
-- **多库挂载**: `KnowledgeBase("personal.db", shared=["shared.db"])` — 个人库可读写, 共享库只读 (read-only PRAGMA + 缺少 Innate schema 时拒绝打开)
-- **原子双向量写入**: chunk + content_vec + trigger_vec 同 SAVEPOINT 写入, 任一失败回滚
-- **schema 自动迁移**: 启动时按 4.0→4.5.1 顺序 apply migrations, 库空直接 exec schema.sql, 未来版本向前兼容
-- **一行接入**: `npx skills add vima-tech/Innate` 让 Agent 具备完整知识层行为
+- **spark 独立生命周期**: maturity = `seed → sprouting → incubating`, 仅 `promote` / `drop` 时离场; 不参与 confidence 排序, 不被低分归档
+- **原子双向量写入**: chunk + content_vec + trigger_vec 同 `BEGIN IMMEDIATE` 事务写入, 任一失败回滚
+- **schema 自动迁移**: 启动时自动 apply 增量迁移, 库空直接 exec schema.sql
 
 ---
 
 ## 兼容性
 
-- Core SDK 与 CLI: Python 3.10+
-- 默认存储后端: [sqlite-vec](https://github.com/asg017/sqlite-vec) (随包安装)
-- Runtime Daemon: 可选组件, 当前依赖 `os.fork` 和 `/proc`, **仅支持 Linux**; 不启用 Daemon 不影响 SDK / CLI / Agent Skill 使用
+- 核心运行时: Rust 1.70+ (bundled SQLite, 零外部运行时依赖)
+- Python SDK: Python 3.8+ (subprocess, 零额外依赖)
+- TypeScript SDK: Node.js 18+ (child_process, 零额外依赖)
 - 数据库默认位置: `~/.innate/personal.db` (可通过 `INNATE_DB` 环境变量或 `--db` 覆盖)
+- 平台: Linux / macOS / Windows (WSL)
 
 ---
 
 ## 文档
 
 - [`docs/Innate-设计文档-v4.5.1.md`](docs/Innate-设计文档-v4.5.1.md) — 完整系统设计 (权威基线)
-- [`docs/innate.skill.md`](docs/innate.skill.md) — Agent Skill 中文说明
-- [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent Skill 元数据 (供 `npx skills add` 解析)
+- [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent Skill 元数据与使用规范
 
 ---
 
 ## 开发
 
 ```bash
-pip install -e ".[dev]"            # editable install
-python -m pytest tests/            # 跑全量测试
-python -m pytest tests/test_cli.py -q
-python -m compileall -q innate tests
-python -m innate --help
-innate inspect                     # 检视默认知识库
+# 编译
+cd innate-rs && cargo build --release
+
+# 运行全量测试
+cd innate-rs && cargo test
+
+# 运行单个测试
+cd innate-rs && cargo test test_add_and_recall
+
+# 检视默认知识库
+innate inspect
 ```
 
-测试按职责分组: `test_core.py` (核心) · `test_cli.py` (CLI) · `test_boundaries.py` (边界) · `test_cross_lib.py` (跨库) · `test_v451_compliance.py` / `test_v451_gaps.py` (v4.5.1 校准) · `test_v4_paths.py` · `test_design_alignment.py` · `test_completion_contracts.py` · `test_augmented.py`。
+测试按职责分组: `add_and_recall` · `spark_and_promote` · `record_state_machine` · `invalidate_cascade` · `inspect_returns_counts` · `evolve_smoke` + 3 个 utils 测试。
 
 ## License
 
