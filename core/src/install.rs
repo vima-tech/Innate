@@ -996,9 +996,89 @@ fn install_to_path(current_exe: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn path_has_local_bin() -> bool {
+    let local_bin = home_dir().join(".local").join("bin");
     std::env::var("PATH")
-        .map(|p| p.split(path_sep()).any(|d| d.contains(".local/bin")))
+        .map(|p| p.split(path_sep()).any(|d| PathBuf::from(d) == local_bin))
         .unwrap_or(false)
+}
+
+fn write_path_to_profiles() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    { write_path_windows() }
+    #[cfg(not(windows))]
+    { write_path_unix() }
+}
+
+/// Linux / macOS: append export line to every shell profile that exists and
+/// doesn't already mention `.local/bin`.  Returns the list of files written.
+#[cfg(not(windows))]
+fn write_path_unix() -> Vec<PathBuf> {
+    let home = home_dir();
+    let export_line = r#"export PATH="$HOME/.local/bin:$PATH""#;
+    let block = format!("\n# innate\n{export_line}\n");
+    // .zprofile covers macOS login shells (Catalina+); .zshrc covers interactive
+    let profiles = [".bashrc", ".zshrc", ".zprofile", ".bash_profile", ".profile"];
+    let mut updated = Vec::new();
+
+    for name in &profiles {
+        let path = home.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        if content.contains(".local/bin") {
+            continue;
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+            if f.write_all(block.as_bytes()).is_ok() {
+                updated.push(path);
+            }
+        }
+    }
+
+    // Fish shell: ~/.config/fish/config.fish
+    let fish_config = home.join(".config").join("fish").join("config.fish");
+    if fish_config.exists() {
+        let content = std::fs::read_to_string(&fish_config).unwrap_or_default();
+        if !content.contains(".local/bin") {
+            let fish_block = "\n# innate\nfish_add_path \"$HOME/.local/bin\"\n";
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&fish_config) {
+                if f.write_all(fish_block.as_bytes()).is_ok() {
+                    updated.push(fish_config);
+                }
+            }
+        }
+    }
+
+    updated
+}
+
+/// Windows: modify the User-level PATH in the registry via PowerShell.
+/// No new crate dependency — PowerShell ships with every modern Windows.
+#[cfg(windows)]
+fn write_path_windows() -> Vec<PathBuf> {
+    let local_bin = home_dir().join(".local").join("bin");
+    // Escape single-quotes for PowerShell string literal
+    let dir = local_bin.to_string_lossy().replace('\'', "''");
+    let ps = format!(
+        "$dir='{dir}';\
+        $old=[Environment]::GetEnvironmentVariable('PATH','User');\
+        if($old -notlike \"*$dir*\"){{\
+        [Environment]::SetEnvironmentVariable('PATH',$old+';'+$dir,'User')\
+        }}"
+    );
+    let ok = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        vec![PathBuf::from("User PATH (Windows registry)")]
+    } else {
+        vec![]
+    }
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -1057,16 +1137,30 @@ pub fn run_install() -> anyhow::Result<()> {
                         bold(&dest.display().to_string())
                     ));
                     if !path_has_local_bin() {
-                        #[cfg(windows)]
-                        warn_line(&yellow(
-                            "Add ~/.local/bin to PATH:\
-                            \n│    [Environment]::SetEnvironmentVariable('PATH', $env:USERPROFILE + '\\.local\\bin;' + $env:PATH, 'User')",
-                        ));
-                        #[cfg(not(windows))]
-                        warn_line(&yellow(
-                            "Add ~/.local/bin to PATH in your shell profile:\
-                            \n│    export PATH=\"$HOME/.local/bin:$PATH\"",
-                        ));
+                        let written = write_path_to_profiles();
+                        if written.is_empty() {
+                            #[cfg(windows)]
+                            warn_line(&yellow(
+                                "Add .local\\bin to PATH:\
+                                \n│    [Environment]::SetEnvironmentVariable('PATH', $env:USERPROFILE + '\\.local\\bin;' + $env:PATH, 'User')",
+                            ));
+                            #[cfg(not(windows))]
+                            warn_line(&yellow(
+                                "Add ~/.local/bin to PATH in your shell profile:\
+                                \n│    export PATH=\"$HOME/.local/bin:$PATH\"",
+                            ));
+                        } else {
+                            for p in &written {
+                                result_line(&format!(
+                                    "Added PATH export to {}",
+                                    bold(&tilde_path(p))
+                                ));
+                            }
+                            #[cfg(windows)]
+                            info(&dim("Open a new terminal for the PATH change to take effect"));
+                            #[cfg(not(windows))]
+                            info(&dim("Run: source ~/.bashrc  (or open a new terminal)"));
+                        }
                     }
                     sep();
                     PathBuf::from(binary_name())

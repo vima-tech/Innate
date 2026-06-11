@@ -11,40 +11,80 @@ Innate does not manage *declarative memory* ("what the world looks like / user p
 
 ## Installation
 
-### Recommended: interactive wizard
+### One-line install (Linux / macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
+```
+
+Downloads the pre-built binary for your platform, verifies the checksum, places it in `~/.local/bin`, and runs `innate install` to configure agent integration — all in one step.
+
+Options:
+
+```bash
+# Pin a specific version
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | INNATE_VERSION=0.1.5 sh
+
+# Skip agent setup (binary only)
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | NO_INNATE_SETUP=1 sh
+
+# Custom install directory
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | INNATE_DIR=/usr/local/bin sh
+```
+
+### Other install methods
+
+```bash
+# Rust
+cargo install innate
+
+# Python installer (downloads pre-built binary, no Rust required)
+pip install innate-ai
+
+# npm installer (downloads pre-built binary, no Rust required)
+npm install -g @vima_tech/innate
+
+# Build from source
+cd core && cargo build --release
+cp target/release/innate ~/.local/bin/
+```
+
+Verify the install:
+
+```bash
+innate inspect
+```
+
+### Configure agent integration
+
+After the binary is on your PATH, run the interactive wizard to configure the MCP server and install the `innate-memory` agent skill (skipped automatically by the one-line installer above):
 
 ```bash
 innate install
 ```
 
-Detects Claude Code, Codex CLI, and opencode, configures the MCP server, installs the binary to PATH, and installs the `innate-memory` agent skill — all in one step.
+Detects Claude Code, Codex CLI, and opencode automatically.
 
-### Rust core (the only runtime)
+### Let an agent install for you
 
-```bash
-# From crates.io
-cargo install innate
+Paste the following prompt into Claude Code (or any agent with shell access):
 
-# From source
-cd core && cargo build --release
-cp target/release/innate ~/.local/bin/
-
-# Verify
-innate inspect
+```
+Install Innate by running: curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
+This downloads the binary, verifies the checksum, and configures the MCP server and agent skill automatically.
+Verify with `innate inspect` when done.
 ```
 
-### Python SDK
+### Python SDK (programmatic use)
 
 ```bash
-pip install innate-ai    # CLI binary installer (recommended)
-pip install innate-py    # Python SDK for programmatic use
+pip install innate-py
 ```
 
-### TypeScript SDK
+### TypeScript SDK (programmatic use)
 
 ```bash
-npm install -g @vima_tech/innate   # CLI binary installer (recommended)
-npm install @innate/sdk            # TypeScript SDK for programmatic use
+npm install @innate/sdk
 ```
 
 ### MCP server (Claude Code / Claude Desktop)

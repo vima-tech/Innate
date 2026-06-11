@@ -11,45 +11,80 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 
 ## 安装
 
-### 推荐：交互式安装向导
+### 一行安装（Linux / macOS）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
+```
+
+自动检测平台并下载预编译二进制，验证 sha256 校验和，安装到 `~/.local/bin`，并运行 `innate install` 配置 Agent 集成——一步完成。
+
+可选参数：
+
+```bash
+# 固定安装版本
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | INNATE_VERSION=0.1.5 sh
+
+# 仅安装二进制，跳过 Agent 配置
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | NO_INNATE_SETUP=1 sh
+
+# 指定安装目录
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | INNATE_DIR=/usr/local/bin sh
+```
+
+### 其他安装方式
+
+```bash
+# Rust（推荐）
+cargo install innate
+
+# Python 安装器——自动下载预编译二进制，无需 Rust
+pip install innate-ai
+
+# npm 安装器——自动下载预编译二进制，无需 Rust
+npm install -g @vima_tech/innate
+
+# 从源码编译
+cd core && cargo build --release
+cp target/release/innate ~/.local/bin/
+```
+
+验证安装：
+
+```bash
+innate inspect
+```
+
+### 配置 Agent 集成
+
+二进制在 PATH 上之后，运行交互式向导配置 MCP 服务并安装 `innate-memory` agent skill（一行安装脚本已自动执行此步骤）：
 
 ```bash
 innate install
 ```
 
-自动检测 Claude Code、Codex CLI 和 opencode，配置 MCP 服务，将二进制安装到 PATH，并安装 `innate-memory` agent skill——一步完成。
+自动检测 Claude Code、Codex CLI 和 opencode。
 
-### Rust 核心 (唯一运行时)
+### 让 Agent 帮你安装
 
-```bash
-# 推荐：从 crates.io 直接安装
-cargo install innate
+将以下提示词粘贴到 Claude Code（或任何拥有 shell 访问权限的 Agent）中：
 
-# 或从源码编译
-cd core && cargo build --release
-cp target/release/innate ~/.local/bin/
-
-# 验证
-innate inspect
+```
+运行以下命令安装 Innate：
+curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
+该脚本会自动下载二进制、验证校验和并配置 MCP 服务和 agent skill。
+完成后用 `innate inspect` 验证安装。
 ```
 
-### Python SDK
+### Python SDK（程序化调用）
 
 ```bash
-# CLI 二进制安装器（推荐，自动下载对应平台二进制）
-pip install innate-ai
-
-# Python SDK（程序化调用）
 pip install innate-py
 ```
 
-### TypeScript SDK
+### TypeScript SDK（程序化调用）
 
 ```bash
-# CLI 二进制安装器（推荐，自动下载对应平台二进制）
-npm install -g @vima_tech/innate
-
-# TypeScript SDK（程序化调用）
 npm install @innate/sdk
 ```
 
