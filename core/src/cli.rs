@@ -133,6 +133,15 @@ pub enum Commands {
     },
     /// Interactive setup wizard — configure agents to use Innate MCP server
     Install,
+    /// Remove Innate from all configured agents and PATH
+    Uninstall {
+        /// Skip confirmation prompts
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Also delete knowledge data (~/.innate/). Cannot be undone.
+        #[arg(long)]
+        purge_data: bool,
+    },
     /// Upgrade database schema to current version
     Migrate,
     /// Upgrade the innate binary to the latest (or specified) release
@@ -190,6 +199,10 @@ pub fn run() -> anyhow::Result<()> {
 
     if let Commands::Install = &cli.command {
         return crate::install::run_install();
+    }
+
+    if let Commands::Uninstall { yes, purge_data } = &cli.command {
+        return crate::install::run_uninstall(*yes, *purge_data);
     }
 
     if let Commands::Migrate = &cli.command {
@@ -406,6 +419,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         Commands::Mcp
         | Commands::Install
+        | Commands::Uninstall { .. }
         | Commands::Migrate
         | Commands::Upgrade { .. }
         | Commands::Daemon { .. } => unreachable!(),
