@@ -931,6 +931,9 @@ pub fn run_install() -> anyhow::Result<()> {
         .collect();
 
     // ── 3. PATH installation ───────────────────────────────────────────────
+    // When the binary is on PATH, write just "innate" into agent configs so
+    // the config is portable across machines and users.  Only fall back to an
+    // absolute path when the user declines PATH installation.
     let on_path = check_on_path();
     let binary_path: PathBuf = if let Some(p) = &on_path {
         question("Install innate CLI on your PATH?");
@@ -939,7 +942,7 @@ pub fn run_install() -> anyhow::Result<()> {
             gray(&format!("({})", p.display()))
         ));
         sep();
-        p.clone()
+        PathBuf::from(binary_name())
     } else {
         let do_install = prompt_confirm(
             "Install innate CLI on your PATH? (Required for agents to launch the MCP server)",
@@ -965,7 +968,7 @@ pub fn run_install() -> anyhow::Result<()> {
                         ));
                     }
                     sep();
-                    dest
+                    PathBuf::from(binary_name())
                 }
                 Err(e) => {
                     warn_line(&format!("Could not install to PATH: {e}"));
