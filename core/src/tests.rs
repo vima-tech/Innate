@@ -22,7 +22,7 @@ mod tests {
         ).unwrap();
         assert!(!id.is_empty());
 
-        let result = kb.recall("validate input", 6000, false, false, None, "sdk").unwrap();
+        let result = kb.recall("validate input", 6000, false, false, None, "sdk", "false", false, "off").unwrap();
         assert!(!result.trace_id.is_empty());
         // DummyEmbeddingProvider is hash-based, so the chunk may or may not score highly
         // — just verify the recall didn't panic and returned a trace_id.

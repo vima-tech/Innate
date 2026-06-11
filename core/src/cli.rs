@@ -37,6 +37,15 @@ pub enum Commands {
         format: String,
         #[arg(long)]
         include_sparks: bool,
+        /// Dependency expansion: false (default) | direct | closure
+        #[arg(long, default_value = "false")]
+        expand_deps: String,
+        /// Allow Refiner to trim blocks that don't fit the budget
+        #[arg(long)]
+        allow_trim: bool,
+        /// Refine mode written to usage_trace: off (default) | trim | adapt
+        #[arg(long, default_value = "off")]
+        refine_mode: String,
     },
     /// Close a trace with outcome
     Record {
@@ -187,8 +196,8 @@ pub fn run() -> anyhow::Result<()> {
     let kb = KnowledgeBase::open(&db_path)?;
 
     match cli.command {
-        Commands::Recall { query, budget, top, format, include_sparks } => {
-            let result = kb.recall(&query, budget, true, include_sparks, top, "cli")?;
+        Commands::Recall { query, budget, top, format, include_sparks, expand_deps, allow_trim, refine_mode } => {
+            let result = kb.recall(&query, budget, true, include_sparks, top, "cli", &expand_deps, allow_trim, &refine_mode)?;
             match format.as_str() {
                 "json" => println!("{}", serde_json::to_string_pretty(&json!({
                     "trace_id": result.trace_id,

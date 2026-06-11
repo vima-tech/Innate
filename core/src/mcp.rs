@@ -152,7 +152,10 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let top = args.get("top").and_then(Value::as_u64).map(|v| v as usize);
             let include_sparks = b("include_sparks", false);
             let source = if s("source").is_empty() { "sdk".to_string() } else { s("source") };
-            let result = kb.recall(&query, budget, true, include_sparks, top, &source)?;
+            let expand_deps = if s("expand_deps").is_empty() { "false".to_string() } else { s("expand_deps") };
+            let allow_trim = b("allow_trim", false);
+            let refine_mode = if s("refine_mode").is_empty() { "off".to_string() } else { s("refine_mode") };
+            let result = kb.recall(&query, budget, true, include_sparks, top, &source, &expand_deps, allow_trim, &refine_mode)?;
             Ok(json!({
                 "trace_id": result.trace_id,
                 "knowledge": result.knowledge,
@@ -210,6 +213,11 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
         "innate_inspect" => kb.inspect(),
         "innate_evolve" => {
             let trigger = if s("trigger").is_empty() { "manual".to_string() } else { s("trigger") };
+            if b("rebuild_embeddings", false) {
+                let rebuilt = kb.rebuild_embeddings()?;
+                let evolve = kb.evolve(&trigger)?;
+                return Ok(json!({"rebuilt_embeddings": rebuilt, "evolve": evolve}));
+            }
             kb.evolve(&trigger)
         }
         "innate_approve" => {

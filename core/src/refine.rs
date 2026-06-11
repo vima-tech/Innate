@@ -1,12 +1,19 @@
 use serde_json::Value;
 use crate::errors::Result;
 
-/// Online refiner — trims recalled chunks to fit the active context budget.
+/// Online refiner — trims or adapts recalled chunks.
 pub trait Refiner: Send + Sync {
     fn refine(&self, chunks: Vec<Value>, budget_tokens: Option<usize>) -> Result<Vec<Value>>;
+
+    /// Trim a block to fit within `budget_tokens` given the active `query`.
+    /// Returns `None` if trimming is not supported or the block cannot be trimmed while
+    /// preserving hard-dep closure integrity.
+    fn trim(&self, _block: &[Value], _query: &str, _budget_tokens: usize) -> Option<Vec<Value>> {
+        None
+    }
 }
 
-/// No-op refiner (default): returns chunks unchanged.
+/// No-op refiner (default): returns chunks unchanged, trim is unsupported.
 pub struct NullRefiner;
 
 impl Refiner for NullRefiner {
