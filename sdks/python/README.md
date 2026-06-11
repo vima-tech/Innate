@@ -11,7 +11,7 @@ pip install innate-py
 Requires the `innate` binary in PATH. Install it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | sh
+curl -fsSL https://innate.mengkai.ren/ | sh
 ```
 
 ## Usage

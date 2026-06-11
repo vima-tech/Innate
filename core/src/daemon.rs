@@ -415,10 +415,11 @@ fn process_log_file(
         let trace_id = event.trace_id.clone().or(context_trace_id);
 
         if event_type == "end" {
-            let result = call_cli_evolve(db_path);
+            let result = call_cli_evolve(db_path, "manual");
             let ts = crate::utils::utc_now_iso();
             match result {
                 Ok(()) => {
+                    let _ = call_cli_evolve(db_path, "scheduled");
                     let _ = state_db.execute(
                         "DELETE FROM trace_context WHERE watch_path=?",
                         rusqlite::params![path_str.as_ref()],
@@ -484,7 +485,7 @@ struct DaemonEvent {
     query: Option<String>,
     output_summary: Option<String>,
     outcome: Option<String>,
-    used: Vec<String>,
+    used: Option<Vec<String>>,
     feedback: Option<String>,
     nomination: Option<String>,
     priority: i64,
@@ -518,8 +519,7 @@ fn parse_log_event(line: &str) -> Option<DaemonEvent> {
                     used.iter()
                         .filter_map(ValueExt::owned_string)
                         .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
+                }),
             feedback: value.get("feedback").and_then(ValueExt::owned_string),
             nomination: value.get("nomination").and_then(ValueExt::owned_string),
             priority: value.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -632,8 +632,8 @@ fn call_cli_record(db_path: &str, trace_id: &str, event: &DaemonEvent) -> anyhow
         if let Some(outcome) = &event.outcome {
             command.args(["--outcome", outcome]);
         }
-        if !event.used.is_empty() {
-            command.args(["--used", &event.used.join(",")]);
+        if let Some(used) = &event.used {
+            command.args(["--used", &used.join(",")]);
         }
         if let Some(summary) = &event.output_summary {
             command.args(["--output-summary", summary]);
@@ -685,11 +685,11 @@ fn call_cli_recall(db_path: &str, query: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no trace_id in recall output"))
 }
 
-fn call_cli_evolve(db_path: &str) -> anyhow::Result<()> {
+fn call_cli_evolve(db_path: &str, trigger: &str) -> anyhow::Result<()> {
     let self_exe = std::env::current_exe()?;
     let run = || {
         std::process::Command::new(&self_exe)
-            .args(["--db", db_path, "evolve", "--trigger", "manual"])
+            .args(["--db", db_path, "evolve", "--trigger", trigger])
             .status()
     };
     let first = run()?;
@@ -785,7 +785,10 @@ mod tests {
             event.output_summary.as_deref(),
             Some("bounded retry worked")
         );
-        assert_eq!(event.used, vec!["chunk-1", "chunk-2"]);
+        assert_eq!(
+            event.used,
+            Some(vec!["chunk-1".to_string(), "chunk-2".to_string()])
+        );
         assert_eq!(event.feedback.as_deref(), Some("up"));
         assert_eq!(event.nomination.as_deref(), Some("keep this approach"));
         assert_eq!(event.priority, 7);

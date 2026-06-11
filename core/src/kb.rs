@@ -31,6 +31,7 @@ use crate::utils::{
 const W_CONTENT: f64 = 0.65;
 const W_TRIGGER: f64 = 0.25;
 const W_CONFIDENCE: f64 = 0.10;
+const W_CONTEXT: f64 = 0.05;
 const TOP_K_CANDIDATES: usize = 20;
 const ANTI_TRIGGER_PENALTY: f64 = 0.6;
 const DENSITY_REFILL: bool = true;
@@ -115,6 +116,7 @@ pub struct KnowledgeBase {
     w_content: f64,
     w_trigger: f64,
     w_confidence: f64,
+    w_context: f64,
     top_k_candidates: usize,
     anti_trigger_penalty: f64,
     density_refill: bool,
@@ -130,6 +132,7 @@ pub struct KnowledgeBase {
     promote_confidence_min: f64,
     evolve_threshold: i64,
     distill_batch_size: usize,
+    evolve_schedule_interval_hours: i64,
 }
 
 impl KnowledgeBase {
@@ -163,6 +166,7 @@ impl KnowledgeBase {
             w_content: W_CONTENT,
             w_trigger: W_TRIGGER,
             w_confidence: W_CONFIDENCE,
+            w_context: W_CONTEXT,
             top_k_candidates: TOP_K_CANDIDATES,
             anti_trigger_penalty: ANTI_TRIGGER_PENALTY,
             density_refill: DENSITY_REFILL,
@@ -177,6 +181,7 @@ impl KnowledgeBase {
             promote_confidence_min: PROMOTE_CONFIDENCE_MIN,
             evolve_threshold: EVOLVE_THRESHOLD,
             distill_batch_size: DISTILL_BATCH_SIZE,
+            evolve_schedule_interval_hours: 6,
         };
         kb.init_meta()?;
         kb.load_params()?;
@@ -208,7 +213,7 @@ impl KnowledgeBase {
         let defaults: &[(&str, &str)] = &[
             ("lib_id", &lib_id),
             ("lib_role", "personal"),
-            ("schema_version", "4.5.2"),
+            ("schema_version", "4.6"),
             ("content_dim", &content_dim),
             ("trigger_dim", &trigger_dim),
             ("embed_model", embed_model),
@@ -218,6 +223,7 @@ impl KnowledgeBase {
             ("recall.w_content", "0.65"),
             ("recall.w_trigger", "0.25"),
             ("recall.w_confidence", "0.10"),
+            ("recall.w_context", "0.05"),
             ("recall.top_k_candidates", "20"),
             ("recall.anti_trigger_penalty", "0.6"),
             ("recall.density_refill", "true"),
@@ -232,6 +238,7 @@ impl KnowledgeBase {
             ("curate.promote_confidence_min", "0.65"),
             ("evolve.threshold_new_count", "5"),
             ("evolve.distill_batch_size", "20"),
+            ("evolve.schedule_interval_hours", "6"),
             ("curate.soft_mature_threshold", "5"),
             ("evolve.distill_token_window_hours", "24"),
         ];
@@ -278,6 +285,7 @@ impl KnowledgeBase {
         self.w_content = f("recall.w_content", W_CONTENT);
         self.w_trigger = f("recall.w_trigger", W_TRIGGER);
         self.w_confidence = f("recall.w_confidence", W_CONFIDENCE);
+        self.w_context = f("recall.w_context", W_CONTEXT);
         self.top_k_candidates =
             i("recall.top_k_candidates", TOP_K_CANDIDATES as i64).max(1) as usize;
         self.anti_trigger_penalty = f("recall.anti_trigger_penalty", ANTI_TRIGGER_PENALTY);
@@ -298,6 +306,7 @@ impl KnowledgeBase {
         self.evolve_threshold = i("evolve.threshold_new_count", EVOLVE_THRESHOLD);
         self.distill_batch_size =
             i("evolve.distill_batch_size", DISTILL_BATCH_SIZE as i64) as usize;
+        self.evolve_schedule_interval_hours = i("evolve.schedule_interval_hours", 6).max(1);
         Ok(())
     }
 
@@ -336,7 +345,7 @@ impl KnowledgeBase {
         self.apply_soft_dep_bonus(&mut candidates)?;
 
         // Score + anti-trigger penalty
-        let scored = self.score_candidates(candidates, query);
+        let scored = self.score_candidates(candidates, query)?;
 
         // First-fit pack with dep expansion
         let (selected, skipped, skipped_reasons) =
@@ -495,34 +504,37 @@ impl KnowledgeBase {
         &self,
         candidates: HashMap<String, CandidateInfo>,
         query: &str,
-    ) -> Vec<(f64, Value)> {
-        let mut scored: Vec<(f64, Value)> = candidates
-            .into_values()
-            .map(|info| {
-                let conf = info
-                    .chunk
-                    .get("confidence")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.5);
-                let mut fused = self.w_content * info.sim_content as f64
-                    + self.w_trigger * info.sim_trigger as f64
-                    + self.w_confidence * conf;
-                let anti = info
-                    .chunk
-                    .get("anti_trigger_desc")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !anti.is_empty() && anti_trigger_hit(query, anti) {
-                    fused *= self.anti_trigger_penalty;
-                }
-                let mut chunk = info.chunk;
-                chunk["_fused_score"] = json!(fused);
-                (fused, chunk)
-            })
-            .collect();
+    ) -> Result<Vec<(f64, Value)>> {
+        let context_key = content_hash(query);
+        let mut scored: Vec<(f64, Value)> = Vec::with_capacity(candidates.len());
+        for info in candidates.into_values() {
+            let conf = info
+                .chunk
+                .get("confidence")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.5);
+            let chunk_id = info.chunk.get("id").and_then(Value::as_str).unwrap_or("");
+            let context_score = self.storage.context_score(chunk_id, &context_key)?;
+            let mut fused = self.w_content * info.sim_content as f64
+                + self.w_trigger * info.sim_trigger as f64
+                + self.w_confidence * conf
+                + self.w_context * context_score;
+            let anti = info
+                .chunk
+                .get("anti_trigger_desc")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !anti.is_empty() && anti_trigger_hit(query, anti) {
+                fused *= self.anti_trigger_penalty;
+            }
+            let mut chunk = info.chunk;
+            chunk["_context_score"] = json!(context_score);
+            chunk["_fused_score"] = json!(fused);
+            scored.push((fused, chunk));
+        }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(self.top_k_candidates);
-        scored
+        Ok(scored)
     }
 
     fn pack(
@@ -836,6 +848,7 @@ impl KnowledgeBase {
                     rm.as_deref(),
                     None,
                     Some((rank + 1) as i64),
+                    None,
                     source,
                     now,
                 )?;
@@ -851,6 +864,7 @@ impl KnowledgeBase {
                     None,
                     None,
                     Some((rank + 1) as i64),
+                    None,
                     source,
                     now,
                 )?;
@@ -869,6 +883,7 @@ impl KnowledgeBase {
                         Some("trim"),
                         None,
                         Some((rank + 1) as i64),
+                        None,
                         source,
                         now,
                     )?;
@@ -886,6 +901,7 @@ impl KnowledgeBase {
                     Some("spark"),
                     None,
                     Some((rank + 1) as i64),
+                    None,
                     source,
                     now,
                 )?;
@@ -905,6 +921,9 @@ impl KnowledgeBase {
                 query: Some(query.to_string()),
                 recall_snapshot: Some(snapshot.to_string()),
                 event_source: source.to_string(),
+                task_state: "recalled".to_string(),
+                usage_state: "unknown".to_string(),
+                context_key: Some(content_hash(query)),
                 distill_state: "open".to_string(),
                 ..Default::default()
             };
@@ -936,9 +955,69 @@ impl KnowledgeBase {
         priority: i64,
         source: &str,
     ) -> Result<()> {
+        self.record_detailed(
+            trace_id,
+            query,
+            output,
+            output_summary,
+            outcome,
+            used,
+            "explicit",
+            feedback_up,
+            feedback_down,
+            "user",
+            None,
+            None,
+            nomination,
+            priority,
+            None,
+            source,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_detailed(
+        &self,
+        trace_id: &str,
+        query: Option<&str>,
+        output: Option<&str>,
+        output_summary: Option<&str>,
+        outcome: Option<&str>,
+        used: Option<&[String]>,
+        used_attribution: &str,
+        feedback_up: Option<&[String]>,
+        feedback_down: Option<&[String]>,
+        feedback_kind: &str,
+        feedback_actor: Option<&str>,
+        feedback_reason: Option<&str>,
+        nomination: Option<&str>,
+        priority: i64,
+        task_state: Option<&str>,
+        source: &str,
+    ) -> Result<()> {
         if let Some(o) = outcome {
             if !matches!(o, "ok" | "fail" | "unknown") {
                 return Err(InnateError::InvalidState(format!("invalid outcome: {o}")));
+            }
+        }
+        if !matches!(used_attribution, "explicit" | "cited" | "inferred") {
+            return Err(InnateError::InvalidState(format!(
+                "invalid used attribution: {used_attribution}"
+            )));
+        }
+        if !matches!(feedback_kind, "user" | "judge") {
+            return Err(InnateError::InvalidState(format!(
+                "invalid feedback kind: {feedback_kind}"
+            )));
+        }
+        if let Some(state) = task_state {
+            if !matches!(
+                state,
+                "recalled" | "running" | "completed" | "abandoned" | "timed_out"
+            ) {
+                return Err(InnateError::InvalidState(format!(
+                    "invalid task state: {state}"
+                )));
             }
         }
         validate_source(source)?;
@@ -957,6 +1036,7 @@ impl KnowledgeBase {
             let log = match log {
                 Some(l) => l,
                 None => {
+                    let used_ids = used.map(serde_json::to_string).transpose()?;
                     let row = EpisodicLogRow {
                         id: gen_uuid(),
                         trace_id: trace_id.to_string(),
@@ -967,6 +1047,16 @@ impl KnowledgeBase {
                         output_summary: output_summary.map(str::to_string),
                         outcome: outcome.map(str::to_string),
                         event_source: source.to_string(),
+                        task_state: if outcome.is_some() {
+                            "completed".to_string()
+                        } else {
+                            task_state.unwrap_or("running").to_string()
+                        },
+                        completed_at: outcome.map(|_| now.clone()),
+                        usage_state: usage_state(used).to_string(),
+                        used_ids,
+                        used_attribution: used.map(|_| used_attribution.to_string()),
+                        context_key: query.map(content_hash),
                         nomination: nomination.map(str::to_string),
                         priority: effective_priority,
                         distill_state: "open".to_string(),
@@ -995,17 +1085,24 @@ impl KnowledgeBase {
             }
 
             // usage_trace: used
+            let used_strength = match used_attribution {
+                "explicit" => 0.3,
+                "cited" => 0.25,
+                "inferred" => 0.15,
+                _ => unreachable!(),
+            };
             if let Some(used_ids) = used {
                 for cid in used_ids {
                     self.storage.insert_usage_trace(
                         trace_id,
                         Some(cid),
                         "used",
-                        0.3,
+                        used_strength,
                         None,
                         None,
                         None,
                         None,
+                        Some(used_attribution),
                         source,
                         &now,
                     )?;
@@ -1019,28 +1116,113 @@ impl KnowledgeBase {
                     let event = if o == "ok" { "task_ok" } else { "task_fail" };
                     let strength = if event == "task_fail" { 0.15 } else { 1.0 };
                     self.storage.insert_usage_trace(
-                        trace_id, None, event, strength, None, None, None, None, source, &now,
+                        trace_id, None, event, strength, None, None, None, None, None, source, &now,
                     )?;
                 }
             }
 
             // confidence implicit update
-            if let Some(o) = outcome {
+            if let Some(o @ ("ok" | "fail")) = outcome {
                 if is_fresh_insert || existing_outcome.is_none() {
-                    self.apply_outcome_implicit(trace_id, o, used, &now)?;
+                    self.apply_outcome_implicit(
+                        trace_id,
+                        o,
+                        used,
+                        used_strength,
+                        used_attribution,
+                        &now,
+                    )?;
                 }
             }
 
-            // feedback
+            let context_key = log
+                .get("context_key")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| query.map(content_hash));
+            let feedback_strength = if feedback_kind == "judge" { 0.6 } else { 1.0 };
+            let feedback_actor = feedback_actor.unwrap_or(source);
+
+            // Persist feedback facts before reducing them into confidence.
             if let Some(ups) = feedback_up {
                 for cid in ups {
-                    self.update_confidence(cid, 1.0, 1.0, "user_up", &now, true)?;
+                    self.storage.insert_feedback_event(
+                        &gen_uuid(),
+                        trace_id,
+                        cid,
+                        "up",
+                        feedback_strength,
+                        source,
+                        Some(feedback_actor),
+                        feedback_reason,
+                        context_key.as_deref(),
+                        &now,
+                    )?;
+                    self.update_confidence(
+                        cid,
+                        1.0,
+                        feedback_strength,
+                        if feedback_kind == "judge" {
+                            "judge_up"
+                        } else {
+                            "user_up"
+                        },
+                        &now,
+                        true,
+                    )?;
                     self.storage.update_chunk_last_used(cid, &now)?;
+                    if let Some(ref key) = context_key {
+                        self.storage
+                            .update_context_stat(cid, key, 0, 0, 1, 0, &now)?;
+                    }
                 }
             }
             if let Some(downs) = feedback_down {
                 for cid in downs {
-                    self.update_confidence(cid, 0.0, 1.0, "user_down", &now, true)?;
+                    self.storage.insert_feedback_event(
+                        &gen_uuid(),
+                        trace_id,
+                        cid,
+                        "down",
+                        feedback_strength,
+                        source,
+                        Some(feedback_actor),
+                        feedback_reason,
+                        context_key.as_deref(),
+                        &now,
+                    )?;
+                    self.update_confidence(
+                        cid,
+                        0.0,
+                        feedback_strength,
+                        if feedback_kind == "judge" {
+                            "judge_down"
+                        } else {
+                            "user_down"
+                        },
+                        &now,
+                        true,
+                    )?;
+                    if let Some(ref key) = context_key {
+                        self.storage
+                            .update_context_stat(cid, key, 0, 0, 0, 1, &now)?;
+                    }
+                    let negative_count = count_query_params(
+                        &self.storage,
+                        "SELECT COUNT(*) FROM feedback_events
+                         WHERE chunk_id=? AND signal='down'",
+                        rusqlite::params![cid],
+                    )?;
+                    if negative_count >= 2 {
+                        self.storage.upsert_governance_proposal(
+                            &gen_uuid(),
+                            cid,
+                            "review_applicability",
+                            "Repeated negative feedback: review content, trigger_desc, anti_trigger_desc, or archive",
+                            negative_count,
+                            &now,
+                        )?;
+                    }
                 }
             }
 
@@ -1056,13 +1238,36 @@ impl KnowledgeBase {
                 )?;
             }
 
+            let lifecycle_state = if outcome.is_some() || existing_outcome.is_some() {
+                "completed"
+            } else {
+                task_state.unwrap_or_else(|| {
+                    log.get("task_state")
+                        .and_then(Value::as_str)
+                        .unwrap_or("running")
+                })
+            };
+            let used_ids_json = used.map(serde_json::to_string).transpose()?;
+            self.storage.update_trace_lifecycle(
+                trace_id,
+                lifecycle_state,
+                (lifecycle_state == "completed").then_some(now.as_str()),
+                used.map(|ids| usage_state(Some(ids))),
+                used_ids_json.as_deref(),
+                used.map(|_| used_attribution),
+            )?;
+
             // Update episodic log
             let current_state = log
                 .get("distill_state")
                 .and_then(Value::as_str)
                 .unwrap_or("open");
             let outcome_completed = outcome.is_some() || existing_outcome.is_some();
-            let new_state = if current_state == "open" && outcome_completed {
+            let new_state = if current_state == "open"
+                && matches!(lifecycle_state, "abandoned" | "timed_out")
+            {
+                Some("discarded")
+            } else if current_state == "open" && outcome_completed {
                 let has_material = output_summary.is_some()
                     || nomination.is_some()
                     || output.is_some()
@@ -1081,7 +1286,11 @@ impl KnowledgeBase {
             };
             if let Some(state) = new_state {
                 let note = if state == "discarded" {
-                    Some("insufficient_material")
+                    Some(if matches!(lifecycle_state, "abandoned" | "timed_out") {
+                        lifecycle_state
+                    } else {
+                        "insufficient_material"
+                    })
                 } else {
                     None
                 };
@@ -1107,7 +1316,8 @@ impl KnowledgeBase {
         if result.is_err() {
             let _ = self.storage.rollback();
         }
-        result
+        result?;
+        self.enqueue_evolve_if_needed(&now)
     }
 
     fn apply_outcome_implicit(
@@ -1115,30 +1325,79 @@ impl KnowledgeBase {
         trace_id: &str,
         outcome: &str,
         used: Option<&[String]>,
+        used_strength: f64,
+        used_attribution: &str,
         now: &str,
     ) -> Result<()> {
         let used_set: HashSet<&str> = used
             .map(|u| u.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let (target, strength, reason) = if outcome == "ok" {
-            (1.0, 0.3, "agent_used")
+            (1.0, used_strength, used_attribution)
         } else {
-            (0.0, 0.15, "task_fail")
+            (0.0, used_strength * 0.5, "task_fail")
         };
         for cid in &used_set {
             self.update_confidence(cid, target, strength, reason, now, false)?;
         }
-        // selected but not used: very weak downgrade (implicit)
-        let selected_rows = self.storage.query_chunks_params(
-            "SELECT chunk_id FROM usage_trace WHERE trace_id=? AND event='selected' AND chunk_id IS NOT NULL",
-            rusqlite::params![trace_id],
-        )?;
-        for row in selected_rows {
-            if let Some(cid) = row.get("chunk_id").and_then(Value::as_str) {
-                if !used_set.contains(cid) {
-                    self.update_confidence(cid, 0.3, 0.1, "selected_unused", now, false)?;
+        if let Some(used_ids) = used {
+            let context_key = self.storage.get_episodic_log(trace_id)?.and_then(|log| {
+                log.get("context_key")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            for cid in used_ids {
+                if let Some(ref key) = context_key {
+                    self.storage.update_context_stat(
+                        cid,
+                        key,
+                        i64::from(outcome == "ok"),
+                        i64::from(outcome == "fail"),
+                        0,
+                        0,
+                        now,
+                    )?;
                 }
             }
+
+            // Only an explicit usage declaration can prove selected chunks were unused.
+            let selected_rows = self.storage.query_chunks_params(
+                "SELECT chunk_id FROM usage_trace WHERE trace_id=? AND event='selected' AND chunk_id IS NOT NULL",
+                rusqlite::params![trace_id],
+            )?;
+            for row in selected_rows {
+                if let Some(cid) = row.get("chunk_id").and_then(Value::as_str) {
+                    if !used_set.contains(cid) {
+                        self.update_confidence(cid, 0.3, 0.1, "selected_unused", now, false)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn enqueue_evolve_if_needed(&self, now: &str) -> Result<()> {
+        let ready = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM episodic_log WHERE distill_state='new'",
+        )?;
+        let oldest = self
+            .storage
+            .query_chunks("SELECT MIN(ts) AS oldest FROM episodic_log WHERE distill_state='new'")?
+            .first()
+            .and_then(|row| row.get("oldest"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let age_due = oldest
+            .as_deref()
+            .is_some_and(|ts| ts <= hours_ago(now, self.evolve_schedule_interval_hours).as_str());
+        if ready >= self.evolve_threshold || (ready > 0 && age_due) {
+            let reason = if ready >= self.evolve_threshold {
+                "threshold"
+            } else {
+                "scheduled"
+            };
+            self.storage.request_evolve(&gen_uuid(), reason, now)?;
         }
         Ok(())
     }
@@ -1812,6 +2071,18 @@ impl KnowledgeBase {
                 "invalid evolve trigger: {trigger}"
             )));
         }
+        let evolve_started_at = utc_now_iso();
+        let request_id = self.storage.claim_evolve_request(
+            &evolve_started_at,
+            &minutes_ago(&evolve_started_at, self.screening_timeout_minutes),
+        )?;
+        if trigger == "scheduled" && request_id.is_none() {
+            return Ok(json!({
+                "distilled": 0,
+                "curate": null,
+                "skipped": "no_evolve_request"
+            }));
+        }
 
         // Threshold check
         if trigger == "threshold" {
@@ -1824,6 +2095,14 @@ impl KnowledgeBase {
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
             if cnt < self.evolve_threshold {
+                if let Some(ref id) = request_id {
+                    self.storage.finish_evolve_request(
+                        id,
+                        "completed",
+                        Some("below_threshold"),
+                        &utc_now_iso(),
+                    )?;
+                }
                 return Ok(json!({"distilled": 0, "curate": null}));
             }
 
@@ -1849,6 +2128,14 @@ impl KnowledgeBase {
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
                 if used >= limit {
+                    if let Some(ref id) = request_id {
+                        self.storage.finish_evolve_request(
+                            id,
+                            "completed",
+                            Some("distill_token_limit"),
+                            &utc_now_iso(),
+                        )?;
+                    }
                     return Ok(json!({
                         "distilled": 0,
                         "curate": null,
@@ -1861,21 +2148,32 @@ impl KnowledgeBase {
             }
         }
 
-        let distilled = self.distill_batch()?;
-        let curator = Arc::clone(&self.curator);
-        let curate = curator.run(self, &CurateScope::default())?;
+        let result = (|| -> Result<Value> {
+            let distilled = self.distill_batch()?;
+            let curator = Arc::clone(&self.curator);
+            let curate = curator.run(self, &CurateScope::default())?;
 
-        Ok(json!({
-            "distilled": distilled,
-            "curate": {
-                "archived": curate.archived.len(),
-                "deduped": curate.deduped.len(),
-                "decayed": curate.decayed.len(),
-                "recovered": curate.recovered.len(),
-                "orphans": curate.orphans.len(),
-                "warnings": curate.warnings,
-            }
-        }))
+            Ok(json!({
+                "distilled": distilled,
+                "curate": {
+                    "archived": curate.archived.len(),
+                    "deduped": curate.deduped.len(),
+                    "decayed": curate.decayed.len(),
+                    "recovered": curate.recovered.len(),
+                    "orphans": curate.orphans.len(),
+                    "warnings": curate.warnings,
+                }
+            }))
+        })();
+        if let Some(ref id) = request_id {
+            let (state, note) = match &result {
+                Ok(_) => ("completed", None),
+                Err(error) => ("failed", Some(error.to_string())),
+            };
+            self.storage
+                .finish_evolve_request(id, state, note.as_deref(), &utc_now_iso())?;
+        }
+        result
     }
 
     fn distill_batch(&self) -> Result<usize> {
@@ -2209,9 +2507,10 @@ impl KnowledgeBase {
             let open_ttl_cutoff = days_ago(&now_iso, self.open_ttl_days);
             self.storage.conn_execute(
                 "UPDATE episodic_log
-                 SET distill_state='discarded', distill_note='no_record_timeout'
+                 SET distill_state='discarded', distill_note='no_record_timeout',
+                     task_state='timed_out', completed_at=?
                  WHERE distill_state='open' AND ts < ?",
-                rusqlite::params![open_ttl_cutoff],
+                rusqlite::params![now_iso, open_ttl_cutoff],
             )?;
             self.storage.commit()
         })();
@@ -2516,6 +2815,88 @@ impl KnowledgeBase {
         let lib_id = self.storage.get_meta_or("lib_id", "?");
         let last_agg = self.storage.get_meta_or("last_agg_ts", "never");
 
+        let trace_metrics = self.storage.query_chunks(
+            "SELECT COUNT(*) AS total,
+                    SUM(CASE WHEN task_state='completed' THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN task_state='timed_out' THEN 1 ELSE 0 END) AS timed_out,
+                    SUM(CASE WHEN usage_state!='unknown' THEN 1 ELSE 0 END) AS usage_known,
+                    SUM(CASE WHEN usage_state='known_some' THEN 1 ELSE 0 END) AS usage_some,
+                    SUM(CASE WHEN outcome='ok' THEN 1 ELSE 0 END) AS succeeded
+             FROM episodic_log",
+        )?;
+        let trace_row = trace_metrics.first();
+        let trace_total = trace_row
+            .and_then(|row| row.get("total"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let trace_completed = trace_row
+            .and_then(|row| row.get("completed"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let trace_timed_out = trace_row
+            .and_then(|row| row.get("timed_out"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let usage_known = trace_row
+            .and_then(|row| row.get("usage_known"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let usage_some = trace_row
+            .and_then(|row| row.get("usage_some"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let succeeded = trace_row
+            .and_then(|row| row.get("succeeded"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let usage_rows = self.storage.query_chunks(
+            "SELECT recall_snapshot, used_ids FROM episodic_log
+             WHERE usage_state!='unknown' AND recall_snapshot IS NOT NULL AND used_ids IS NOT NULL",
+        )?;
+        let mut selected_total = 0_i64;
+        let mut selected_used = 0_i64;
+        for row in usage_rows {
+            let selected: HashSet<String> = row
+                .get("recall_snapshot")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|snapshot| snapshot.get("selected").cloned())
+                .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let used: HashSet<String> = row
+                .get("used_ids")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            selected_total += selected.len() as i64;
+            selected_used += selected.intersection(&used).count() as i64;
+        }
+        let feedback_count = count_query(&self.storage, "SELECT COUNT(*) FROM feedback_events")?;
+        let feedback_traces = count_query(
+            &self.storage,
+            "SELECT COUNT(DISTINCT trace_id) FROM feedback_events",
+        )?;
+        let pending_evolve = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM evolve_requests WHERE state IN ('pending','running')",
+        )?;
+        let governance_pending = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM governance_proposals WHERE state='pending'",
+        )?;
+        let confidence_buckets = self.storage.query_chunks(
+            "SELECT
+               SUM(CASE WHEN confidence < 0.25 THEN 1 ELSE 0 END) AS low,
+               SUM(CASE WHEN confidence >= 0.25 AND confidence < 0.65 THEN 1 ELSE 0 END) AS medium,
+               SUM(CASE WHEN confidence >= 0.65 THEN 1 ELSE 0 END) AS high
+             FROM chunks WHERE origin!='spark' AND state!='archived'",
+        )?;
+        let confidence_row = confidence_buckets.first();
+
         // Health signal 1: knowledge debt ratio
         // Zombie = active, confidence in [0.4, 0.6], created > 7d ago, non-spark
         // Use Rust-computed cutoff to match the fixed YYYY-MM-DDTHH:MM:SS.mmmZ format;
@@ -2610,6 +2991,12 @@ impl KnowledgeBase {
         if stale_screening > 0 {
             suggestions.push(json!({"action": "innate evolve --trigger manual", "reason": format!("{stale_screening} episodic log(s) stuck in screening")}));
         }
+        if governance_pending > 0 {
+            suggestions.push(json!({
+                "action": "review governance_proposals",
+                "reason": format!("{governance_pending} chunk(s) have repeated negative feedback")
+            }));
+        }
 
         Ok(json!({
             "schema_version": schema_version,
@@ -2621,12 +3008,30 @@ impl KnowledgeBase {
             "embed_rebuild_queue": embed_rebuild,
             "knowledge_debt_ratio": (debt_ratio * 100.0).round() / 100.0,
             "stale_screening_count": stale_screening,
+            "feedback_loop": {
+                "trace_completion_rate": ratio(trace_completed, trace_total),
+                "usage_annotation_rate": ratio(usage_known, trace_completed),
+                "trace_use_rate": ratio(usage_some, usage_known),
+                "selected_to_used_rate": ratio(selected_used, selected_total),
+                "task_success_rate": ratio(succeeded, trace_completed),
+                "feedback_coverage": ratio(feedback_traces, trace_completed),
+                "feedback_events": feedback_count,
+                "timed_out_traces": trace_timed_out,
+                "pending_evolve_requests": pending_evolve,
+                "pending_governance_proposals": governance_pending,
+                "confidence_distribution": {
+                    "low": confidence_row.and_then(|row| row.get("low")).and_then(Value::as_i64).unwrap_or(0),
+                    "medium": confidence_row.and_then(|row| row.get("medium")).and_then(Value::as_i64).unwrap_or(0),
+                    "high": confidence_row.and_then(|row| row.get("high")).and_then(Value::as_i64).unwrap_or(0),
+                }
+            },
             "distill_cost_estimate": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
             "recurring_sparks": recurring_sparks.len(),
             "recurring_spark_ids": recurring_spark_ids,
             "params": {
                 "recall.w_content": self.w_content,
                 "recall.w_trigger": self.w_trigger,
+                "recall.w_context": self.w_context,
                 "recall.top_k_candidates": self.top_k_candidates,
                 "curate.low_conf_threshold": self.low_conf_threshold,
                 "curate.low_conf_idle_days": self.low_conf_idle_days,
@@ -2636,6 +3041,7 @@ impl KnowledgeBase {
                 "curate.promote_confidence_min": self.promote_confidence_min,
                 "curate.screening_timeout_minutes": self.screening_timeout_minutes,
                 "curate.open_ttl_days": self.open_ttl_days,
+                "evolve.schedule_interval_hours": self.evolve_schedule_interval_hours,
             },
             "suggestions": suggestions
         }))
@@ -2846,8 +3252,27 @@ fn limit_knowledge(knowledge: Vec<Value>, top: Option<usize>) -> Vec<Value> {
     }
 }
 
+fn usage_state(used: Option<&[String]>) -> &'static str {
+    match used {
+        None => "unknown",
+        Some([]) => "known_none",
+        Some(_) => "known_some",
+    }
+}
+
+fn ratio(numerator: i64, denominator: i64) -> f64 {
+    if denominator <= 0 {
+        0.0
+    } else {
+        ((numerator as f64 / denominator as f64) * 1000.0).round() / 1000.0
+    }
+}
+
 fn validate_source(source: &str) -> Result<()> {
-    if !matches!(source, "sdk" | "cli" | "hook" | "daemon" | "augmented") {
+    if !matches!(
+        source,
+        "mcp" | "sdk" | "cli" | "hook" | "daemon" | "augmented"
+    ) {
         return Err(InnateError::InvalidState(format!(
             "invalid event source: {source}"
         )));

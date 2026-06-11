@@ -46,7 +46,7 @@ pub enum Commands {
         /// Refine mode written to usage_trace: off (default) | trim | adapt
         #[arg(long, default_value = "off")]
         refine_mode: String,
-        /// Event source written to usage_trace (sdk | cli | hook | daemon | augmented)
+        /// Event source written to usage_trace (mcp | sdk | cli | hook | daemon | augmented)
         #[arg(long, default_value = "cli")]
         source: String,
     },
@@ -57,8 +57,13 @@ pub enum Commands {
         query: Option<String>,
         #[arg(long)]
         outcome: Option<String>,
-        #[arg(long, value_delimiter = ',')]
-        used: Vec<String>,
+        /// Comma-separated chunk ids. An explicit empty value means "known none".
+        #[arg(long)]
+        used: Option<String>,
+        #[arg(long, default_value = "explicit")]
+        used_attribution: String,
+        #[arg(long)]
+        output: Option<String>,
         #[arg(long)]
         output_summary: Option<String>,
         #[arg(long)]
@@ -68,6 +73,14 @@ pub enum Commands {
         /// Explicit feedback: up or down (applied to --used chunks if provided)
         #[arg(long)]
         feedback: Option<String>,
+        #[arg(long, default_value = "user")]
+        feedback_kind: String,
+        #[arg(long)]
+        feedback_actor: Option<String>,
+        #[arg(long)]
+        feedback_reason: Option<String>,
+        #[arg(long)]
+        task_state: Option<String>,
         #[arg(long, default_value = "0")]
         priority: i64,
     },
@@ -208,7 +221,7 @@ pub fn run() -> anyhow::Result<()> {
     if let Commands::Migrate = &cli.command {
         let applied = crate::migrate::run_migrations(&db_path)?;
         if applied.is_empty() {
-            println!("already at 4.5.2 — nothing to do");
+            println!("already at 4.6 — nothing to do");
         } else {
             for step in &applied {
                 println!("  applied: {step}");
@@ -299,35 +312,57 @@ pub fn run() -> anyhow::Result<()> {
             query,
             outcome,
             used,
+            used_attribution,
+            output,
             output_summary,
             nomination,
             source,
             feedback,
+            feedback_kind,
+            feedback_actor,
+            feedback_reason,
+            task_state,
             priority,
         } => {
-            let used_ref: Option<&[String]> = if used.is_empty() { None } else { Some(&used) };
+            let used_ids = used.as_deref().map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            });
+            let used_ref = used_ids.as_deref();
             // Per §二·五B: trace-level "up" applies only to explicitly used chunks.
             let (fb_up, fb_down): (Option<Vec<String>>, Option<Vec<String>>) =
                 match feedback.as_deref() {
-                    Some("up") if !used.is_empty() => (Some(used.clone()), None),
-                    Some("down") if !used.is_empty() => (None, Some(used.clone())),
+                    Some("up") if used_ids.as_ref().is_some_and(|ids| !ids.is_empty()) => {
+                        (used_ids.clone(), None)
+                    }
+                    Some("down") if used_ids.as_ref().is_some_and(|ids| !ids.is_empty()) => {
+                        (None, used_ids.clone())
+                    }
                     Some("up") => (None, None), // no used chunks — ignore per design
                     Some("down") => (None, None),
                     _ => (None, None),
                 };
             let fb_up_ref = fb_up.as_deref();
             let fb_down_ref = fb_down.as_deref();
-            kb.record(
+            kb.record_detailed(
                 &trace_id,
                 query.as_deref(),
-                None,
+                output.as_deref(),
                 output_summary.as_deref(),
                 outcome.as_deref(),
                 used_ref,
+                &used_attribution,
                 fb_up_ref,
                 fb_down_ref,
+                &feedback_kind,
+                feedback_actor.as_deref(),
+                feedback_reason.as_deref(),
                 nomination.as_deref(),
                 priority,
+                task_state.as_deref(),
                 &source,
             )?;
             println!("recorded");

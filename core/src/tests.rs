@@ -102,6 +102,239 @@ fn record_state_machine() {
 }
 
 #[test]
+fn mcp_is_a_valid_event_source() {
+    let (kb, _f) = tmp_kb();
+    let result = kb
+        .recall(
+            "mcp source",
+            6000,
+            true,
+            false,
+            None,
+            "mcp",
+            "false",
+            false,
+            "off",
+        )
+        .unwrap();
+    kb.record(
+        &result.trace_id,
+        None,
+        None,
+        Some("closed through MCP"),
+        Some("ok"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        "mcp",
+    )
+    .unwrap();
+}
+
+#[test]
+fn unknown_usage_does_not_penalize_selected_chunks() {
+    let (kb, _f) = tmp_kb();
+    let chunk_id = kb
+        .add(
+            "Use bounded retries",
+            "note",
+            Some("bounded retries"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    let first = kb
+        .recall(
+            "bounded retries",
+            6000,
+            true,
+            false,
+            None,
+            "sdk",
+            "false",
+            false,
+            "off",
+        )
+        .unwrap();
+    let before = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
+        .as_f64()
+        .unwrap();
+    kb.record(
+        &first.trace_id,
+        None,
+        None,
+        Some("completed without usage attribution"),
+        Some("ok"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+    let after_unknown = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(before, after_unknown);
+
+    let second = kb
+        .recall(
+            "bounded retries",
+            6000,
+            true,
+            false,
+            None,
+            "sdk",
+            "false",
+            false,
+            "off",
+        )
+        .unwrap();
+    let explicitly_unused: Vec<String> = vec![];
+    kb.record(
+        &second.trace_id,
+        None,
+        None,
+        Some("completed and explicitly used no recalled chunks"),
+        Some("ok"),
+        Some(&explicitly_unused),
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+    let after_known_none = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
+        .as_f64()
+        .unwrap();
+    assert!(after_known_none < after_unknown);
+}
+
+#[test]
+fn feedback_is_auditable_and_builds_contextual_governance_evidence() {
+    let (kb, _f) = tmp_kb();
+    let chunk_id = kb
+        .add(
+            "Always retry forever",
+            "note",
+            Some("retry policy"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..2 {
+        let recall = kb
+            .recall(
+                "retry policy",
+                6000,
+                true,
+                false,
+                None,
+                "sdk",
+                "false",
+                false,
+                "off",
+            )
+            .unwrap();
+        let used = vec![chunk_id.clone()];
+        kb.record_detailed(
+            &recall.trace_id,
+            None,
+            None,
+            Some("retry policy was unsuitable"),
+            Some("fail"),
+            Some(&used),
+            "explicit",
+            None,
+            Some(&used),
+            "user",
+            Some("tester"),
+            Some("unbounded retry is unsafe"),
+            None,
+            0,
+            None,
+            "sdk",
+        )
+        .unwrap();
+    }
+
+    let feedback_count = kb
+        .storage
+        .query_chunks_params(
+            "SELECT COUNT(*) AS count FROM feedback_events WHERE chunk_id=?",
+            rusqlite::params![chunk_id],
+        )
+        .unwrap()[0]["count"]
+        .as_i64();
+    assert_eq!(feedback_count, Some(2));
+    let proposals = kb
+        .storage
+        .query_chunks("SELECT * FROM governance_proposals WHERE state='pending'")
+        .unwrap();
+    assert_eq!(proposals.len(), 1);
+    let context = kb
+        .storage
+        .query_chunks("SELECT * FROM chunk_context_stats")
+        .unwrap();
+    assert_eq!(context.len(), 1);
+    assert_eq!(context[0]["failure_count"].as_i64(), Some(2));
+    assert_eq!(context[0]["negative_feedback"].as_i64(), Some(2));
+}
+
+#[test]
+fn record_requests_evolve_and_inspect_reports_feedback_metrics() {
+    let file = NamedTempFile::new().unwrap();
+    {
+        let kb = KnowledgeBase::open(file.path()).unwrap();
+        kb.storage
+            .set_meta("evolve.threshold_new_count", "1")
+            .unwrap();
+    }
+    let kb = KnowledgeBase::open(file.path()).unwrap();
+    let trace_id = crate::utils::gen_uuid();
+    kb.record(
+        &trace_id,
+        Some("queue evolve"),
+        None,
+        Some("reusable material"),
+        Some("ok"),
+        Some(&[]),
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+
+    let requests = kb
+        .storage
+        .query_chunks("SELECT * FROM evolve_requests WHERE state='pending'")
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    let inspect = kb.inspect().unwrap();
+    assert_eq!(
+        inspect["feedback_loop"]["trace_completion_rate"].as_f64(),
+        Some(1.0)
+    );
+    assert_eq!(
+        inspect["feedback_loop"]["usage_annotation_rate"].as_f64(),
+        Some(1.0)
+    );
+    assert_eq!(
+        inspect["feedback_loop"]["pending_evolve_requests"].as_i64(),
+        Some(1)
+    );
+}
+
+#[test]
 fn invalidate_cascade() {
     let (kb, _f) = tmp_kb();
     let id = kb
@@ -506,16 +739,43 @@ fn migration_4_5_1_adds_distill_accounting_time() {
          INSERT INTO meta(key, value) VALUES ('schema_version', '4.5.1');
          CREATE TABLE episodic_log (
              id TEXT PRIMARY KEY,
+             trace_id TEXT NOT NULL,
+             lib_id TEXT NOT NULL,
+             ts TEXT NOT NULL,
+             query TEXT,
+             recall_snapshot TEXT,
+             output TEXT,
+             output_summary TEXT,
+             outcome TEXT,
+             event_source TEXT NOT NULL DEFAULT 'sdk',
+             nomination TEXT,
+             priority INTEGER NOT NULL DEFAULT 0,
              distill_state TEXT NOT NULL,
+             distill_note TEXT,
+             distill_run_id TEXT,
+             distill_locked_at TEXT,
              distill_prompt_tokens INTEGER,
              distill_completion_tokens INTEGER
+         );
+         CREATE TABLE usage_trace (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             trace_id TEXT NOT NULL,
+             chunk_id TEXT,
+             event TEXT NOT NULL,
+             strength REAL,
+             similarity REAL,
+             tokens INTEGER,
+             rank INTEGER,
+             refine_mode TEXT,
+             source TEXT NOT NULL DEFAULT 'sdk',
+             ts TEXT NOT NULL
          );",
     )
     .unwrap();
     drop(conn);
 
     let applied = crate::migrate::run_migrations(file.path()).unwrap();
-    assert_eq!(applied, vec!["4.5.1→4.5.2"]);
+    assert_eq!(applied, vec!["4.5.1→4.5.2", "4.5.2→4.6"]);
 
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     let has_column: bool = conn
@@ -533,7 +793,7 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "4.5.2");
+    assert_eq!(version, "4.6");
 }
 
 #[test]

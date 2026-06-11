@@ -206,7 +206,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let trace_id = s("trace_id");
             let outcome = so("outcome");
             let used = arr("used");
-            let used_ref: Option<&[String]> = if used.is_empty() { None } else { Some(&used) };
+            let used_ref: Option<&[String]> = args.get("used").map(|_| used.as_slice());
             let fb_up = arr("feedback_up");
             let fb_up_ref: Option<&[String]> = if fb_up.is_empty() { None } else { Some(&fb_up) };
             let fb_down = arr("feedback_down");
@@ -220,17 +220,32 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             } else {
                 s("source")
             };
-            kb.record(
+            let used_attribution = if s("used_attribution").is_empty() {
+                "explicit".to_string()
+            } else {
+                s("used_attribution")
+            };
+            let feedback_kind = if s("feedback_kind").is_empty() {
+                "user".to_string()
+            } else {
+                s("feedback_kind")
+            };
+            kb.record_detailed(
                 &trace_id,
                 so("query").as_deref(),
                 so("output").as_deref(),
                 so("output_summary").as_deref(),
                 outcome.as_deref(),
                 used_ref,
+                &used_attribution,
                 fb_up_ref,
                 fb_down_ref,
+                &feedback_kind,
+                so("feedback_actor").as_deref(),
+                so("feedback_reason").as_deref(),
                 so("nomination").as_deref(),
                 n("priority", 0),
+                so("task_state").as_deref(),
                 &source,
             )?;
             Ok(json!({"ok": true}))
@@ -342,8 +357,13 @@ fn tool_schema(name: &str) -> Value {
                 "output": {"type": "string", "description": "Raw task output (optional, for distillation)"},
                 "outcome": {"type": "string", "enum": ["ok","fail","unknown"]},
                 "used": {"type": "array", "items": {"type": "string"}},
+                "used_attribution": {"type": "string", "enum": ["explicit","cited","inferred"]},
                 "feedback_up": {"type": "array", "items": {"type": "string"}},
                 "feedback_down": {"type": "array", "items": {"type": "string"}},
+                "feedback_kind": {"type": "string", "enum": ["user","judge"]},
+                "feedback_actor": {"type": "string"},
+                "feedback_reason": {"type": "string"},
+                "task_state": {"type": "string", "enum": ["recalled","running","completed","abandoned","timed_out"]},
                 "output_summary": {"type": "string"},
                 "nomination": {"type": "string"},
                 "priority": {"type": "integer"},

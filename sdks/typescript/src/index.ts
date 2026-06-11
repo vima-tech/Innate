@@ -39,7 +39,29 @@ export interface InspectResult {
   sparks: number;
   episodic_log: { open: number; new: number };
   embed_rebuild_queue: number;
+  feedback_loop: {
+    trace_completion_rate: number;
+    usage_annotation_rate: number;
+    trace_use_rate: number;
+    selected_to_used_rate: number;
+    task_success_rate: number;
+    feedback_coverage: number;
+    feedback_events: number;
+    timed_out_traces: number;
+    pending_evolve_requests: number;
+    pending_governance_proposals: number;
+    confidence_distribution: { low: number; medium: number; high: number };
+  };
   params: Record<string, number>;
+}
+
+export interface TracedResult<T> {
+  result: T;
+  outcome?: "ok" | "fail" | "unknown";
+  used?: string[];
+  usedAttribution?: "explicit" | "cited" | "inferred";
+  outputSummary?: string;
+  nomination?: string;
 }
 
 export interface EvolveResult {
@@ -128,18 +150,79 @@ export class KnowledgeBase {
       query?: string;
       outcome?: "ok" | "fail" | "unknown";
       used?: string[];
+      usedAttribution?: "explicit" | "cited" | "inferred";
+      output?: string;
       outputSummary?: string;
       nomination?: string;
+      feedback?: "up" | "down";
+      feedbackKind?: "user" | "judge";
+      feedbackActor?: string;
+      feedbackReason?: string;
+      taskState?: "recalled" | "running" | "completed" | "abandoned" | "timed_out";
       source?: string;
     } = {}
   ): void {
     const args = ["record", traceId, "--source", options.source ?? "sdk"];
     if (options.query) args.push("--query", options.query);
     if (options.outcome) args.push("--outcome", options.outcome);
-    if (options.used?.length) args.push("--used", options.used.join(","));
+    if (options.used !== undefined) {
+      args.push(
+        "--used",
+        options.used.join(","),
+        "--used-attribution",
+        options.usedAttribution ?? "explicit"
+      );
+    }
+    if (options.output) args.push("--output", options.output);
     if (options.outputSummary) args.push("--output-summary", options.outputSummary);
     if (options.nomination) args.push("--nomination", options.nomination);
+    if (options.feedback) {
+      args.push("--feedback", options.feedback, "--feedback-kind", options.feedbackKind ?? "user");
+    }
+    if (options.feedbackActor) args.push("--feedback-actor", options.feedbackActor);
+    if (options.feedbackReason) args.push("--feedback-reason", options.feedbackReason);
+    if (options.taskState) args.push("--task-state", options.taskState);
     this.runRaw(...args);
+  }
+
+  withTrace<T>(
+    query: string,
+    fn: (context: RecallResult) => T | TracedResult<T>,
+    options: Parameters<KnowledgeBase["recall"]>[1] = {}
+  ): T {
+    const source = options.source ?? "augmented";
+    const context = this.recall(query, { ...options, source });
+    this.record(context.trace_id, {
+      taskState: "running",
+      source,
+    });
+    try {
+      const value = fn(context);
+      if (typeof value === "object" && value !== null && "result" in value) {
+        const traced = value as TracedResult<T>;
+        this.record(context.trace_id, {
+          outcome: traced.outcome ?? "ok",
+          used: traced.used,
+          usedAttribution: traced.usedAttribution,
+          outputSummary: traced.outputSummary,
+          nomination: traced.nomination,
+          source,
+        });
+        return traced.result;
+      }
+      this.record(context.trace_id, {
+        outcome: "ok",
+        source,
+      });
+      return value as T;
+    } catch (error) {
+      this.record(context.trace_id, {
+        outcome: "fail",
+        outputSummary: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        source,
+      });
+      throw error;
+    }
   }
 
   add(
@@ -308,7 +391,15 @@ export class McpClient {
   }
 
   async record(traceId: string, options: {
-    outcome?: string; used?: string[];
+    outcome?: string;
+    used?: string[];
+    used_attribution?: "explicit" | "cited" | "inferred";
+    feedback_up?: string[];
+    feedback_down?: string[];
+    feedback_kind?: "user" | "judge";
+    feedback_actor?: string;
+    feedback_reason?: string;
+    task_state?: string;
   } = {}): Promise<void> {
     await this.toolCall("innate_record", { trace_id: traceId, ...options });
   }

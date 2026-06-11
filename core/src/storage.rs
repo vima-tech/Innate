@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::errors::{InnateError, Result};
 use crate::utils::{cosine_similarity, unpack_embedding};
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.5.2";
+const EXPECTED_SCHEMA_VERSION: &str = "4.6";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("schema.sql");
@@ -446,14 +446,15 @@ impl Storage {
         refine_mode: Option<&str>,
         tokens: Option<i64>,
         rank: Option<i64>,
+        attribution: Option<&str>,
         source: &str,
         ts: &str,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO usage_trace
-             (trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, source, ts)
-             VALUES (?,?,?,?,?,?,?,?,?,?)",
-            params![trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, source, ts],
+             (trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            params![trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts],
         )?;
         Ok(())
     }
@@ -493,9 +494,10 @@ impl Storage {
         self.conn.execute(
             "INSERT OR REPLACE INTO episodic_log
              (id, trace_id, lib_id, ts, query, recall_snapshot, output,
-              output_summary, outcome, event_source, nomination, priority,
+              output_summary, outcome, event_source, task_state, completed_at,
+              usage_state, used_ids, used_attribution, context_key, nomination, priority,
               distill_state, distill_note)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![
                 log.id,
                 log.trace_id,
@@ -507,6 +509,12 @@ impl Storage {
                 log.output_summary,
                 log.outcome,
                 log.event_source,
+                log.task_state,
+                log.completed_at,
+                log.usage_state,
+                log.used_ids,
+                log.used_attribution,
+                log.context_key,
                 log.nomination,
                 log.priority,
                 log.distill_state,
@@ -573,6 +581,208 @@ impl Storage {
                 priority,
                 trace_id
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_trace_lifecycle(
+        &self,
+        trace_id: &str,
+        task_state: &str,
+        completed_at: Option<&str>,
+        usage_state: Option<&str>,
+        used_ids: Option<&str>,
+        used_attribution: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE episodic_log
+             SET task_state=?,
+                 completed_at=COALESCE(?, completed_at),
+                 usage_state=COALESCE(?, usage_state),
+                 used_ids=COALESCE(?, used_ids),
+                 used_attribution=COALESCE(?, used_attribution)
+             WHERE trace_id=?",
+            params![
+                task_state,
+                completed_at,
+                usage_state,
+                used_ids,
+                used_attribution,
+                trace_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_feedback_event(
+        &self,
+        id: &str,
+        trace_id: &str,
+        chunk_id: &str,
+        signal: &str,
+        strength: f64,
+        source: &str,
+        actor: Option<&str>,
+        reason: Option<&str>,
+        context_key: Option<&str>,
+        ts: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO feedback_events
+             (id, trace_id, chunk_id, signal, strength, source, actor, reason, context_key, ts)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
+            params![
+                id,
+                trace_id,
+                chunk_id,
+                signal,
+                strength,
+                source,
+                actor,
+                reason,
+                context_key,
+                ts
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_context_stat(
+        &self,
+        chunk_id: &str,
+        context_key: &str,
+        success: i64,
+        failure: i64,
+        positive: i64,
+        negative: i64,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO chunk_context_stats
+             (chunk_id, context_key, success_count, failure_count,
+              positive_feedback, negative_feedback, last_updated_at)
+             VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(chunk_id, context_key) DO UPDATE SET
+               success_count=success_count+excluded.success_count,
+               failure_count=failure_count+excluded.failure_count,
+               positive_feedback=positive_feedback+excluded.positive_feedback,
+               negative_feedback=negative_feedback+excluded.negative_feedback,
+               last_updated_at=excluded.last_updated_at",
+            params![
+                chunk_id,
+                context_key,
+                success,
+                failure,
+                positive,
+                negative,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn context_score(&self, chunk_id: &str, context_key: &str) -> Result<f64> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT success_count, failure_count, positive_feedback, negative_feedback
+                 FROM chunk_context_stats WHERE chunk_id=? AND context_key=?",
+                params![chunk_id, context_key],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((success, failure, positive, negative)) = row else {
+            return Ok(0.0);
+        };
+        let wins = success as f64 + positive as f64 * 2.0;
+        let losses = failure as f64 + negative as f64 * 2.0;
+        let evidence = wins + losses;
+        let posterior = (wins + 1.0) / (evidence + 2.0);
+        let evidence_weight = (evidence / 5.0).min(1.0);
+        Ok((posterior - 0.5) * 2.0 * evidence_weight)
+    }
+
+    pub fn upsert_governance_proposal(
+        &self,
+        id: &str,
+        chunk_id: &str,
+        proposal_type: &str,
+        reason: &str,
+        evidence_count: i64,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO governance_proposals
+             (id, chunk_id, proposal_type, reason, evidence_count, state, created_at, updated_at)
+             VALUES (?,?,?,?,?,'pending',?,?)
+             ON CONFLICT(chunk_id, proposal_type) WHERE state='pending'
+             DO UPDATE SET reason=excluded.reason,
+                           evidence_count=excluded.evidence_count,
+                           updated_at=excluded.updated_at",
+            params![
+                id,
+                chunk_id,
+                proposal_type,
+                reason,
+                evidence_count,
+                now,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn request_evolve(&self, id: &str, reason: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO evolve_requests(id, reason, state, requested_at)
+             VALUES (?,?,'pending',?)",
+            params![id, reason, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn claim_evolve_request(&self, now: &str, stale_before: &str) -> Result<Option<String>> {
+        self.conn.execute(
+            "UPDATE evolve_requests
+             SET state='pending', leased_at=NULL, note='lease_recovered'
+             WHERE state='running' AND leased_at < ?",
+            [stale_before],
+        )?;
+        Ok(self
+            .conn
+            .query_row(
+                "UPDATE evolve_requests
+                 SET state='running', leased_at=?
+                 WHERE id=(
+                   SELECT id FROM evolve_requests
+                   WHERE state='pending' ORDER BY requested_at ASC LIMIT 1
+                 ) AND state='pending'
+                 RETURNING id",
+                [now],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn finish_evolve_request(
+        &self,
+        id: &str,
+        state: &str,
+        note: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE evolve_requests SET state=?, completed_at=?, note=? WHERE id=?",
+            params![state, now, note, id],
         )?;
         Ok(())
     }
@@ -817,6 +1027,12 @@ pub struct EpisodicLogRow {
     pub output_summary: Option<String>,
     pub outcome: Option<String>,
     pub event_source: String,
+    pub task_state: String,
+    pub completed_at: Option<String>,
+    pub usage_state: String,
+    pub used_ids: Option<String>,
+    pub used_attribution: Option<String>,
+    pub context_key: Option<String>,
     pub nomination: Option<String>,
     pub priority: i64,
     pub distill_state: String,

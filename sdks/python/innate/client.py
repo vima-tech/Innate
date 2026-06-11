@@ -107,9 +107,15 @@ class KnowledgeBase:
         query: str | None = None,
         outcome: str | None = None,
         used: list[str] | None = None,
+        used_attribution: str = "explicit",
+        output: str | None = None,
         output_summary: str | None = None,
         nomination: str | None = None,
         feedback: str | None = None,
+        feedback_kind: str = "user",
+        feedback_actor: str | None = None,
+        feedback_reason: str | None = None,
+        task_state: str | None = None,
         priority: int = 0,
         source: str = "sdk",
     ) -> None:
@@ -118,14 +124,23 @@ class KnowledgeBase:
             args += ["--query", query]
         if outcome:
             args += ["--outcome", outcome]
-        if used:
-            args += ["--used", ",".join(used)]
+        if used is not None:
+            args += ["--used", ",".join(used), "--used-attribution", used_attribution]
+        if output:
+            args += ["--output", output]
         if output_summary:
             args += ["--output-summary", output_summary]
         if nomination:
             args += ["--nomination", nomination]
         if feedback:
             args += ["--feedback", feedback]
+            args += ["--feedback-kind", feedback_kind]
+        if feedback_actor:
+            args += ["--feedback-actor", feedback_actor]
+        if feedback_reason:
+            args += ["--feedback-reason", feedback_reason]
+        if task_state:
+            args += ["--task-state", task_state]
         if priority:
             args += ["--priority", str(priority)]
         _run(*args)
@@ -206,6 +221,7 @@ class KnowledgeBase:
         source: str = "augmented",
         expand_deps: str = "false",
         allow_trim: bool = False,
+        auto_record: bool = True,
     ) -> Callable:
         """Decorator that auto-injects recalled knowledge into the wrapped function.
 
@@ -242,29 +258,47 @@ class KnowledgeBase:
                     expand_deps=expand_deps,
                     allow_trim=allow_trim,
                 )
+                if auto_record:
+                    self.record(
+                        recall_result.trace_id,
+                        task_state="running",
+                        source=source,
+                    )
 
                 if accepts_knowledge:
                     kwargs["knowledge"] = recall_result.knowledge
                 if accepts_trace_id:
                     kwargs["trace_id"] = recall_result.trace_id
 
-                result = fn(*args, **kwargs)
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException as error:
+                    if auto_record:
+                        self.record(
+                            recall_result.trace_id,
+                            outcome="fail",
+                            output_summary=f"{type(error).__name__}: {error}",
+                            source=source,
+                        )
+                    raise
 
-                # Auto-record if function returns dict with "outcome" key.
-                if isinstance(result, dict) and "outcome" in result:
-                    outcome = result.get("outcome")
-                    used_ids = result.get("used", [])
+                if auto_record and isinstance(result, dict):
+                    outcome = result.get("outcome", "ok")
+                    used_ids = result.get("used") if "used" in result else None
                     summary = result.get("output_summary") or result.get("summary")
                     self.record(
                         recall_result.trace_id,
                         outcome=outcome,
-                        used=used_ids if used_ids else None,
+                        used=used_ids,
+                        used_attribution=result.get("used_attribution", "explicit"),
                         output_summary=summary,
                         nomination=result.get("nomination"),
                         source=source,
                     )
                     return result.get("result", result)
 
+                if auto_record:
+                    self.record(recall_result.trace_id, outcome="ok", source=source)
                 return result
 
             return wrapper

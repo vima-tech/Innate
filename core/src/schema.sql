@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.5.2 (Rust edition)
+-- Innate knowledge layer schema v4.6 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.5.2');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.6');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -95,8 +95,9 @@ CREATE TABLE IF NOT EXISTS usage_trace (
     tokens        INTEGER,
     rank          INTEGER,
     refine_mode   TEXT,
+    attribution   TEXT CHECK(attribution IS NULL OR attribution IN ('explicit','cited','inferred')),
     source        TEXT NOT NULL DEFAULT 'sdk'
-                  CHECK(source IN ('sdk','cli','hook','daemon','augmented')),
+                  CHECK(source IN ('mcp','sdk','cli','hook','daemon','augmented')),
     ts            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trace_chunk  ON usage_trace(chunk_id);
@@ -124,7 +125,16 @@ CREATE TABLE IF NOT EXISTS episodic_log (
     output_summary  TEXT,
     outcome         TEXT,
     event_source TEXT NOT NULL DEFAULT 'sdk'
-                 CHECK(event_source IN ('sdk','cli','hook','daemon','augmented')),
+                 CHECK(event_source IN ('mcp','sdk','cli','hook','daemon','augmented')),
+    task_state TEXT NOT NULL DEFAULT 'recalled'
+        CHECK(task_state IN ('recalled','running','completed','abandoned','timed_out')),
+    completed_at TEXT,
+    usage_state TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(usage_state IN ('unknown','known_none','known_some')),
+    used_ids TEXT,
+    used_attribution TEXT
+        CHECK(used_attribution IS NULL OR used_attribution IN ('explicit','cited','inferred')),
+    context_key TEXT,
     nomination  TEXT,
     priority    INTEGER NOT NULL DEFAULT 0,
     distill_state TEXT NOT NULL DEFAULT 'open'
@@ -146,6 +156,8 @@ CREATE INDEX IF NOT EXISTS idx_log_screening_locked
 CREATE INDEX IF NOT EXISTS idx_log_distill_accounted
   ON episodic_log(distill_accounted_at)
   WHERE distill_accounted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_log_task_state ON episodic_log(task_state);
+CREATE INDEX IF NOT EXISTS idx_log_context ON episodic_log(context_key);
 
 CREATE TABLE IF NOT EXISTS chunk_success_traces (
     chunk_id  TEXT NOT NULL,
@@ -154,3 +166,62 @@ CREATE TABLE IF NOT EXISTS chunk_success_traces (
     PRIMARY KEY (chunk_id, trace_id)
 );
 CREATE INDEX IF NOT EXISTS idx_cst_chunk ON chunk_success_traces(chunk_id);
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id          TEXT PRIMARY KEY,
+    trace_id    TEXT NOT NULL,
+    chunk_id    TEXT NOT NULL,
+    signal      TEXT NOT NULL CHECK(signal IN ('up','down')),
+    strength    REAL NOT NULL,
+    source      TEXT NOT NULL,
+    actor       TEXT,
+    reason      TEXT,
+    context_key TEXT,
+    ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_trace ON feedback_events(trace_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_chunk ON feedback_events(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_signal ON feedback_events(signal);
+
+CREATE TABLE IF NOT EXISTS chunk_context_stats (
+    chunk_id          TEXT NOT NULL,
+    context_key       TEXT NOT NULL,
+    success_count     INTEGER NOT NULL DEFAULT 0,
+    failure_count     INTEGER NOT NULL DEFAULT 0,
+    positive_feedback INTEGER NOT NULL DEFAULT 0,
+    negative_feedback INTEGER NOT NULL DEFAULT 0,
+    last_updated_at   TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, context_key)
+);
+CREATE INDEX IF NOT EXISTS idx_context_key ON chunk_context_stats(context_key);
+
+CREATE TABLE IF NOT EXISTS governance_proposals (
+    id              TEXT PRIMARY KEY,
+    chunk_id        TEXT NOT NULL,
+    proposal_type   TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    evidence_count  INTEGER NOT NULL DEFAULT 1,
+    state           TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending','accepted','rejected')),
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_governance_pending
+  ON governance_proposals(chunk_id, proposal_type)
+  WHERE state='pending';
+
+CREATE TABLE IF NOT EXISTS evolve_requests (
+    id           TEXT PRIMARY KEY,
+    reason       TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending','running','completed','failed')),
+    requested_at TEXT NOT NULL,
+    leased_at    TEXT,
+    completed_at TEXT,
+    note         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_evolve_request_state
+  ON evolve_requests(state, requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_evolve_single_active
+  ON evolve_requests((1))
+  WHERE state IN ('pending','running');

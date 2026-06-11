@@ -1,4 +1,4 @@
-//! Schema migration runner — 4.0 → 4.5.2 chain.
+//! Schema migration runner — 4.0 → 4.6 chain.
 //!
 //! Each step is atomic: BEGIN IMMEDIATE … COMMIT. Any failure rolls back the
 //! entire step and returns an error — no half-migrated state.
@@ -22,9 +22,10 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
         "4.5.2",
         include_str!("migrations/4.5.1_to_4.5.2.sql"),
     ),
+    ("4.5.2", "4.6", include_str!("migrations/4.5.2_to_4.6.sql")),
 ];
 
-const TARGET: &str = "4.5.2";
+const TARGET: &str = "4.6";
 
 /// Run all pending migrations on `db_path`. Idempotent if already at target.
 /// Returns the list of migration steps executed.

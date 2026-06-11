@@ -14,7 +14,7 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 ### 一行安装（Linux / macOS）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | sh
+curl -fsSL https://innate.mengkai.ren/ | sh
 ```
 
 自动检测平台并下载预编译二进制，验证 sha256 校验和，安装到 `~/.local/bin`，并运行 `innate install` 配置 Agent 集成——一步完成。
@@ -23,13 +23,13 @@ curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | 
 
 ```bash
 # 固定安装版本
-curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | INNATE_VERSION=0.1.5 sh
+curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.1.5 sh
 
 # 仅安装二进制，跳过 Agent 配置
-curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | NO_INNATE_SETUP=1 sh
+curl -fsSL https://innate.mengkai.ren/ | NO_INNATE_SETUP=1 sh
 
 # 指定安装目录
-curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | INNATE_DIR=/usr/local/bin sh
+curl -fsSL https://innate.mengkai.ren/ | INNATE_DIR=/usr/local/bin sh
 ```
 
 ### 其他安装方式
@@ -71,7 +71,7 @@ innate install
 
 ```
 运行以下命令安装 Innate：
-curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | sh
+curl -fsSL https://innate.mengkai.ren/ | sh
 该脚本会自动下载二进制、验证校验和并配置 MCP 服务和 agent skill。
 完成后用 `innate inspect` 验证安装。
 ```

@@ -2,8 +2,8 @@
 # Innate installer — downloads the pre-built binary from GitHub releases.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | INNATE_VERSION=0.2.0 sh
+#   curl -fsSL https://innate.mengkai.ren/ | sh
+#   curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.2.0 sh
 #
 # Environment variables:
 #   INNATE_VERSION   — version to install (default: latest release)
@@ -13,7 +13,7 @@
 
 set -eu
 
-INNATE_REPO="innate-rs/innate"
+INNATE_REPO="vima-tech/Innate"
 INNATE_DIR="${INNATE_DIR:-$HOME/.local/bin}"
 
 # ── Color helpers ─────────────────────────────────────────────────────────────
