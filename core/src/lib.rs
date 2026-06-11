@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod migrate;
 pub mod refine;
 pub mod storage;
+pub mod upgrade;
 pub mod utils;
 
 mod tests;

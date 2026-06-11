@@ -132,6 +132,15 @@ pub enum Commands {
     Install,
     /// Upgrade database schema to current version
     Migrate,
+    /// Upgrade the innate binary to the latest (or specified) release
+    Upgrade {
+        /// Install this specific version, e.g. 0.3.0 or v0.3.0 (default: latest)
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Only report whether an upgrade is available; do not install
+        #[arg(long)]
+        check: bool,
+    },
     /// Daemon control (Linux only)
     Daemon {
         #[command(subcommand)]
@@ -191,6 +200,10 @@ pub fn run() -> anyhow::Result<()> {
 
     if let Commands::Daemon { action } = &cli.command {
         return run_daemon(action, &db_path);
+    }
+
+    if let Commands::Upgrade { version, check } = &cli.command {
+        return crate::upgrade::run_upgrade(version.as_deref(), &db_path, *check);
     }
 
     let kb = KnowledgeBase::open(&db_path)?;
@@ -306,7 +319,7 @@ pub fn run() -> anyhow::Result<()> {
             kb.drop_spark(&spark_id, &reason)?;
             println!("dropped");
         }
-        Commands::Mcp | Commands::Install | Commands::Migrate | Commands::Daemon { .. } => unreachable!(),
+        Commands::Mcp | Commands::Install | Commands::Migrate | Commands::Upgrade { .. } | Commands::Daemon { .. } => unreachable!(),
     }
     Ok(())
 }
