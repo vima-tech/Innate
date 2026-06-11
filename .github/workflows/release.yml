@@ -147,7 +147,7 @@ jobs:
         working-directory: dist/npm
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          jq --arg v "$VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
       - name: Publish
         working-directory: dist/npm
         env:
