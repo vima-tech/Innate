@@ -476,6 +476,7 @@ impl KnowledgeBase {
                             if !used_ids.contains(&bid) {
                                 let mut b = b.clone();
                                 b["_fused_score"] = json!(fused);
+                                b["_trimmed"] = json!(true);
                                 selected.push(b);
                                 used_ids.insert(bid);
                             }
@@ -675,6 +676,21 @@ impl KnowledgeBase {
                 let cid = chunk["id"].as_str().unwrap_or("");
                 self.storage.insert_usage_trace(
                     trace_id, Some(cid), "selected", 1.0, None, None,
+                    None, Some((rank + 1) as i64), source, now,
+                )?;
+                // Write 'refined' event for chunks that came through the trim path.
+                if chunk.get("_trimmed").and_then(Value::as_bool).unwrap_or(false) {
+                    self.storage.insert_usage_trace(
+                        trace_id, Some(cid), "refined", 1.0, None, Some("trim"),
+                        None, Some((rank + 1) as i64), source, now,
+                    )?;
+                }
+            }
+            // Write 'retrieved' events for sparks (for recurring-spark count tracking).
+            for (rank, chunk) in sparks.iter().enumerate() {
+                let cid = chunk["id"].as_str().unwrap_or("");
+                self.storage.insert_usage_trace(
+                    trace_id, Some(cid), "retrieved", 1.0, None, Some("spark"),
                     None, Some((rank + 1) as i64), source, now,
                 )?;
             }
