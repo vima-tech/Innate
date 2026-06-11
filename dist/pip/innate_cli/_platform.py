@@ -24,7 +24,7 @@ def get_target() -> str:
     target = _TARGETS.get(key)
     if not target:
         raise RuntimeError(
-            f"innate-cli: unsupported platform {system}/{machine}.\n"
+            f"innate-ai: unsupported platform {system}/{machine}.\n"
             "Install manually: https://github.com/vima-tech/Innate/releases"
         )
     return target

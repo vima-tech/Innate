@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ._platform import get_target, get_binary_name, get_exe_suffix
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 _REPO = "vima-tech/Innate"
 
 
@@ -29,7 +29,7 @@ def _base_url() -> str:
 
 def _download(url: str, dest: Path, show_progress: bool = True) -> None:
     req = urllib.request.Request(
-        url, headers={"User-Agent": f"innate-cli/{__version__} Python/{sys.version_info[0]}"}
+        url, headers={"User-Agent": f"innate-ai/{__version__} Python/{sys.version_info[0]}"}
     )
     with urllib.request.urlopen(req) as resp:
         total = int(resp.headers.get("Content-Length", 0))
@@ -80,7 +80,7 @@ def download_binary(verbose: bool = True) -> Path:
     dest = _bin_path()
 
     if verbose:
-        print(f"innate-cli: downloading v{__version__} ({target})", file=sys.stderr)
+        print(f"innate-ai: downloading v{__version__} ({target})", file=sys.stderr)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         tmp_path = Path(tmp.name)

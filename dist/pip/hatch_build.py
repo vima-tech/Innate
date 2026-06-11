@@ -26,7 +26,7 @@ else:
                     download_binary(verbose=True)
                 except Exception as e:
                     print(
-                        f"innate-cli: binary download failed during build: {e}\n"
+                        f"innate-ai: binary download failed during build: {e}\n"
                         "The binary will be downloaded on first use instead.",
                         file=sys.stderr,
                     )

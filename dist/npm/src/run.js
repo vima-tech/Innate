@@ -22,8 +22,8 @@ function findBinary() {
 
   // 3. Not found — print install instructions.
   console.error(
-    '\n@innate/cli: binary not found.\n' +
-    'Try re-installing: npm install @innate/cli\n' +
+    '\n@vima_tech/innate: binary not found.\n' +
+    'Try re-installing: npm install @vima_tech/innate\n' +
     'Or install directly: https://github.com/vima-tech/Innate/releases\n'
   );
   process.exit(1);

@@ -1,11 +1,11 @@
-# innate-cli
+# innate-ai
 
 > Self-growing procedural knowledge layer for AI agents.
 
 ## Install
 
 ```bash
-pip install innate-cli
+pip install innate-ai
 ```
 
 The platform binary is downloaded automatically during installation. On first use it will download if the wheel didn't include it.

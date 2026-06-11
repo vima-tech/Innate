@@ -1,11 +1,11 @@
-# @innate/cli
+# @vima_tech/innate
 
 > Self-growing procedural knowledge layer for AI agents.
 
 ## Install
 
 ```bash
-npm install -g @innate/cli
+npm install -g @vima_tech/innate
 ```
 
 After installation, run the setup wizard:

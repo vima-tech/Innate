@@ -1,6 +1,6 @@
 [package]
-name        = "innate-core"
-version     = "0.1.0"
+name        = "innate"
+version     = "0.1.2"
 edition     = "2021"
 license     = "MIT"
 authors     = ["vima-tech"]

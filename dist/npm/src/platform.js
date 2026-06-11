@@ -15,7 +15,7 @@ function getTarget() {
   const target = TARGETS[key];
   if (!target) {
     throw new Error(
-      `@innate/cli: unsupported platform ${process.platform}/${process.arch}.\n` +
+      `@vima_tech/innate: unsupported platform ${process.platform}/${process.arch}.\n` +
       `Install manually: https://github.com/vima-tech/Innate/releases`
     );
   }
