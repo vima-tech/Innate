@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde_json::{json, Value};
 
-const SKILL_MD: &str = include_str!("../../skills/innate-memory/SKILL.md");
+const SKILL_MD: &str = include_str!("../assets/SKILL.md");
 
 const INNATE_TOOLS: &[&str] = &[
     "innate_recall",
