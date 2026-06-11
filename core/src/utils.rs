@@ -19,7 +19,7 @@ pub fn content_hash(s: &str) -> String {
 
 /// Rough token estimate: 1 token ≈ 4 chars.
 pub fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Sanitize result: allow / redact (content cleaned) / discard (reject write).
@@ -67,7 +67,11 @@ pub fn default_sanitize(content: &str) -> (String, SanitizeAction) {
     // password: xxx (case-insensitive)
     cleaned = redact_password(&cleaned, &mut redacted);
 
-    let action = if redacted { SanitizeAction::Redact } else { SanitizeAction::Allow };
+    let action = if redacted {
+        SanitizeAction::Redact
+    } else {
+        SanitizeAction::Allow
+    };
     (cleaned, action)
 }
 
@@ -76,7 +80,10 @@ fn redact_pattern(s: &str, pattern: &str, flag: &mut bool) -> String {
     // We use the `regex` crate if available; otherwise fall back to a conservative
     // prefix scan. For the patterns above the prefix is distinctive enough.
     match regex_replace(s, pattern) {
-        Some(r) => { *flag = true; r }
+        Some(r) => {
+            *flag = true;
+            r
+        }
         None => s.to_string(),
     }
 }
@@ -100,7 +107,8 @@ fn redact_bearer(s: &str, flag: &mut bool) -> String {
                 let abs = search_start + pos;
                 // Find end of token: non-whitespace run after "bearer "
                 let token_start = abs + prefix.len();
-                let token_end = s[token_start..].find(|c: char| c.is_whitespace())
+                let token_end = s[token_start..]
+                    .find(|c: char| c.is_whitespace())
                     .map(|e| token_start + e)
                     .unwrap_or(s.len());
                 if token_end > token_start {
@@ -131,13 +139,16 @@ fn redact_bearer_from(s: &str, lower: &str, start: usize, flag: &mut bool) -> St
     let mut result = s.to_string();
     let mut search_start = start;
     loop {
-        if search_start >= lower.len() { break; }
+        if search_start >= lower.len() {
+            break;
+        }
         match lower[search_start..].find(prefix) {
             None => break,
             Some(pos) => {
                 let abs = search_start + pos;
                 let token_start = abs + prefix.len();
-                let token_end = result[token_start..].find(|c: char| c.is_whitespace())
+                let token_end = result[token_start..]
+                    .find(|c: char| c.is_whitespace())
                     .map(|e| token_start + e)
                     .unwrap_or(result.len());
                 if token_end > token_start {
@@ -165,21 +176,29 @@ fn redact_password(s: &str, flag: &mut bool) -> String {
             Some(pos) => {
                 let abs = search_start + pos;
                 let after = abs + "password".len();
-                if after >= lower.len() { break; }
+                if after >= lower.len() {
+                    break;
+                }
                 // Skip optional whitespace then expect ':' or '='
                 let mut i = after;
-                while i < lower.len() && lower.as_bytes()[i] == b' ' { i += 1; }
+                while i < lower.len() && lower.as_bytes()[i] == b' ' {
+                    i += 1;
+                }
                 if i < lower.len() && (lower.as_bytes()[i] == b':' || lower.as_bytes()[i] == b'=') {
                     i += 1;
                     // Skip whitespace after separator
-                    while i < lower.len() && lower.as_bytes()[i] == b' ' { i += 1; }
+                    while i < lower.len() && lower.as_bytes()[i] == b' ' {
+                        i += 1;
+                    }
                     // Collect value until whitespace/end
                     let val_start = i;
-                    let val_end = result[val_start..].find(|c: char| c.is_whitespace())
+                    let val_end = result[val_start..]
+                        .find(|c: char| c.is_whitespace())
                         .map(|e| val_start + e)
                         .unwrap_or(result.len());
                     if val_end > val_start {
-                        result = format!("{}[REDACTED]{}", &result[..val_start], &result[val_end..]);
+                        result =
+                            format!("{}[REDACTED]{}", &result[..val_start], &result[val_end..]);
                         *flag = true;
                         search_start = val_start + "[REDACTED]".len();
                         continue;
@@ -191,7 +210,6 @@ fn redact_password(s: &str, flag: &mut bool) -> String {
     }
     result
 }
-
 
 /// Scan `s` for any contiguous run starting with `prefix` followed by `min_len` alnum chars.
 /// Replaces all such occurrences with `[REDACTED]`.
@@ -205,15 +223,18 @@ fn redact_prefixed_secret(s: &str, prefix: &str, min_len: usize, flag: &mut bool
                 let abs = search_start + pos;
                 let after = abs + prefix.len();
                 // Count alnum chars after prefix
-                let run: usize = result[after..].chars()
+                let run: usize = result[after..]
+                    .chars()
                     .take_while(|c| c.is_alphanumeric())
                     .count();
                 if run >= min_len {
-                    let end = after + result[after..].char_indices()
-                        .take_while(|(_, c)| c.is_alphanumeric())
-                        .last()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .unwrap_or(0);
+                    let end = after
+                        + result[after..]
+                            .char_indices()
+                            .take_while(|(_, c)| c.is_alphanumeric())
+                            .last()
+                            .map(|(i, c)| i + c.len_utf8())
+                            .unwrap_or(0);
                     result = format!("{}[REDACTED]{}", &result[..abs], &result[end..]);
                     *flag = true;
                     search_start = abs + "[REDACTED]".len();
@@ -259,7 +280,11 @@ pub fn sanitize(content: &str) -> (String, SanitizeAction) {
     cleaned = redact_bearer(&cleaned, &mut redacted);
     cleaned = redact_password(&cleaned, &mut redacted);
 
-    let action = if redacted { SanitizeAction::Redact } else { SanitizeAction::Allow };
+    let action = if redacted {
+        SanitizeAction::Redact
+    } else {
+        SanitizeAction::Allow
+    };
     (cleaned, action)
 }
 
@@ -281,7 +306,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 #[cfg(test)]

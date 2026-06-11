@@ -46,9 +46,13 @@ pub fn run_upgrade(version: Option<&str>, db_path: &Path, check_only: bool) -> R
         return Ok(());
     }
 
-    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let ext = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
     let asset = format!("innate-{target}{ext}");
-    let base  = format!("https://github.com/{REPO}/releases/download/v{target_ver}");
+    let base = format!("https://github.com/{REPO}/releases/download/v{target_ver}");
 
     // 1. Fetch checksum.
     let sha_text = http_get_text(&format!("{base}/{asset}.sha256"))
@@ -113,7 +117,9 @@ pub fn run_upgrade(version: Option<&str>, db_path: &Path, check_only: bool) -> R
         match crate::migrate::run_migrations(db_path) {
             Ok(applied) if applied.is_empty() => println!("  Schema already at {target_ver}."),
             Ok(applied) => {
-                for step in &applied { println!("    applied: {step}"); }
+                for step in &applied {
+                    println!("    applied: {step}");
+                }
                 println!("  Migration complete.");
             }
             Err(e) => eprintln!("  Migration warning (run `innate migrate` manually): {e}"),
@@ -139,7 +145,10 @@ fn latest_version() -> Result<String> {
 
 fn http_get_text(url: &str) -> Result<String> {
     let resp = ureq::get(url)
-        .set("User-Agent", &format!("innate/{}", env!("CARGO_PKG_VERSION")))
+        .set(
+            "User-Agent",
+            &format!("innate/{}", env!("CARGO_PKG_VERSION")),
+        )
         .set("Accept", "application/vnd.github+json")
         .call()
         .with_context(|| format!("HTTP GET {url}"))?;
@@ -148,7 +157,10 @@ fn http_get_text(url: &str) -> Result<String> {
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     let resp = ureq::get(url)
-        .set("User-Agent", &format!("innate/{}", env!("CARGO_PKG_VERSION")))
+        .set(
+            "User-Agent",
+            &format!("innate/{}", env!("CARGO_PKG_VERSION")),
+        )
         .call()
         .with_context(|| format!("HTTP GET {url}"))?;
     let mut buf = Vec::new();

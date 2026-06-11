@@ -46,10 +46,15 @@ pub enum Commands {
         /// Refine mode written to usage_trace: off (default) | trim | adapt
         #[arg(long, default_value = "off")]
         refine_mode: String,
+        /// Event source written to usage_trace (sdk | cli | hook | daemon | augmented)
+        #[arg(long, default_value = "cli")]
+        source: String,
     },
     /// Close a trace with outcome
     Record {
         trace_id: String,
+        #[arg(long)]
+        query: Option<String>,
         #[arg(long)]
         outcome: Option<String>,
         #[arg(long, value_delimiter = ',')]
@@ -95,9 +100,7 @@ pub enum Commands {
         rebuild_embeddings: bool,
     },
     /// Health check — no arg = library summary; chunk_id or trace_id = detail view
-    Inspect {
-        id: Option<String>,
-    },
+    Inspect { id: Option<String> },
     /// Approve a pending chunk
     Approve { chunk_id: String },
     /// Archive a chunk
@@ -192,7 +195,9 @@ pub fn run() -> anyhow::Result<()> {
         if applied.is_empty() {
             println!("already at 4.5.1 — nothing to do");
         } else {
-            for step in &applied { println!("  applied: {step}"); }
+            for step in &applied {
+                println!("  applied: {step}");
+            }
             println!("migration complete");
         }
         return Ok(());
@@ -209,68 +214,148 @@ pub fn run() -> anyhow::Result<()> {
     let kb = KnowledgeBase::open(&db_path)?;
 
     match cli.command {
-        Commands::Recall { query, budget, top, format, include_sparks, expand_deps, allow_trim, refine_mode } => {
-            let result = kb.recall(&query, budget, true, include_sparks, top, "cli", &expand_deps, allow_trim, &refine_mode)?;
+        Commands::Recall {
+            query,
+            budget,
+            top,
+            format,
+            include_sparks,
+            expand_deps,
+            allow_trim,
+            refine_mode,
+            source,
+        } => {
+            let result = kb.recall(
+                &query,
+                budget,
+                true,
+                include_sparks,
+                top,
+                &source,
+                &expand_deps,
+                allow_trim,
+                &refine_mode,
+            )?;
             match format.as_str() {
-                "json" => println!("{}", serde_json::to_string_pretty(&json!({
-                    "trace_id": result.trace_id,
-                    "knowledge": result.knowledge,
-                    "sparks": result.sparks,
-                    "empty": result.empty,
-                }))?),
+                "json" => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "trace_id": result.trace_id,
+                        "knowledge": result.knowledge,
+                        "sparks": result.sparks,
+                        "empty": result.empty,
+                    }))?
+                ),
                 "prompt" => {
-                    println!("<!-- innate_trace_id: {} -->", result.trace_id);
-                    println!("<!-- innate_selected: {} -->",
-                        result.knowledge.iter()
-                            .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
-                            .collect::<Vec<_>>().join(","));
                     for chunk in &result.knowledge {
                         let content = chunk.get("content").and_then(|v| v.as_str()).unwrap_or("");
                         println!("{content}\n---");
                     }
+                    // metadata at end (§九 CLI contract)
+                    println!("<!-- innate_trace_id: {} -->", result.trace_id);
+                    println!(
+                        "<!-- innate_selected: {} -->",
+                        result
+                            .knowledge
+                            .iter()
+                            .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
                 }
                 _ => {
-                    println!("trace_id: {}", result.trace_id);
                     for chunk in &result.knowledge {
                         let id = chunk.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                         let content = chunk.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                        let conf = chunk.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
+                        let conf = chunk
+                            .get("confidence")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.5);
                         println!("[{id}] (conf={conf:.2})\n{content}\n");
                     }
-                    if result.empty { println!("(no results)"); }
+                    if result.empty {
+                        println!("(no results)");
+                    }
                 }
             }
         }
-        Commands::Record { trace_id, outcome, used, output_summary, nomination, source, feedback, priority } => {
+        Commands::Record {
+            trace_id,
+            query,
+            outcome,
+            used,
+            output_summary,
+            nomination,
+            source,
+            feedback,
+            priority,
+        } => {
             let used_ref: Option<&[String]> = if used.is_empty() { None } else { Some(&used) };
             // Per §二·五B: trace-level "up" applies only to explicitly used chunks.
-            let (fb_up, fb_down): (Option<Vec<String>>, Option<Vec<String>>) = match feedback.as_deref() {
-                Some("up")   if !used.is_empty() => (Some(used.clone()), None),
-                Some("down") if !used.is_empty() => (None, Some(used.clone())),
-                Some("up")   => (None, None), // no used chunks — ignore per design
-                Some("down") => (None, None),
-                _ => (None, None),
-            };
-            let fb_up_ref   = fb_up.as_deref();
+            let (fb_up, fb_down): (Option<Vec<String>>, Option<Vec<String>>) =
+                match feedback.as_deref() {
+                    Some("up") if !used.is_empty() => (Some(used.clone()), None),
+                    Some("down") if !used.is_empty() => (None, Some(used.clone())),
+                    Some("up") => (None, None), // no used chunks — ignore per design
+                    Some("down") => (None, None),
+                    _ => (None, None),
+                };
+            let fb_up_ref = fb_up.as_deref();
             let fb_down_ref = fb_down.as_deref();
             kb.record(
-                &trace_id, None, None,
+                &trace_id,
+                query.as_deref(),
+                None,
                 output_summary.as_deref(),
                 outcome.as_deref(),
-                used_ref, fb_up_ref, fb_down_ref,
-                nomination.as_deref(), priority, &source,
+                used_ref,
+                fb_up_ref,
+                fb_down_ref,
+                nomination.as_deref(),
+                priority,
+                &source,
             )?;
             println!("recorded");
         }
-        Commands::Add { content, kind, trigger, anti_trigger, source, skill_name } => {
-            let id = kb.add(&content, &kind, trigger.as_deref(), anti_trigger.as_deref(), &source, skill_name.as_deref())?;
+        Commands::Add {
+            content,
+            kind,
+            trigger,
+            anti_trigger,
+            source,
+            skill_name,
+        } => {
+            // If kind=skill and content is a readable file path, load its content.
+            let content = if kind == "skill" {
+                let p = std::path::Path::new(&content);
+                if p.exists() && p.is_file() {
+                    std::fs::read_to_string(p).map_err(|e| {
+                        anyhow::anyhow!("Failed to read skill file {}: {e}", p.display())
+                    })?
+                } else {
+                    content
+                }
+            } else {
+                content
+            };
+            let id = kb.add(
+                &content,
+                &kind,
+                trigger.as_deref(),
+                anti_trigger.as_deref(),
+                &source,
+                skill_name.as_deref(),
+            )?;
             println!("{id}");
         }
         Commands::Spark { content, trigger } => {
             let id = kb.spark(&content, trigger.as_deref(), None)?;
             println!("{id}");
         }
-        Commands::Evolve { trigger, rebuild_embeddings } => {
+        Commands::Evolve {
+            trigger,
+            rebuild_embeddings,
+        } => {
             if rebuild_embeddings {
                 let rebuilt = kb.rebuild_embeddings()?;
                 println!("rebuilt {rebuilt} embeddings");
@@ -279,18 +364,16 @@ pub fn run() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
-        Commands::Inspect { id } => {
-            match id.as_deref() {
-                None => {
-                    let info = kb.inspect()?;
-                    println!("{}", serde_json::to_string_pretty(&info)?);
-                }
-                Some(id) => {
-                    let detail = kb.inspect_id(id)?;
-                    println!("{}", serde_json::to_string_pretty(&detail)?);
-                }
+        Commands::Inspect { id } => match id.as_deref() {
+            None => {
+                let info = kb.inspect()?;
+                println!("{}", serde_json::to_string_pretty(&info)?);
             }
-        }
+            Some(id) => {
+                let detail = kb.inspect_id(id)?;
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            }
+        },
         Commands::Approve { chunk_id } => {
             kb.approve(&chunk_id)?;
             println!("approved");
@@ -319,7 +402,11 @@ pub fn run() -> anyhow::Result<()> {
             kb.drop_spark(&spark_id, &reason)?;
             println!("dropped");
         }
-        Commands::Mcp | Commands::Install | Commands::Migrate | Commands::Upgrade { .. } | Commands::Daemon { .. } => unreachable!(),
+        Commands::Mcp
+        | Commands::Install
+        | Commands::Migrate
+        | Commands::Upgrade { .. }
+        | Commands::Daemon { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -351,15 +438,18 @@ fn default_log_file() -> std::path::PathBuf {
 
 fn run_daemon(action: &DaemonCommands, db_path: &std::path::Path) -> anyhow::Result<()> {
     match action {
-        DaemonCommands::Start { watch, pid_file, state_db, log_file } => {
-            crate::daemon::start(
-                watch,
-                db_path,
-                pid_file.as_deref().unwrap_or(&default_pid_file()),
-                state_db.as_deref().unwrap_or(&default_state_db()),
-                log_file.as_deref().unwrap_or(&default_log_file()),
-            )
-        }
+        DaemonCommands::Start {
+            watch,
+            pid_file,
+            state_db,
+            log_file,
+        } => crate::daemon::start(
+            watch,
+            db_path,
+            pid_file.as_deref().unwrap_or(&default_pid_file()),
+            state_db.as_deref().unwrap_or(&default_state_db()),
+            log_file.as_deref().unwrap_or(&default_log_file()),
+        ),
         DaemonCommands::Stop { pid_file } => {
             crate::daemon::stop(pid_file.as_deref().unwrap_or(&default_pid_file()))
         }

@@ -37,16 +37,21 @@ pub fn run_server(db_path: PathBuf) -> anyhow::Result<()> {
 
     for line in stdin.lock().lines() {
         let line = line?;
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
 
         let req: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                write_response(&stdout, json!({
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32700, "message": format!("Parse error: {e}")},
-                    "id": null
-                }))?;
+                write_response(
+                    &stdout,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32700, "message": format!("Parse error: {e}")},
+                        "id": null
+                    }),
+                )?;
                 continue;
             }
         };
@@ -94,13 +99,16 @@ fn handle_initialize(id: &Value) -> Value {
 }
 
 fn handle_tools_list(id: &Value) -> Value {
-    let tools: Vec<Value> = TOOLS.iter().map(|(name, desc)| {
-        json!({
-            "name": name,
-            "description": desc,
-            "inputSchema": tool_schema(name)
+    let tools: Vec<Value> = TOOLS
+        .iter()
+        .map(|(name, desc)| {
+            json!({
+                "name": name,
+                "description": desc,
+                "inputSchema": tool_schema(name)
+            })
         })
-    }).collect();
+        .collect();
     json!({"jsonrpc": "2.0", "id": id, "result": {"tools": tools}})
 }
 
@@ -134,14 +142,23 @@ fn handle_tool_call(kb: &Mutex<KnowledgeBase>, id: &Value, params: &Value) -> Va
 }
 
 fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Result<Value> {
-    let s = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let s = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     let so = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
     let b = |key: &str, d: bool| args.get(key).and_then(Value::as_bool).unwrap_or(d);
     let n = |key: &str, d: i64| args.get(key).and_then(Value::as_i64).unwrap_or(d);
     let arr = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default()
     };
 
@@ -151,11 +168,33 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let budget = n("budget", 6000) as usize;
             let top = args.get("top").and_then(Value::as_u64).map(|v| v as usize);
             let include_sparks = b("include_sparks", false);
-            let source = if s("source").is_empty() { "sdk".to_string() } else { s("source") };
-            let expand_deps = if s("expand_deps").is_empty() { "false".to_string() } else { s("expand_deps") };
+            let source = if s("source").is_empty() {
+                "sdk".to_string()
+            } else {
+                s("source")
+            };
+            let expand_deps = if s("expand_deps").is_empty() {
+                "false".to_string()
+            } else {
+                s("expand_deps")
+            };
             let allow_trim = b("allow_trim", false);
-            let refine_mode = if s("refine_mode").is_empty() { "off".to_string() } else { s("refine_mode") };
-            let result = kb.recall(&query, budget, true, include_sparks, top, &source, &expand_deps, allow_trim, &refine_mode)?;
+            let refine_mode = if s("refine_mode").is_empty() {
+                "off".to_string()
+            } else {
+                s("refine_mode")
+            };
+            let result = kb.recall(
+                &query,
+                budget,
+                true,
+                include_sparks,
+                top,
+                &source,
+                &expand_deps,
+                allow_trim,
+                &refine_mode,
+            )?;
             Ok(json!({
                 "trace_id": result.trace_id,
                 "knowledge": result.knowledge,
@@ -171,8 +210,16 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let fb_up = arr("feedback_up");
             let fb_up_ref: Option<&[String]> = if fb_up.is_empty() { None } else { Some(&fb_up) };
             let fb_down = arr("feedback_down");
-            let fb_down_ref: Option<&[String]> = if fb_down.is_empty() { None } else { Some(&fb_down) };
-            let source = if s("source").is_empty() { "sdk".to_string() } else { s("source") };
+            let fb_down_ref: Option<&[String]> = if fb_down.is_empty() {
+                None
+            } else {
+                Some(&fb_down)
+            };
+            let source = if s("source").is_empty() {
+                "sdk".to_string()
+            } else {
+                s("source")
+            };
             kb.record(
                 &trace_id,
                 so("query").as_deref(),
@@ -190,10 +237,19 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
         }
         "innate_add" => {
             let content = s("content");
-            let kind = if s("kind").is_empty() { "note".to_string() } else { s("kind") };
-            let source = if s("source").is_empty() { "agent".to_string() } else { s("source") };
+            let kind = if s("kind").is_empty() {
+                "note".to_string()
+            } else {
+                s("kind")
+            };
+            let source = if s("source").is_empty() {
+                "agent".to_string()
+            } else {
+                s("source")
+            };
             let id = kb.add(
-                &content, &kind,
+                &content,
+                &kind,
                 so("trigger_desc").as_deref(),
                 so("anti_trigger_desc").as_deref(),
                 &source,
@@ -212,7 +268,11 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
         }
         "innate_inspect" => kb.inspect(),
         "innate_evolve" => {
-            let trigger = if s("trigger").is_empty() { "manual".to_string() } else { s("trigger") };
+            let trigger = if s("trigger").is_empty() {
+                "manual".to_string()
+            } else {
+                s("trigger")
+            };
             if b("rebuild_embeddings", false) {
                 let rebuilt = kb.rebuild_embeddings()?;
                 let evolve = kb.evolve(&trigger)?;
@@ -243,7 +303,11 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             Ok(json!({"ok": true}))
         }
         "innate_promote_spark" => {
-            let to = if s("to").is_empty() { "note".to_string() } else { s("to") };
+            let to = if s("to").is_empty() {
+                "note".to_string()
+            } else {
+                s("to")
+            };
             let new_id = kb.promote_spark(&s("spark_id"), &to)?;
             Ok(json!({"chunk_id": new_id}))
         }
@@ -251,7 +315,9 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             kb.drop_spark(&s("spark_id"), &s("reason"))?;
             Ok(json!({"ok": true}))
         }
-        _ => Err(crate::errors::InnateError::Other(format!("unknown tool: {name}"))),
+        _ => Err(crate::errors::InnateError::Other(format!(
+            "unknown tool: {name}"
+        ))),
     }
 }
 

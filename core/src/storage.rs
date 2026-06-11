@@ -31,7 +31,12 @@ impl Storage {
         }
         let conn = Connection::open(&db_path)?;
         configure_pragmas(&conn)?;
-        let mut s = Self { db_path, conn, content_dim, trigger_dim };
+        let mut s = Self {
+            db_path,
+            conn,
+            content_dim,
+            trigger_dim,
+        };
         s.init_schema()?;
         Ok(s)
     }
@@ -40,12 +45,16 @@ impl Storage {
         let db_path = db_path.as_ref().to_path_buf();
         let conn = Connection::open_with_flags(
             &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         conn.pragma_update(None, "query_only", "ON")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let s = Self { db_path, conn, content_dim: 1024, trigger_dim: 256 };
+        let s = Self {
+            db_path,
+            conn,
+            content_dim: 1024,
+            trigger_dim: 256,
+        };
         Ok(s)
     }
 
@@ -78,9 +87,8 @@ impl Storage {
             )
             .optional()?;
 
-        let current = current.ok_or_else(|| {
-            InnateError::Other("meta table missing schema_version".into())
-        })?;
+        let current = current
+            .ok_or_else(|| InnateError::Other("meta table missing schema_version".into()))?;
 
         let cur = ver_tuple(&current);
         let exp = ver_tuple(EXPECTED_SCHEMA_VERSION);
@@ -95,92 +103,14 @@ impl Storage {
                 Ok(())
             }
             std::cmp::Ordering::Less => {
-                self.run_migrations(&current)
+                // Delegate to the proper migration chain which handles all steps atomically.
+                let applied = crate::migrate::run_migrations(&self.db_path)?;
+                if !applied.is_empty() {
+                    eprintln!("[innate] auto-migrated: {}", applied.join(", "));
+                }
+                Ok(())
             }
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Migrations — applied when db schema < EXPECTED_SCHEMA_VERSION
-    // ------------------------------------------------------------------
-
-    fn run_migrations(&self, from: &str) -> Result<()> {
-        let from_v = ver_tuple(from);
-
-        if from_v < ver_tuple("4.5.1") {
-            self.conn.execute_batch("BEGIN IMMEDIATE")?;
-            let r = (|| -> Result<()> {
-                // chunks — new columns added in 4.x → 4.5.1
-                for col in &[
-                    "skill_name TEXT",
-                    "maturity TEXT",
-                    "related_ids TEXT",
-                    "state_reason TEXT",
-                    "state_updated_at TEXT",
-                    "confidence_reason TEXT",
-                    "selected_count INTEGER NOT NULL DEFAULT 0",
-                    "used_count INTEGER NOT NULL DEFAULT 0",
-                    "used_success_count INTEGER NOT NULL DEFAULT 0",
-                    "success_trace_ids_count INTEGER NOT NULL DEFAULT 0",
-                    "last_success_at TEXT",
-                    "last_agg_ts TEXT",
-                    "embed_version INTEGER NOT NULL DEFAULT 1",
-                ] {
-                    try_add_column(&self.conn, "chunks", col)?;
-                }
-
-                // episodic_log — new columns
-                for col in &[
-                    "nomination TEXT",
-                    "priority INTEGER NOT NULL DEFAULT 0",
-                    "distill_note TEXT",
-                    "distill_run_id TEXT",
-                    "distill_locked_at TEXT",
-                    "distill_prompt_tokens INTEGER",
-                    "distill_completion_tokens INTEGER",
-                ] {
-                    try_add_column(&self.conn, "episodic_log", col)?;
-                }
-
-                // usage_trace — new columns
-                for col in &["refine_mode TEXT", "tokens INTEGER"] {
-                    try_add_column(&self.conn, "usage_trace", col)?;
-                }
-
-                // New tables (IF NOT EXISTS — safe to re-run)
-                self.conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS invalidated_hashes (
-                         content_hash TEXT PRIMARY KEY, reason TEXT, ts TEXT NOT NULL);
-                     CREATE TABLE IF NOT EXISTS vec_content (
-                         chunk_id TEXT PRIMARY KEY, embedding BLOB NOT NULL);
-                     CREATE TABLE IF NOT EXISTS vec_trigger (
-                         chunk_id TEXT PRIMARY KEY, embedding BLOB NOT NULL);
-                     CREATE TABLE IF NOT EXISTS deps (
-                         src TEXT NOT NULL, dst TEXT NOT NULL,
-                         kind TEXT NOT NULL DEFAULT 'hard',
-                         dst_lib TEXT, dst_ref TEXT,
-                         PRIMARY KEY (src, dst, kind));
-                     CREATE TABLE IF NOT EXISTS chunk_success_traces (
-                         chunk_id TEXT NOT NULL, trace_id TEXT NOT NULL,
-                         ts TEXT NOT NULL, PRIMARY KEY (chunk_id, trace_id));
-                     CREATE INDEX IF NOT EXISTS idx_chunks_embed_v ON chunks(embed_version);
-                     CREATE INDEX IF NOT EXISTS idx_deps_src ON deps(src);
-                     CREATE INDEX IF NOT EXISTS idx_deps_dst ON deps(dst);
-                     CREATE INDEX IF NOT EXISTS idx_cst_chunk ON chunk_success_traces(chunk_id);",
-                )?;
-
-                // Bump schema_version
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
-                    params![EXPECTED_SCHEMA_VERSION],
-                )?;
-                self.conn.execute_batch("COMMIT")?;
-                Ok(())
-            })();
-            if r.is_err() { let _ = self.conn.execute_batch("ROLLBACK"); }
-            r?;
-        }
-        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -222,7 +152,10 @@ impl Storage {
     }
 
     pub fn get_meta_or(&self, key: &str, default: &str) -> String {
-        self.get_meta(key).ok().flatten().unwrap_or_else(|| default.to_string())
+        self.get_meta(key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| default.to_string())
     }
 
     // ------------------------------------------------------------------
@@ -245,14 +178,37 @@ impl Storage {
                 ?22,?23,?24,?25,?26,?27,?28,?29,?30,?31
             )",
             params![
-                c.id, c.skill_name, c.seq, c.content, c.trigger_desc,
-                c.anti_trigger_desc, c.content_hash, c.token_count,
-                c.origin, c.source, c.maturity, c.related_ids, c.protected,
-                c.state, c.state_reason, c.state_updated_at, c.confidence,
-                c.confidence_reason, c.version, c.distilled_from, c.parent_id,
-                c.selected_count, c.used_count, c.used_success_count,
-                c.success_trace_ids_count, c.last_success_at, c.last_agg_ts,
-                c.embed_version, c.created_at, c.updated_at, c.last_used_at
+                c.id,
+                c.skill_name,
+                c.seq,
+                c.content,
+                c.trigger_desc,
+                c.anti_trigger_desc,
+                c.content_hash,
+                c.token_count,
+                c.origin,
+                c.source,
+                c.maturity,
+                c.related_ids,
+                c.protected,
+                c.state,
+                c.state_reason,
+                c.state_updated_at,
+                c.confidence,
+                c.confidence_reason,
+                c.version,
+                c.distilled_from,
+                c.parent_id,
+                c.selected_count,
+                c.used_count,
+                c.used_success_count,
+                c.success_trace_ids_count,
+                c.last_success_at,
+                c.last_agg_ts,
+                c.embed_version,
+                c.created_at,
+                c.updated_at,
+                c.last_used_at
             ],
         )?;
         Ok(())
@@ -275,11 +231,9 @@ impl Storage {
     }
 
     pub fn get_chunk(&self, id: &str) -> Result<Option<Value>> {
-        let row = self.conn.query_row(
-            "SELECT * FROM chunks WHERE id=?",
-            [id],
-            row_to_json,
-        );
+        let row = self
+            .conn
+            .query_row("SELECT * FROM chunks WHERE id=?", [id], row_to_json);
         match row {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -301,7 +255,13 @@ impl Storage {
         Ok(())
     }
 
-    pub fn update_chunk_confidence(&self, id: &str, conf: f64, reason: Option<&str>, now: &str) -> Result<()> {
+    pub fn update_chunk_confidence(
+        &self,
+        id: &str,
+        conf: f64,
+        reason: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE chunks SET confidence=?, confidence_reason=?, updated_at=? WHERE id=?",
             params![conf, reason, now, id],
@@ -376,7 +336,12 @@ impl Storage {
         Ok(count > 0)
     }
 
-    pub fn insert_invalidated_hash(&self, hash: &str, reason: Option<&str>, ts: &str) -> Result<()> {
+    pub fn insert_invalidated_hash(
+        &self,
+        hash: &str,
+        reason: Option<&str>,
+        ts: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO invalidated_hashes(content_hash, reason, ts) VALUES (?,?,?)",
             params![hash, reason, ts],
@@ -388,6 +353,7 @@ impl Storage {
     // Usage trace
     // ------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_usage_trace(
         &self,
         trace_id: &str,
@@ -449,10 +415,20 @@ impl Storage {
               distill_state, distill_note)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
-                log.id, log.trace_id, log.lib_id, log.ts, log.query,
-                log.recall_snapshot, log.output, log.output_summary,
-                log.outcome, log.event_source, log.nomination, log.priority,
-                log.distill_state, log.distill_note
+                log.id,
+                log.trace_id,
+                log.lib_id,
+                log.ts,
+                log.query,
+                log.recall_snapshot,
+                log.output,
+                log.output_summary,
+                log.outcome,
+                log.event_source,
+                log.nomination,
+                log.priority,
+                log.distill_state,
+                log.distill_note
             ],
         )?;
         Ok(())
@@ -489,6 +465,36 @@ impl Storage {
         Ok(())
     }
 
+    /// Patch content fields on an existing episodic_log row (補写: output_summary, nomination, etc.)
+    pub fn patch_episodic_log_content(
+        &self,
+        trace_id: &str,
+        query: Option<&str>,
+        output: Option<&str>,
+        output_summary: Option<&str>,
+        nomination: Option<&str>,
+        priority: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE episodic_log
+             SET output_summary = COALESCE(?, output_summary),
+                 nomination     = COALESCE(?, nomination),
+                 output         = COALESCE(?, output),
+                 query          = COALESCE(?, query),
+                 priority       = MAX(priority, ?)
+             WHERE trace_id = ?",
+            params![
+                output_summary,
+                nomination,
+                output,
+                query,
+                priority,
+                trace_id
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Update by primary-key id (used after distill where we have the row id, not trace_id).
     pub fn update_episodic_log_state_by_id(
         &self,
@@ -510,7 +516,12 @@ impl Storage {
 
     /// Claim a batch of 'new' logs for distillation: mark them 'screening' atomically.
     /// Returns the claimed rows (with distill_run_id set to run_id).
-    pub fn claim_distill_batch(&self, run_id: &str, limit: usize, locked_at: &str) -> Result<Vec<Value>> {
+    pub fn claim_distill_batch(
+        &self,
+        run_id: &str,
+        limit: usize,
+        locked_at: &str,
+    ) -> Result<Vec<Value>> {
         // BEGIN IMMEDIATE must be held by caller; this is called inside a transaction.
         self.conn.execute(
             "UPDATE episodic_log
@@ -553,24 +564,32 @@ impl Storage {
     // ------------------------------------------------------------------
 
     pub fn get_deps(&self, chunk_id: &str) -> Result<Vec<(String, String, Option<String>)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT dst, kind, dst_lib FROM deps WHERE src=?"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT dst, kind, dst_lib FROM deps WHERE src=?")?;
         let rows = stmt.query_map([chunk_id], |r| {
-            Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,Option<String>>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     pub fn get_reverse_deps(&self, chunk_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT src FROM deps WHERE dst=?"
-        )?;
-        let rows = stmt.query_map([chunk_id], |r| r.get::<_,String>(0))?;
+        let mut stmt = self.conn.prepare("SELECT src FROM deps WHERE dst=?")?;
+        let rows = stmt.query_map([chunk_id], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    pub fn insert_dep(&self, src: &str, dst: &str, kind: &str, dst_lib: Option<&str>) -> Result<()> {
+    pub fn insert_dep(
+        &self,
+        src: &str,
+        dst: &str,
+        kind: &str,
+        dst_lib: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO deps(src,dst,kind,dst_lib) VALUES (?,?,?,?)",
             params![src, dst, kind, dst_lib],
@@ -582,7 +601,12 @@ impl Storage {
     // Chunk success traces (aggregate fact table)
     // ------------------------------------------------------------------
 
-    pub fn upsert_chunk_success_trace(&self, chunk_id: &str, trace_id: &str, ts: &str) -> Result<()> {
+    pub fn upsert_chunk_success_trace(
+        &self,
+        chunk_id: &str,
+        trace_id: &str,
+        ts: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO chunk_success_traces(chunk_id, trace_id, ts) VALUES (?,?,?)",
             params![chunk_id, trace_id, ts],
@@ -596,7 +620,8 @@ impl Storage {
 
     pub fn attach_shared(&self, path: &str, alias: &str) -> Result<()> {
         self.conn.execute_batch(&format!(
-            "ATTACH DATABASE '{}' AS '{alias}'", path.replace('\'', "''")
+            "ATTACH DATABASE '{}' AS '{alias}'",
+            path.replace('\'', "''")
         ))?;
         Ok(())
     }
@@ -707,17 +732,6 @@ fn configure_pragmas(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Try to add a column; silently succeed if it already exists.
-fn try_add_column(conn: &Connection, table: &str, col_def: &str) -> Result<()> {
-    let sql = format!("ALTER TABLE {table} ADD COLUMN {col_def}");
-    match conn.execute_batch(&sql) {
-        Ok(_) => Ok(()),
-        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
-            if msg.contains("duplicate column") => Ok(()),
-        Err(e) => Err(InnateError::Db(e)),
-    }
-}
-
 fn ver_tuple(v: &str) -> (u32, u32, u32) {
     let parts: Vec<u32> = v.split('.').filter_map(|s| s.parse().ok()).collect();
     (
@@ -758,7 +772,7 @@ fn row_value_at(row: &Row, i: usize) -> Value {
     }
     if let Ok(v) = row.get::<_, Option<f64>>(i) {
         return v
-            .and_then(|f| serde_json::Number::from_f64(f))
+            .and_then(serde_json::Number::from_f64)
             .map(Value::Number)
             .unwrap_or(Value::Null);
     }

@@ -17,7 +17,9 @@ pub enum InnateError {
     #[error("Invalid state transition: {0}")]
     InvalidState(String),
 
-    #[error("Outcome conflict: trace {trace_id} already has outcome {existing}, cannot set {requested}")]
+    #[error(
+        "Outcome conflict: trace {trace_id} already has outcome {existing}, cannot set {requested}"
+    )]
     OutcomeConflict {
         trace_id: String,
         existing: String,

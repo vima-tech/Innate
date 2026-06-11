@@ -1,0 +1,23 @@
+{
+  "name": "@innate/sdk",
+  "version": "0.2.0",
+  "description": "Innate — self-growing knowledge layer (TypeScript SDK)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["innate", "mcp", "ai", "knowledge", "agent", "memory"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/innate-rs/innate"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

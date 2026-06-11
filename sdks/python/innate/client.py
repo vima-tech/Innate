@@ -81,6 +81,7 @@ class KnowledgeBase:
             "recall", query,
             "--budget", str(budget),
             "--format", "json",
+            "--source", source,
             "--expand-deps", expand_deps,
             "--refine-mode", refine_mode,
         ]
@@ -102,13 +103,18 @@ class KnowledgeBase:
         self,
         trace_id: str,
         *,
+        query: str | None = None,
         outcome: str | None = None,
         used: list[str] | None = None,
         output_summary: str | None = None,
         nomination: str | None = None,
+        feedback: str | None = None,
+        priority: int = 0,
         source: str = "sdk",
     ) -> None:
         args = self._args() + ["record", trace_id, "--source", source]
+        if query:
+            args += ["--query", query]
         if outcome:
             args += ["--outcome", outcome]
         if used:
@@ -117,6 +123,10 @@ class KnowledgeBase:
             args += ["--output-summary", output_summary]
         if nomination:
             args += ["--nomination", nomination]
+        if feedback:
+            args += ["--feedback", feedback]
+        if priority:
+            args += ["--priority", str(priority)]
         _run(*args)
 
     def add(

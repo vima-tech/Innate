@@ -8,7 +8,7 @@
  * CLI mode is the default for programmatic use.
  */
 
-import { execSync, spawn, SpawnOptions } from "child_process";
+import { execFileSync, spawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
 
 export interface Chunk {
@@ -73,10 +73,10 @@ export class KnowledgeBase {
     this.dbArgs = db ? ["--db", db] : [];
   }
 
+  // Use execFileSync (no shell) to avoid injection and quoting issues.
   private run<T>(...args: string[]): T {
-    const cmd = [this.binary, ...this.dbArgs, ...args].join(" ");
     try {
-      const out = execSync(cmd, { encoding: "utf8" });
+      const out = execFileSync(this.binary, [...this.dbArgs, ...args], { encoding: "utf8" });
       return JSON.parse(out) as T;
     } catch (e: unknown) {
       const err = e as { stderr?: Buffer; message?: string };
@@ -87,8 +87,7 @@ export class KnowledgeBase {
   }
 
   private runRaw(...args: string[]): string {
-    const cmd = [this.binary, ...this.dbArgs, ...args].join(" ");
-    return execSync(cmd, { encoding: "utf8" }).trim();
+    return execFileSync(this.binary, [...this.dbArgs, ...args], { encoding: "utf8" }).trim();
   }
 
   recall(
@@ -98,24 +97,35 @@ export class KnowledgeBase {
       top?: number;
       includeSparks?: boolean;
       source?: string;
+      expandDeps?: string;
+      allowTrim?: boolean;
+      refineMode?: string;
     } = {}
   ): RecallResult {
     const args = [
       "recall",
-      JSON.stringify(query),
+      query,
       "--format",
       "json",
       "--budget",
       String(options.budget ?? 6000),
+      "--source",
+      options.source ?? "sdk",
+      "--expand-deps",
+      options.expandDeps ?? "false",
+      "--refine-mode",
+      options.refineMode ?? "off",
     ];
     if (options.top != null) args.push("--top", String(options.top));
     if (options.includeSparks) args.push("--include-sparks");
+    if (options.allowTrim) args.push("--allow-trim");
     return this.run<RecallResult>(...args);
   }
 
   record(
     traceId: string,
     options: {
+      query?: string;
       outcome?: "ok" | "fail" | "unknown";
       used?: string[];
       outputSummary?: string;
@@ -124,12 +134,11 @@ export class KnowledgeBase {
     } = {}
   ): void {
     const args = ["record", traceId, "--source", options.source ?? "sdk"];
+    if (options.query) args.push("--query", options.query);
     if (options.outcome) args.push("--outcome", options.outcome);
     if (options.used?.length) args.push("--used", options.used.join(","));
-    if (options.outputSummary)
-      args.push("--output-summary", JSON.stringify(options.outputSummary));
-    if (options.nomination)
-      args.push("--nomination", JSON.stringify(options.nomination));
+    if (options.outputSummary) args.push("--output-summary", options.outputSummary);
+    if (options.nomination) args.push("--nomination", options.nomination);
     this.runRaw(...args);
   }
 
@@ -145,25 +154,21 @@ export class KnowledgeBase {
   ): string {
     const args = [
       "add",
-      JSON.stringify(content),
+      content,
       "--kind",
       options.kind ?? "note",
       "--source",
       options.source ?? "agent",
     ];
-    if (options.triggerDesc)
-      args.push("--trigger", JSON.stringify(options.triggerDesc));
-    if (options.antiTriggerDesc)
-      args.push("--anti-trigger", JSON.stringify(options.antiTriggerDesc));
-    if (options.skillName)
-      args.push("--skill-name", JSON.stringify(options.skillName));
+    if (options.triggerDesc) args.push("--trigger", options.triggerDesc);
+    if (options.antiTriggerDesc) args.push("--anti-trigger", options.antiTriggerDesc);
+    if (options.skillName) args.push("--skill-name", options.skillName);
     return this.runRaw(...args);
   }
 
   spark(content: string, options: { triggerDesc?: string } = {}): string {
-    const args = ["spark", JSON.stringify(content)];
-    if (options.triggerDesc)
-      args.push("--trigger", JSON.stringify(options.triggerDesc));
+    const args = ["spark", content];
+    if (options.triggerDesc) args.push("--trigger", options.triggerDesc);
     return this.runRaw(...args);
   }
 

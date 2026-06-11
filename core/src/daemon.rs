@@ -58,8 +58,10 @@ pub fn start(
 
         // Validate: warn if no watch dirs.
         if watch_dirs.is_empty() {
-            eprintln!("[innate daemon] warning: no --watch directories specified; \
-                       daemon will start but won't monitor any logs");
+            eprintln!(
+                "[innate daemon] warning: no --watch directories specified; \
+                       daemon will start but won't monitor any logs"
+            );
         }
 
         // Already running?
@@ -74,34 +76,52 @@ pub fn start(
         }
 
         // Create parent dirs.
-        if let Some(p) = pid_file.parent() { std::fs::create_dir_all(p)?; }
-        if let Some(p) = state_db.parent()  { std::fs::create_dir_all(p)?; }
-        if let Some(p) = log_file.parent()  { std::fs::create_dir_all(p)?; }
+        if let Some(p) = pid_file.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        if let Some(p) = state_db.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        if let Some(p) = log_file.parent() {
+            std::fs::create_dir_all(p)?;
+        }
 
         // Init daemon_state.sqlite.
         init_state_db(state_db)?;
 
         // Fork: parent writes pid and returns; child runs the watch loop.
-        let watch_strs: Vec<String> = watch_dirs.iter()
+        let watch_strs: Vec<String> = watch_dirs
+            .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
-        let db_str   = db_path.to_string_lossy().into_owned();
-        let sdb_str  = state_db.to_string_lossy().into_owned();
-        let log_str  = log_file.to_string_lossy().into_owned();
-        let pid_str  = pid_file.to_string_lossy().into_owned();
+        let db_str = db_path.to_string_lossy().into_owned();
+        let sdb_str = state_db.to_string_lossy().into_owned();
+        let log_str = log_file.to_string_lossy().into_owned();
+        let pid_str = pid_file.to_string_lossy().into_owned();
 
         // Re-exec self with a hidden marker flag so the child enters watch_loop directly.
         let self_exe = std::env::current_exe()?;
         let mut cmd = std::process::Command::new(&self_exe);
         cmd.arg("--daemon-internal-watch")
-           .arg("--db").arg(&db_str)
-           .arg("--state-db").arg(&sdb_str)
-           .arg("--log-file").arg(&log_str)
-           .arg("--pid-file").arg(&pid_str);
-        for w in &watch_strs { cmd.arg("--watch-dir").arg(w); }
+            .arg("--db")
+            .arg(&db_str)
+            .arg("--state-db")
+            .arg(&sdb_str)
+            .arg("--log-file")
+            .arg(&log_str)
+            .arg("--pid-file")
+            .arg(&pid_str);
+        for w in &watch_strs {
+            cmd.arg("--watch-dir").arg(w);
+        }
 
         // Detach from terminal.
-        unsafe { cmd.pre_exec(|| { libc::setsid(); Ok(()) }); }
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
         let child = cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -121,7 +141,10 @@ pub fn stop(pid_file: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
         match read_pid(pid_file) {
-            None => anyhow::bail!("no pid file at {}; daemon may not be running", pid_file.display()),
+            None => anyhow::bail!(
+                "no pid file at {}; daemon may not be running",
+                pid_file.display()
+            ),
             Some(pid) => {
                 if !process_alive(pid) {
                     let _ = std::fs::remove_file(pid_file);
@@ -131,7 +154,10 @@ pub fn stop(pid_file: &Path) -> anyhow::Result<()> {
                 // SIGTERM
                 let r = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
                 if r != 0 {
-                    anyhow::bail!("kill({pid}, SIGTERM) failed: {}", std::io::Error::last_os_error());
+                    anyhow::bail!(
+                        "kill({pid}, SIGTERM) failed: {}",
+                        std::io::Error::last_os_error()
+                    );
                 }
                 // Wait up to 3 s then SIGKILL.
                 for _ in 0..30 {
@@ -142,7 +168,9 @@ pub fn stop(pid_file: &Path) -> anyhow::Result<()> {
                         return Ok(());
                     }
                 }
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
                 let _ = std::fs::remove_file(pid_file);
                 println!("daemon killed (pid {pid})");
                 Ok(())
@@ -153,22 +181,30 @@ pub fn stop(pid_file: &Path) -> anyhow::Result<()> {
 
 pub fn status(state_db: &Path) -> anyhow::Result<()> {
     if !state_db.exists() {
-        println!("daemon_state.sqlite not found at {}; daemon has never run.", state_db.display());
+        println!(
+            "daemon_state.sqlite not found at {}; daemon has never run.",
+            state_db.display()
+        );
         return Ok(());
     }
     let conn = rusqlite::Connection::open(state_db)?;
-    let count: i64 = conn.query_row(
-        "SELECT count(*) FROM watch_state", [], |r| r.get(0),
-    ).unwrap_or(0);
-    let processed: i64 = conn.query_row(
-        "SELECT count(*) FROM processed_events", [], |r| r.get(0),
-    ).unwrap_or(0);
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM watch_state", [], |r| r.get(0))
+        .unwrap_or(0);
+    let processed: i64 = conn
+        .query_row("SELECT count(*) FROM processed_events", [], |r| r.get(0))
+        .unwrap_or(0);
     println!("watch_state entries  : {count}");
     println!("processed events     : {processed}");
     // List watch paths.
-    let mut stmt = conn.prepare("SELECT watch_path, last_processed_offset, updated_at FROM watch_state")?;
+    let mut stmt =
+        conn.prepare("SELECT watch_path, last_processed_offset, updated_at FROM watch_state")?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)?, r.get::<_,String>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+        ))
     })?;
     for row in rows.flatten() {
         println!("  {} offset={} updated={}", row.0, row.1, row.2);
@@ -192,7 +228,9 @@ pub fn run_watch_loop(
 
     // Open log file (append).
     let log_file = std::fs::OpenOptions::new()
-        .create(true).append(true).open(log_path);
+        .create(true)
+        .append(true)
+        .open(log_path);
 
     let mut logger: Box<dyn std::io::Write + Send> = match log_file {
         Ok(f) => Box::new(f),
@@ -203,7 +241,10 @@ pub fn run_watch_loop(
 
     let state_db = match rusqlite::Connection::open(state_db_path) {
         Ok(c) => c,
-        Err(e) => { let _ = writeln!(logger, "[innate-daemon] cannot open state db: {e}"); return; }
+        Err(e) => {
+            let _ = writeln!(logger, "[innate-daemon] cannot open state db: {e}");
+            return;
+        }
     };
     if state_db.execute_batch(DAEMON_SCHEMA).is_err() {
         let _ = writeln!(logger, "[innate-daemon] failed to init schema");
@@ -214,7 +255,9 @@ pub fn run_watch_loop(
     loop {
         for dir in watch_dirs {
             let dir_path = std::path::Path::new(dir);
-            if !dir_path.exists() { continue; }
+            if !dir_path.exists() {
+                continue;
+            }
             // Find .log files in directory.
             if let Ok(entries) = std::fs::read_dir(dir_path) {
                 for entry in entries.flatten() {
@@ -264,25 +307,36 @@ fn process_log_file(
         saved_offset
     };
 
-    if start_offset >= file_size { return; }
+    if start_offset >= file_size {
+        return;
+    }
 
     use std::io::{BufRead, Seek};
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return,
     };
-    if f.seek(std::io::SeekFrom::Start(start_offset as u64)).is_err() { return; }
+    if f.seek(std::io::SeekFrom::Start(start_offset as u64))
+        .is_err()
+    {
+        return;
+    }
 
     let reader = std::io::BufReader::new(&mut f);
     let mut new_offset = start_offset;
 
     for line_res in reader.lines() {
-        let line = match line_res { Ok(l) => l, Err(_) => break };
+        let line = match line_res {
+            Ok(l) => l,
+            Err(_) => break,
+        };
         new_offset += line.len() as i64 + 1; // +1 for newline
 
         // Event classification per §九 mapping table.
         let event_type = classify_log_line(&line);
-        if event_type.is_none() { continue; }
+        if event_type.is_none() {
+            continue;
+        }
         let event_type = event_type.unwrap();
 
         // Compute event_id for idempotency.
@@ -296,12 +350,16 @@ fn process_log_file(
         let event_id = format!("{:x}", h.finalize());
 
         // Skip if already processed.
-        let already: i64 = state_db.query_row(
-            "SELECT count(*) FROM processed_events WHERE event_id=?",
-            rusqlite::params![event_id],
-            |r| r.get(0),
-        ).unwrap_or(0);
-        if already > 0 { continue; }
+        let already: i64 = state_db
+            .query_row(
+                "SELECT count(*) FROM processed_events WHERE event_id=?",
+                rusqlite::params![event_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if already > 0 {
+            continue;
+        }
 
         // Handle "start": recall to open a trace and store it.
         if event_type == "start" {
@@ -317,23 +375,27 @@ fn process_log_file(
                         rusqlite::params![event_id, path_str.as_ref(), &tid, event_type, &ts],
                     );
                 }
-                Err(e) => { let _ = writeln!(log, "[innate-daemon] recall for start event failed: {e}"); }
+                Err(e) => {
+                    let _ = writeln!(log, "[innate-daemon] recall for start event failed: {e}");
+                }
             }
             continue;
         }
 
         // Look up trace for this watch path (ok/fail events).
-        let trace_id: Option<String> = state_db.query_row(
-            "SELECT trace_id FROM trace_context WHERE watch_path=?",
-            rusqlite::params![path_str.as_ref()],
-            |r| r.get(0),
-        ).ok();
+        let trace_id: Option<String> = state_db
+            .query_row(
+                "SELECT trace_id FROM trace_context WHERE watch_path=?",
+                rusqlite::params![path_str.as_ref()],
+                |r| r.get(0),
+            )
+            .ok();
 
         if let Some(tid) = &trace_id {
             let outcome = match event_type {
-                "ok"   => "ok",
+                "ok" => "ok",
                 "fail" => "fail",
-                _      => continue,
+                _ => continue,
             };
             let result = call_cli_record(db_path, tid, outcome);
             let ts = crate::utils::utc_now_iso();
@@ -359,31 +421,47 @@ fn process_log_file(
 
 fn classify_log_line(line: &str) -> Option<&'static str> {
     // §九 event mapping: start patterns → "start", success → "ok", failure → "fail".
-    let start_patterns   = ["Starting ", "Running ", "Executing ", "BEGIN ", "Task started"];
+    let start_patterns = [
+        "Starting ",
+        "Running ",
+        "Executing ",
+        "BEGIN ",
+        "Task started",
+    ];
     let success_patterns = ["Build successful", "Tests passed", "✓ ", " passed"];
-    let fail_patterns    = ["SyntaxError", "Error:", "FAILED", "test result: FAILED"];
+    let fail_patterns = ["SyntaxError", "Error:", "FAILED", "test result: FAILED"];
 
     for p in &start_patterns {
-        if line.contains(p) { return Some("start"); }
+        if line.contains(p) {
+            return Some("start");
+        }
     }
     for p in &success_patterns {
-        if line.contains(p) { return Some("ok"); }
+        if line.contains(p) {
+            return Some("ok");
+        }
     }
     for p in &fail_patterns {
-        if line.contains(p) { return Some("fail"); }
+        if line.contains(p) {
+            return Some("fail");
+        }
     }
     None
 }
 
-fn call_cli_record(
-    db_path: &str,
-    trace_id: &str,
-    outcome: &str,
-) -> anyhow::Result<()> {
+fn call_cli_record(db_path: &str, trace_id: &str, outcome: &str) -> anyhow::Result<()> {
     let self_exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(&self_exe);
-    cmd.args(["--db", db_path, "record", trace_id,
-              "--outcome", outcome, "--source", "daemon"]);
+    cmd.args([
+        "--db",
+        db_path,
+        "record",
+        trace_id,
+        "--outcome",
+        outcome,
+        "--source",
+        "daemon",
+    ]);
 
     let status = cmd.status();
     match status {
@@ -392,10 +470,20 @@ fn call_cli_record(
             // One retry with 200 ms backoff.
             std::thread::sleep(std::time::Duration::from_millis(200));
             let status2 = std::process::Command::new(&self_exe)
-                .args(["--db", db_path, "record", trace_id,
-                       "--outcome", outcome, "--source", "daemon"])
+                .args([
+                    "--db",
+                    db_path,
+                    "record",
+                    trace_id,
+                    "--outcome",
+                    outcome,
+                    "--source",
+                    "daemon",
+                ])
                 .status()?;
-            if status2.success() { Ok(()) } else {
+            if status2.success() {
+                Ok(())
+            } else {
                 anyhow::bail!("record exited {:?} after retry", s.code())
             }
         }
@@ -406,14 +494,20 @@ fn call_cli_record(
 fn call_cli_recall(db_path: &str, query: &str) -> anyhow::Result<String> {
     let self_exe = std::env::current_exe()?;
     let output = std::process::Command::new(&self_exe)
-        .args(["--db", db_path, "recall", query, "--format", "json", "--source", "daemon"])
+        .args([
+            "--db", db_path, "recall", query, "--format", "json", "--source", "daemon",
+        ])
         .output()?;
     if !output.status.success() {
-        anyhow::bail!("recall exited non-zero: {}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "recall exited non-zero: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| anyhow::anyhow!("recall json parse error: {e}"))?;
-    parsed.get("trace_id")
+    parsed
+        .get("trace_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!("no trace_id in recall output"))

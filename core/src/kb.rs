@@ -1,17 +1,26 @@
 //! KnowledgeBase — all 8 Public APIs.
 
+/// Return type for pack(): (selected_chunks, skipped_groups, skip_reasons)
+type PackResult = (
+    Vec<Value>,
+    Vec<(Vec<Value>, f64, usize)>,
+    std::collections::HashMap<String, String>,
+);
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::embedding::{EmbeddingProvider, DummyEmbeddingProvider};
+use crate::embedding::{DummyEmbeddingProvider, EmbeddingProvider};
 use crate::errors::{InnateError, Result};
-use crate::refine::{DefaultSanitizer, Distiller, HeuristicDistiller, NullRefiner, Refiner, Sanitizer};
+use crate::refine::{
+    DefaultSanitizer, Distiller, HeuristicDistiller, NullRefiner, Refiner, Sanitizer,
+};
 use crate::storage::{ChunkRow, EpisodicLogRow, Storage};
 use crate::utils::{
-    content_hash, SanitizeAction, estimate_tokens, gen_uuid, pack_embedding, utc_now_iso,
+    content_hash, estimate_tokens, gen_uuid, pack_embedding, utc_now_iso, SanitizeAction,
 };
 
 // ---------------------------------------------------------------------------
@@ -135,18 +144,13 @@ impl KnowledgeBase {
         curator: Option<Arc<dyn Curator>>,
         sanitizer: Option<Arc<dyn Sanitizer>>,
     ) -> Result<Self> {
-        let embedding = embedding
-            .unwrap_or_else(|| Arc::new(DummyEmbeddingProvider::default()));
+        let embedding = embedding.unwrap_or_else(|| Arc::new(DummyEmbeddingProvider::default()));
         let refiner = refiner.unwrap_or_else(|| Arc::new(NullRefiner));
         let distiller = distiller.unwrap_or_else(|| Arc::new(HeuristicDistiller));
         let curator = curator.unwrap_or_else(|| Arc::new(BuiltinCurator));
         let sanitizer = sanitizer.unwrap_or_else(|| Arc::new(DefaultSanitizer));
 
-        let storage = Storage::open(
-            db_path,
-            embedding.content_dim(),
-            embedding.trigger_dim(),
-        )?;
+        let storage = Storage::open(db_path, embedding.content_dim(), embedding.trigger_dim())?;
 
         let mut kb = Self {
             storage,
@@ -219,23 +223,34 @@ impl KnowledgeBase {
             }
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result
     }
 
     fn load_params(&mut self) -> Result<()> {
         let f = |k: &str, d: f64| -> f64 {
-            self.storage.get_meta(k).ok().flatten()
+            self.storage
+                .get_meta(k)
+                .ok()
+                .flatten()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d)
         };
         let i = |k: &str, d: i64| -> i64 {
-            self.storage.get_meta(k).ok().flatten()
+            self.storage
+                .get_meta(k)
+                .ok()
+                .flatten()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d)
         };
         let b = |k: &str, d: bool| -> bool {
-            self.storage.get_meta(k).ok().flatten()
+            self.storage
+                .get_meta(k)
+                .ok()
+                .flatten()
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(d)
         };
@@ -251,11 +266,16 @@ impl KnowledgeBase {
         self.repeat_select_conf_max = f("curate.repeat_select_conf_max", REPEAT_SELECT_CONF_MAX);
         self.never_used_age_days = i("curate.never_used_age_days", NEVER_USED_AGE_DAYS);
         self.open_ttl_days = i("curate.open_ttl_days", OPEN_TTL_DAYS);
-        self.screening_timeout_minutes = i("curate.screening_timeout_minutes", SCREENING_TIMEOUT_MINUTES);
-        self.promote_used_success_min = i("curate.promote_used_success_min", PROMOTE_USED_SUCCESS_MIN);
+        self.screening_timeout_minutes = i(
+            "curate.screening_timeout_minutes",
+            SCREENING_TIMEOUT_MINUTES,
+        );
+        self.promote_used_success_min =
+            i("curate.promote_used_success_min", PROMOTE_USED_SUCCESS_MIN);
         self.promote_confidence_min = f("curate.promote_confidence_min", PROMOTE_CONFIDENCE_MIN);
         self.evolve_threshold = i("evolve.threshold_new_count", EVOLVE_THRESHOLD);
-        self.distill_batch_size = i("evolve.distill_batch_size", DISTILL_BATCH_SIZE as i64) as usize;
+        self.distill_batch_size =
+            i("evolve.distill_batch_size", DISTILL_BATCH_SIZE as i64) as usize;
         Ok(())
     }
 
@@ -263,6 +283,7 @@ impl KnowledgeBase {
     // Public API 1: recall
     // ------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn recall(
         &self,
         query: &str,
@@ -271,17 +292,21 @@ impl KnowledgeBase {
         include_sparks: bool,
         top: Option<usize>,
         source: &str,
-        expand_deps: &str,  // "false" | "direct" | "closure"
-        allow_trim: bool,   // if true, invoke Refiner::trim when block doesn't fit
-        refine_mode: &str,  // "off" | "trim" | "adapt" — recorded in trace
+        expand_deps: &str, // "false" | "direct" | "closure"
+        allow_trim: bool,  // if true, invoke Refiner::trim when block doesn't fit
+        refine_mode: &str, // "off" | "trim" | "adapt" — recorded in trace
     ) -> Result<RecallResult> {
         validate_source(source)?;
         let trace_id = gen_uuid();
         let now = utc_now_iso();
 
-        let q_content = self.embedding.embed_content(query)
+        let q_content = self
+            .embedding
+            .embed_content(query)
             .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))?;
-        let q_trigger = self.embedding.embed_trigger(query)
+        let q_trigger = self
+            .embedding
+            .embed_trigger(query)
             .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))?;
 
         // ANN candidates (non-spark)
@@ -292,7 +317,8 @@ impl KnowledgeBase {
         let scored = self.score_candidates(candidates, query);
 
         // First-fit pack with dep expansion
-        let (selected, skipped, skipped_reasons) = self.pack(&scored, budget, expand_deps, allow_trim, query)?;
+        let (selected, skipped, skipped_reasons) =
+            self.pack(&scored, budget, expand_deps, allow_trim, query)?;
 
         let depth_skipped: Vec<String> = skipped_reasons
             .iter()
@@ -306,7 +332,11 @@ impl KnowledgeBase {
             selected = self.density_refill(selected, &skipped, budget);
         }
 
-        let visible = limit_knowledge(selected.clone(), top);
+        let limited = limit_knowledge(selected.clone(), top);
+        let visible = self
+            .refiner
+            .refine(limited, Some(budget))
+            .unwrap_or_else(|_| limit_knowledge(selected, top));
 
         // Sparks
         let sparks = if include_sparks {
@@ -317,8 +347,16 @@ impl KnowledgeBase {
 
         if trace {
             self.write_recall_trace(
-                &trace_id, query, &scored, &visible, &sparks,
-                &depth_skipped, &skipped_reasons, refine_mode, source, &now,
+                &trace_id,
+                query,
+                &scored,
+                &visible,
+                &sparks,
+                &depth_skipped,
+                &skipped_reasons,
+                refine_mode,
+                source,
+                &now,
             )?;
         }
 
@@ -333,24 +371,36 @@ impl KnowledgeBase {
         })
     }
 
-    fn ann_candidates(&self, q_content: &[f32], q_trigger: &[f32]) -> Result<HashMap<String, CandidateInfo>> {
-        let embed_version = self.storage.get_meta("embed_version")?
+    fn ann_candidates(
+        &self,
+        q_content: &[f32],
+        q_trigger: &[f32],
+    ) -> Result<HashMap<String, CandidateInfo>> {
+        let embed_version = self
+            .storage
+            .get_meta("embed_version")?
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(1);
 
-        let content_res = self.storage.search_vec_content(q_content, self.top_k_candidates * 2)?;
-        let trigger_res = self.storage.search_vec_trigger(q_trigger, self.top_k_candidates * 2)?;
+        let content_res = self
+            .storage
+            .search_vec_content(q_content, self.top_k_candidates * 2)?;
+        let trigger_res = self
+            .storage
+            .search_vec_trigger(q_trigger, self.top_k_candidates * 2)?;
 
         let mut candidates: HashMap<String, CandidateInfo> = HashMap::new();
 
         for (cid, sim) in &content_res {
             if let Some(chunk) = self.storage.get_chunk(cid)? {
                 if chunk_is_valid_for_recall(&chunk, embed_version) {
-                    let e = candidates.entry(cid.clone()).or_insert_with(|| CandidateInfo {
-                        chunk: chunk.clone(),
-                        sim_content: 0.0,
-                        sim_trigger: 0.0,
-                    });
+                    let e = candidates
+                        .entry(cid.clone())
+                        .or_insert_with(|| CandidateInfo {
+                            chunk: chunk.clone(),
+                            sim_content: 0.0,
+                            sim_trigger: 0.0,
+                        });
                     e.sim_content = e.sim_content.max(*sim);
                 }
             }
@@ -358,11 +408,13 @@ impl KnowledgeBase {
         for (cid, sim) in &trigger_res {
             if let Some(chunk) = self.storage.get_chunk(cid)? {
                 if chunk_is_valid_for_recall(&chunk, embed_version) {
-                    let e = candidates.entry(cid.clone()).or_insert_with(|| CandidateInfo {
-                        chunk: chunk.clone(),
-                        sim_content: 0.0,
-                        sim_trigger: 0.0,
-                    });
+                    let e = candidates
+                        .entry(cid.clone())
+                        .or_insert_with(|| CandidateInfo {
+                            chunk: chunk.clone(),
+                            sim_content: 0.0,
+                            sim_trigger: 0.0,
+                        });
                     e.sim_trigger = e.sim_trigger.max(*sim);
                 }
             }
@@ -378,15 +430,23 @@ impl KnowledgeBase {
             }
             let deps = self.storage.get_deps(&cid)?;
             for (dst, kind, _) in &deps {
-                if kind != "soft" { continue; }
+                if kind != "soft" {
+                    continue;
+                }
                 if let Some(target) = self.storage.get_chunk(dst)? {
-                    if target.get("state").and_then(Value::as_str) == Some("archived") { continue; }
-                    if target.get("origin").and_then(Value::as_str) == Some("spark") { continue; }
-                    let e = candidates.entry(dst.clone()).or_insert_with(|| CandidateInfo {
-                        chunk: target,
-                        sim_content: 0.0,
-                        sim_trigger: 0.0,
-                    });
+                    if target.get("state").and_then(Value::as_str) == Some("archived") {
+                        continue;
+                    }
+                    if target.get("origin").and_then(Value::as_str) == Some("spark") {
+                        continue;
+                    }
+                    let e = candidates
+                        .entry(dst.clone())
+                        .or_insert_with(|| CandidateInfo {
+                            chunk: target,
+                            sim_content: 0.0,
+                            sim_trigger: 0.0,
+                        });
                     e.sim_content = (e.sim_content + 0.05).min(1.0);
                 }
             }
@@ -402,13 +462,17 @@ impl KnowledgeBase {
         let mut scored: Vec<(f64, Value)> = candidates
             .into_values()
             .map(|info| {
-                let conf = info.chunk.get("confidence")
+                let conf = info
+                    .chunk
+                    .get("confidence")
                     .and_then(Value::as_f64)
                     .unwrap_or(0.5);
                 let mut fused = self.w_content * info.sim_content as f64
                     + self.w_trigger * info.sim_trigger as f64
                     + self.w_confidence * conf;
-                let anti = info.chunk.get("anti_trigger_desc")
+                let anti = info
+                    .chunk
+                    .get("anti_trigger_desc")
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if !anti.is_empty() && anti_trigger_hit(query, anti) {
@@ -431,7 +495,7 @@ impl KnowledgeBase {
         expand_deps: &str,
         allow_trim: bool,
         query: &str,
-    ) -> Result<(Vec<Value>, Vec<(Vec<Value>, f64, usize)>, HashMap<String, String>)> {
+    ) -> Result<PackResult> {
         let mut selected: Vec<Value> = vec![];
         let mut skipped: Vec<(Vec<Value>, f64, usize)> = vec![];
         let mut skipped_reasons: HashMap<String, String> = HashMap::new();
@@ -440,7 +504,9 @@ impl KnowledgeBase {
 
         for (fused, chunk) in scored {
             let cid = chunk["id"].as_str().unwrap_or("").to_string();
-            if used_ids.contains(&cid) { continue; }
+            if used_ids.contains(&cid) {
+                continue;
+            }
 
             // Build block with dep expansion; fail-closed on dep issues.
             let (block, dep_skip_reason) = self.build_dep_block(chunk, expand_deps)?;
@@ -449,7 +515,8 @@ impl KnowledgeBase {
                 continue;
             }
 
-            let new_block: Vec<Value> = block.iter()
+            let new_block: Vec<Value> = block
+                .iter()
                 .filter(|b| !used_ids.contains(b["id"].as_str().unwrap_or("")))
                 .cloned()
                 .collect();
@@ -468,7 +535,10 @@ impl KnowledgeBase {
                 used_tokens += cost;
             } else if allow_trim {
                 // Attempt refiner trim — NullRefiner returns None (no-op).
-                if let Some(trimmed) = self.refiner.trim(&block, query, budget.saturating_sub(used_tokens)) {
+                if let Some(trimmed) =
+                    self.refiner
+                        .trim(&block, query, budget.saturating_sub(used_tokens))
+                {
                     let trim_cost = block_cost(&trimmed);
                     if used_tokens + trim_cost <= budget {
                         for b in &trimmed {
@@ -495,7 +565,11 @@ impl KnowledgeBase {
 
     /// Expand a seed chunk into a block according to `expand_deps`.
     /// Returns `(block, Some(skip_reason))` if the block should be discarded (fail-closed).
-    fn build_dep_block(&self, seed: &Value, expand_deps: &str) -> Result<(Vec<Value>, Option<String>)> {
+    fn build_dep_block(
+        &self,
+        seed: &Value,
+        expand_deps: &str,
+    ) -> Result<(Vec<Value>, Option<String>)> {
         if expand_deps == "false" || expand_deps.is_empty() {
             return Ok((vec![seed.clone()], None));
         }
@@ -505,7 +579,9 @@ impl KnowledgeBase {
                 let deps = self.storage.get_deps(seed_id)?;
                 let mut block = vec![seed.clone()];
                 for (dep_id, kind, _) in &deps {
-                    if kind != "hard" { continue; }
+                    if kind != "hard" {
+                        continue;
+                    }
                     match self.validate_hard_dep(dep_id)? {
                         Some(chunk) => block.push(chunk),
                         None => return Ok((vec![], Some("hard_dep_unavailable".to_string()))),
@@ -532,7 +608,10 @@ impl KnowledgeBase {
             Some(chunk) => {
                 let state = chunk.get("state").and_then(Value::as_str).unwrap_or("");
                 let origin = chunk.get("origin").and_then(Value::as_str).unwrap_or("");
-                let embed_v = chunk.get("embed_version").and_then(Value::as_i64).unwrap_or(0);
+                let embed_v = chunk
+                    .get("embed_version")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 if state == "archived" || origin == "spark" || embed_v == 0 {
                     Ok(None)
                 } else {
@@ -556,14 +635,20 @@ impl KnowledgeBase {
         }
         let deps = self.storage.get_deps(id)?;
         for (dep_id, kind, _) in &deps {
-            if kind != "hard" { continue; }
-            if visited.contains(dep_id) { continue; } // cycle guard
+            if kind != "hard" {
+                continue;
+            }
+            if visited.contains(dep_id) {
+                continue;
+            } // cycle guard
             visited.insert(dep_id.clone());
             match self.validate_hard_dep(dep_id)? {
                 None => return Ok(Some("hard_dep_unavailable".to_string())),
                 Some(chunk) => {
                     block.push(chunk);
-                    if let Some(reason) = self.expand_hard_closure(dep_id, visited, block, depth + 1, max_depth)? {
+                    if let Some(reason) =
+                        self.expand_hard_closure(dep_id, visited, block, depth + 1, max_depth)?
+                    {
                         return Ok(Some(reason));
                     }
                 }
@@ -579,19 +664,26 @@ impl KnowledgeBase {
         budget: usize,
     ) -> Vec<Value> {
         let used_tokens = block_cost(&selected);
-        if used_tokens >= budget { return selected; }
+        if used_tokens >= budget {
+            return selected;
+        }
 
-        let selected_ids: HashSet<String> = selected.iter()
+        let selected_ids: HashSet<String> = selected
+            .iter()
             .filter_map(|c| c["id"].as_str().map(str::to_string))
             .collect();
 
-        let mut density_items: Vec<(f64, Vec<Value>, usize)> = skipped.iter()
+        let mut density_items: Vec<(f64, Vec<Value>, usize)> = skipped
+            .iter()
             .filter_map(|(block, fscore, _)| {
-                let block: Vec<Value> = block.iter()
+                let block: Vec<Value> = block
+                    .iter()
                     .filter(|b| !selected_ids.contains(b["id"].as_str().unwrap_or("")))
                     .cloned()
                     .collect();
-                if block.is_empty() { return None; }
+                if block.is_empty() {
+                    return None;
+                }
                 let cost = block_cost(&block);
                 let density = fscore / cost.max(1) as f64;
                 Some((density, block, cost))
@@ -617,31 +709,57 @@ impl KnowledgeBase {
     }
 
     fn recall_sparks(&self, q_content: &[f32], q_trigger: &[f32]) -> Result<Vec<Value>> {
-        let embed_version = self.storage.get_meta("embed_version")?
+        let embed_version = self
+            .storage
+            .get_meta("embed_version")?
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(1);
 
-        let content_res = self.storage.search_vec_content(q_content, self.top_k_candidates)?;
-        let trigger_res = self.storage.search_vec_trigger(q_trigger, self.top_k_candidates)?;
+        let content_res = self
+            .storage
+            .search_vec_content(q_content, self.top_k_candidates)?;
+        let trigger_res = self
+            .storage
+            .search_vec_trigger(q_trigger, self.top_k_candidates)?;
 
         let mut spark_scores: HashMap<String, (f32, Value)> = HashMap::new();
         for (cid, sim) in content_res.iter().chain(trigger_res.iter()) {
             if let Some(chunk) = self.storage.get_chunk(cid)? {
-                if chunk.get("origin").and_then(Value::as_str) != Some("spark") { continue; }
-                if chunk.get("state").and_then(Value::as_str) == Some("archived") { continue; }
+                if chunk.get("origin").and_then(Value::as_str) != Some("spark") {
+                    continue;
+                }
+                if chunk.get("state").and_then(Value::as_str) == Some("archived") {
+                    continue;
+                }
                 let maturity = chunk.get("maturity").and_then(Value::as_str).unwrap_or("");
-                if maturity == "promoted" || maturity == "dropped" { continue; }
-                let ev = chunk.get("embed_version").and_then(Value::as_i64).unwrap_or(1);
-                if ev < embed_version { continue; }
-                let entry = spark_scores.entry(cid.clone()).or_insert_with(|| (*sim, chunk.clone()));
-                if *sim > entry.0 { *entry = (*sim, chunk); }
+                if maturity == "promoted" || maturity == "dropped" {
+                    continue;
+                }
+                let ev = chunk
+                    .get("embed_version")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1);
+                if ev < embed_version {
+                    continue;
+                }
+                let entry = spark_scores
+                    .entry(cid.clone())
+                    .or_insert_with(|| (*sim, chunk.clone()));
+                if *sim > entry.0 {
+                    *entry = (*sim, chunk);
+                }
             }
         }
         let mut sparks: Vec<(f32, Value)> = spark_scores.into_values().collect();
         sparks.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(sparks.into_iter().take(self.top_k_candidates).map(|(_, c)| c).collect())
+        Ok(sparks
+            .into_iter()
+            .take(self.top_k_candidates)
+            .map(|(_, c)| c)
+            .collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_recall_trace(
         &self,
         trace_id: &str,
@@ -662,27 +780,60 @@ impl KnowledgeBase {
                 let cid = chunk["id"].as_str().unwrap_or("");
                 let sim = chunk.get("_fused_score").and_then(Value::as_f64);
                 // For dep-skipped seeds, record their skip reason as refine_mode.
-                let rm = skipped_reasons.get(cid)
+                let rm = skipped_reasons
+                    .get(cid)
                     .map(|r| format!("skipped:{r}"))
-                    .or_else(|| if refine_mode != "off" && !refine_mode.is_empty() {
-                        Some(refine_mode.to_string())
-                    } else { None });
+                    .or_else(|| {
+                        if refine_mode != "off" && !refine_mode.is_empty() {
+                            Some(refine_mode.to_string())
+                        } else {
+                            None
+                        }
+                    });
                 self.storage.insert_usage_trace(
-                    trace_id, Some(cid), "retrieved", 1.0, sim, rm.as_deref(),
-                    None, Some((rank + 1) as i64), source, now,
+                    trace_id,
+                    Some(cid),
+                    "retrieved",
+                    1.0,
+                    sim,
+                    rm.as_deref(),
+                    None,
+                    Some((rank + 1) as i64),
+                    source,
+                    now,
                 )?;
             }
             for (rank, chunk) in visible.iter().enumerate() {
                 let cid = chunk["id"].as_str().unwrap_or("");
                 self.storage.insert_usage_trace(
-                    trace_id, Some(cid), "selected", 1.0, None, None,
-                    None, Some((rank + 1) as i64), source, now,
+                    trace_id,
+                    Some(cid),
+                    "selected",
+                    1.0,
+                    None,
+                    None,
+                    None,
+                    Some((rank + 1) as i64),
+                    source,
+                    now,
                 )?;
                 // Write 'refined' event for chunks that came through the trim path.
-                if chunk.get("_trimmed").and_then(Value::as_bool).unwrap_or(false) {
+                if chunk
+                    .get("_trimmed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
                     self.storage.insert_usage_trace(
-                        trace_id, Some(cid), "refined", 1.0, None, Some("trim"),
-                        None, Some((rank + 1) as i64), source, now,
+                        trace_id,
+                        Some(cid),
+                        "refined",
+                        1.0,
+                        None,
+                        Some("trim"),
+                        None,
+                        Some((rank + 1) as i64),
+                        source,
+                        now,
                     )?;
                 }
             }
@@ -690,8 +841,16 @@ impl KnowledgeBase {
             for (rank, chunk) in sparks.iter().enumerate() {
                 let cid = chunk["id"].as_str().unwrap_or("");
                 self.storage.insert_usage_trace(
-                    trace_id, Some(cid), "retrieved", 1.0, None, Some("spark"),
-                    None, Some((rank + 1) as i64), source, now,
+                    trace_id,
+                    Some(cid),
+                    "retrieved",
+                    1.0,
+                    None,
+                    Some("spark"),
+                    None,
+                    Some((rank + 1) as i64),
+                    source,
+                    now,
                 )?;
             }
             let snapshot = json!({
@@ -715,7 +874,9 @@ impl KnowledgeBase {
             self.storage.upsert_episodic_log(&log)?;
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result
     }
 
@@ -723,6 +884,7 @@ impl KnowledgeBase {
     // Public API 2: record
     // ------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
         trace_id: &str,
@@ -743,7 +905,11 @@ impl KnowledgeBase {
             }
         }
         validate_source(source)?;
-        let effective_priority = if nomination.is_some() && priority == 0 { 1 } else { priority };
+        let effective_priority = if nomination.is_some() && priority == 0 {
+            1
+        } else {
+            priority
+        };
         let now = utc_now_iso();
         let lib_id = self.storage.lib_id()?;
 
@@ -775,7 +941,10 @@ impl KnowledgeBase {
                 }
             };
 
-            let existing_outcome = log.get("outcome").and_then(Value::as_str).map(str::to_string);
+            let existing_outcome = log
+                .get("outcome")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             if let Some(new_outcome) = outcome {
                 if let Some(ref ex) = existing_outcome {
                     if ex != new_outcome {
@@ -792,7 +961,16 @@ impl KnowledgeBase {
             if let Some(used_ids) = used {
                 for cid in used_ids {
                     self.storage.insert_usage_trace(
-                        trace_id, Some(cid), "used", 0.3, None, None, None, None, source, &now,
+                        trace_id,
+                        Some(cid),
+                        "used",
+                        0.3,
+                        None,
+                        None,
+                        None,
+                        None,
+                        source,
+                        &now,
                     )?;
                     self.storage.update_chunk_last_used(cid, &now)?;
                 }
@@ -810,8 +988,10 @@ impl KnowledgeBase {
             }
 
             // confidence implicit update
-            if outcome.is_some() && (is_fresh_insert || existing_outcome.is_none()) {
-                self.apply_outcome_implicit(trace_id, outcome.unwrap(), used, &now)?;
+            if let Some(o) = outcome {
+                if is_fresh_insert || existing_outcome.is_none() {
+                    self.apply_outcome_implicit(trace_id, o, used, &now)?;
+                }
             }
 
             // feedback
@@ -827,10 +1007,24 @@ impl KnowledgeBase {
                 }
             }
 
+            // Fill in content fields (補写: output_summary, nomination, output, query) on existing log.
+            if !is_fresh_insert {
+                self.storage.patch_episodic_log_content(
+                    trace_id,
+                    query,
+                    output,
+                    output_summary,
+                    nomination,
+                    effective_priority,
+                )?;
+            }
+
             // Update episodic log
-            let current_state = log.get("distill_state").and_then(Value::as_str).unwrap_or("open");
-            let outcome_completed = outcome.is_some()
-                || existing_outcome.is_some();
+            let current_state = log
+                .get("distill_state")
+                .and_then(Value::as_str)
+                .unwrap_or("open");
+            let outcome_completed = outcome.is_some() || existing_outcome.is_some();
             let new_state = if current_state == "open" && outcome_completed {
                 let has_material = output_summary.is_some()
                     || nomination.is_some()
@@ -838,27 +1032,44 @@ impl KnowledgeBase {
                     || log.get("output_summary").and_then(Value::as_str).is_some()
                     || log.get("nomination").and_then(Value::as_str).is_some()
                     || log.get("output").and_then(Value::as_str).is_some()
-                    || (used.map(|u| !u.is_empty()).unwrap_or(false) && outcome.map(|o| o != "unknown").unwrap_or(false));
-                if has_material { Some("new") } else { Some("discarded") }
+                    || (used.map(|u| !u.is_empty()).unwrap_or(false)
+                        && outcome.map(|o| o != "unknown").unwrap_or(false));
+                if has_material {
+                    Some("new")
+                } else {
+                    Some("discarded")
+                }
             } else {
                 None
             };
             if let Some(state) = new_state {
-                let note = if state == "discarded" { Some("insufficient_material") } else { None };
+                let note = if state == "discarded" {
+                    Some("insufficient_material")
+                } else {
+                    None
+                };
                 let outcome_str = outcome.map(str::to_string);
                 self.storage.update_episodic_log_state(
-                    trace_id, state, note, outcome_str.as_deref(),
+                    trace_id,
+                    state,
+                    note,
+                    outcome_str.as_deref(),
                 )?;
             } else if outcome.is_some() {
                 let outcome_str = outcome.map(str::to_string);
                 self.storage.update_episodic_log_state(
-                    trace_id, current_state, None, outcome_str.as_deref(),
+                    trace_id,
+                    current_state,
+                    None,
+                    outcome_str.as_deref(),
                 )?;
             }
 
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result
     }
 
@@ -869,7 +1080,8 @@ impl KnowledgeBase {
         used: Option<&[String]>,
         now: &str,
     ) -> Result<()> {
-        let used_set: HashSet<&str> = used.map(|u| u.iter().map(String::as_str).collect())
+        let used_set: HashSet<&str> = used
+            .map(|u| u.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let (target, strength, reason) = if outcome == "ok" {
             (1.0, 0.3, "agent_used")
@@ -913,13 +1125,18 @@ impl KnowledgeBase {
         if chunk.get("origin").and_then(Value::as_str) == Some("spark") {
             return Ok(());
         }
-        let conf = chunk.get("confidence").and_then(Value::as_f64).unwrap_or(0.5);
+        let conf = chunk
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.5);
 
         // §二·五B v3.8: recency_w only for explicit signals.
         let recency_w = if explicit {
             const KAPPA: f64 = 0.5;
             const W_DAYS: f64 = 14.0;
-            let gap_days = chunk.get("last_used_at").and_then(Value::as_str)
+            let gap_days = chunk
+                .get("last_used_at")
+                .and_then(Value::as_str)
                 .map(|t| iso_days_diff(now, t) as f64)
                 .unwrap_or(0.0);
             (1.0 + KAPPA * (-(gap_days / W_DAYS) * std::f64::consts::LN_2).exp()).min(1.5)
@@ -930,7 +1147,8 @@ impl KnowledgeBase {
         let alpha = 0.2_f64;
         let effective_alpha = (alpha * strength * recency_w).min(1.0);
         let new_conf = (conf + effective_alpha * (target - conf)).clamp(0.0, 1.0);
-        self.storage.update_chunk_confidence(chunk_id, new_conf, Some(reason), now)?;
+        self.storage
+            .update_chunk_confidence(chunk_id, new_conf, Some(reason), now)?;
         Ok(())
     }
 
@@ -951,24 +1169,38 @@ impl KnowledgeBase {
             return Err(InnateError::InvalidState(format!("invalid kind: {kind}")));
         }
         if !matches!(source, "chat" | "manual" | "doc" | "agent") {
-            return Err(InnateError::InvalidState(format!("invalid source: {source}")));
+            return Err(InnateError::InvalidState(format!(
+                "invalid source: {source}"
+            )));
         }
 
         let (content, action) = self.sanitize_content(content);
-        if action == SanitizeAction::Discard { return Ok(String::new()); }
+        if action == SanitizeAction::Discard {
+            return Ok(String::new());
+        }
 
         let trigger_clean = trigger_desc.and_then(|t| {
             let (cleaned, act) = self.sanitizer.sanitize(t);
-            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+            if act == SanitizeAction::Discard {
+                None
+            } else {
+                Some(cleaned)
+            }
         });
         let anti_trigger_clean = anti_trigger_desc.and_then(|t| {
             let (cleaned, act) = self.sanitizer.sanitize(t);
-            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+            if act == SanitizeAction::Discard {
+                None
+            } else {
+                Some(cleaned)
+            }
         });
 
         let h = content_hash(&content);
         if self.storage.is_hash_invalidated(&h)? {
-            return Err(InnateError::InvalidState("content hash is invalidated".into()));
+            return Err(InnateError::InvalidState(
+                "content hash is invalidated".into(),
+            ));
         }
 
         // Idempotency check
@@ -987,20 +1219,45 @@ impl KnowledgeBase {
         let redacted = action == SanitizeAction::Redact;
 
         let (origin, state, conf, prot, init_state_reason) = if source == "agent" {
-            ("captured", "pending", if redacted { 0.4 } else { 0.60 }, 0, "init:captured_agent")
+            (
+                "captured",
+                "pending",
+                if redacted { 0.4 } else { 0.60 },
+                0,
+                "init:captured_agent",
+            )
         } else if kind == "skill" {
-            ("installed", "active", if redacted { 0.4 } else { 0.85 }, 1, "init:installed")
+            (
+                "installed",
+                "active",
+                if redacted { 0.4 } else { 0.85 },
+                1,
+                "init:installed",
+            )
         } else {
-            ("captured", "active", if redacted { 0.4 } else { 0.60 }, 0, "init:captured")
+            (
+                "captured",
+                "active",
+                if redacted { 0.4 } else { 0.60 },
+                0,
+                "init:captured",
+            )
         };
 
         // Embedding — fall back to embedding_pending on failure.
         let trigger_str = trigger_clean.as_deref().unwrap_or(&content);
-        let (cvec, tvec, embed_ver, final_state_reason) =
-            match (self.embedding.embed_content(&content), self.embedding.embed_trigger(trigger_str)) {
-                (Ok(cv), Ok(tv)) => (cv, tv, 1i64, init_state_reason.to_string()),
-                _ => (vec![], vec![], 0i64, format!("embedding_pending:target={state}")),
-            };
+        let (cvec, tvec, embed_ver, final_state_reason) = match (
+            self.embedding.embed_content(&content),
+            self.embedding.embed_trigger(trigger_str),
+        ) {
+            (Ok(cv), Ok(tv)) => (cv, tv, 1i64, init_state_reason.to_string()),
+            _ => (
+                vec![],
+                vec![],
+                0i64,
+                format!("embedding_pending:target={state}"),
+            ),
+        };
 
         let tokens = estimate_tokens(&content) as i64;
         let row = ChunkRow {
@@ -1029,12 +1286,16 @@ impl KnowledgeBase {
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
             if embed_ver > 0 {
-                self.storage.insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-                self.storage.insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+                self.storage
+                    .insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
+                self.storage
+                    .insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
             }
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result?;
         Ok(chunk_id)
     }
@@ -1050,25 +1311,53 @@ impl KnowledgeBase {
         anti_trigger_desc: Option<&str>,
     ) -> Result<String> {
         let (content, action) = self.sanitize_content(content);
-        if action == SanitizeAction::Discard { return Ok(String::new()); }
+        if action == SanitizeAction::Discard {
+            return Ok(String::new());
+        }
 
         let trigger_clean = trigger_desc.and_then(|t| {
             let (cleaned, act) = self.sanitizer.sanitize(t);
-            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+            if act == SanitizeAction::Discard {
+                None
+            } else {
+                Some(cleaned)
+            }
         });
         let anti_trigger_clean = anti_trigger_desc.and_then(|t| {
             let (cleaned, act) = self.sanitizer.sanitize(t);
-            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+            if act == SanitizeAction::Discard {
+                None
+            } else {
+                Some(cleaned)
+            }
         });
 
         let h = content_hash(&content);
         if self.storage.is_hash_invalidated(&h)? {
-            return Err(InnateError::InvalidState("content hash is invalidated".into()));
+            return Err(InnateError::InvalidState(
+                "content hash is invalidated".into(),
+            ));
         }
 
         // Quick related recall (trace=false, no recursion risk)
-        let related: Vec<String> = self.recall(&content, 2000, false, false, Some(5), "sdk", "false", false, "off")
-            .map(|r| r.knowledge.iter().filter_map(|c| c["id"].as_str().map(str::to_string)).collect())
+        let related: Vec<String> = self
+            .recall(
+                &content,
+                2000,
+                false,
+                false,
+                Some(5),
+                "sdk",
+                "false",
+                false,
+                "off",
+            )
+            .map(|r| {
+                r.knowledge
+                    .iter()
+                    .filter_map(|c| c["id"].as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let now = utc_now_iso();
@@ -1076,11 +1365,18 @@ impl KnowledgeBase {
         let tokens = estimate_tokens(&content) as i64;
 
         let trigger_str = trigger_clean.as_deref().unwrap_or(&content);
-        let (cvec, tvec, embed_ver, state_reason) =
-            match (self.embedding.embed_content(&content), self.embedding.embed_trigger(trigger_str)) {
-                (Ok(cv), Ok(tv)) => (cv, tv, 1i64, "init:spark".to_string()),
-                _ => (vec![], vec![], 0i64, "embedding_pending:target=active".to_string()),
-            };
+        let (cvec, tvec, embed_ver, state_reason) = match (
+            self.embedding.embed_content(&content),
+            self.embedding.embed_trigger(trigger_str),
+        ) {
+            (Ok(cv), Ok(tv)) => (cv, tv, 1i64, "init:spark".to_string()),
+            _ => (
+                vec![],
+                vec![],
+                0i64,
+                "embedding_pending:target=active".to_string(),
+            ),
+        };
 
         let row = ChunkRow {
             id: chunk_id.clone(),
@@ -1091,7 +1387,11 @@ impl KnowledgeBase {
             token_count: Some(tokens),
             origin: "spark".to_string(),
             maturity: Some("seed".to_string()),
-            related_ids: if related.is_empty() { None } else { Some(related.join(",")) },
+            related_ids: if related.is_empty() {
+                None
+            } else {
+                Some(related.join(","))
+            },
             state: "active".to_string(),
             state_reason: Some(state_reason),
             confidence: 0.5,
@@ -1106,12 +1406,16 @@ impl KnowledgeBase {
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
             if embed_ver > 0 {
-                self.storage.insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-                self.storage.insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+                self.storage
+                    .insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
+                self.storage
+                    .insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
             }
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result?;
         Ok(chunk_id)
     }
@@ -1121,54 +1425,82 @@ impl KnowledgeBase {
     // ------------------------------------------------------------------
 
     pub fn mature_spark(&self, spark_id: &str, to: &str) -> Result<()> {
-        let chunk = self.storage.get_chunk(spark_id)?
+        let chunk = self
+            .storage
+            .get_chunk(spark_id)?
             .ok_or_else(|| InnateError::ChunkNotFound(spark_id.to_string()))?;
         if chunk.get("origin").and_then(Value::as_str) != Some("spark") {
             return Err(InnateError::ChunkNotFound(spark_id.to_string()));
         }
-        let current = chunk.get("maturity").and_then(Value::as_str).unwrap_or("seed");
+        let current = chunk
+            .get("maturity")
+            .and_then(Value::as_str)
+            .unwrap_or("seed");
         let valid_next: &[&str] = match current {
             "seed" => &["sprouting"],
             "sprouting" => &["incubating"],
-            _ => return Err(InnateError::InvalidState(format!("spark {spark_id} already {current}"))),
+            _ => {
+                return Err(InnateError::InvalidState(format!(
+                    "spark {spark_id} already {current}"
+                )))
+            }
         };
-        if current == to { return Ok(()); }
+        if current == to {
+            return Ok(());
+        }
         if !valid_next.contains(&to) {
-            return Err(InnateError::InvalidState(format!("invalid spark maturity transition: {current} -> {to}")));
+            return Err(InnateError::InvalidState(format!(
+                "invalid spark maturity transition: {current} -> {to}"
+            )));
         }
         let now = utc_now_iso();
         self.storage.begin_immediate()?;
-        let result = self.storage.query_chunks_params(
-            "UPDATE chunks SET maturity=?, updated_at=? WHERE id=?",
-            rusqlite::params![to, now, spark_id],
-        ).and_then(|_| self.storage.commit());
-        if result.is_err() { let _ = self.storage.rollback(); }
+        let result = self
+            .storage
+            .query_chunks_params(
+                "UPDATE chunks SET maturity=?, updated_at=? WHERE id=?",
+                rusqlite::params![to, now, spark_id],
+            )
+            .and_then(|_| self.storage.commit());
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result.map(|_| ())
     }
 
     pub fn promote_spark(&self, spark_id: &str, to: &str) -> Result<String> {
-        let spark = self.storage.get_chunk(spark_id)?
+        let spark = self
+            .storage
+            .get_chunk(spark_id)?
             .ok_or_else(|| InnateError::ChunkNotFound(spark_id.to_string()))?;
         if spark.get("origin").and_then(Value::as_str) != Some("spark") {
             return Err(InnateError::ChunkNotFound(spark_id.to_string()));
         }
         let maturity = spark.get("maturity").and_then(Value::as_str).unwrap_or("");
         if maturity == "promoted" || maturity == "dropped" {
-            return Err(InnateError::InvalidState(format!("spark {spark_id} already {maturity}")));
+            return Err(InnateError::InvalidState(format!(
+                "spark {spark_id} already {maturity}"
+            )));
         }
         if !matches!(to, "note" | "skill") {
-            return Err(InnateError::InvalidState(format!("invalid spark promotion target: {to}")));
+            return Err(InnateError::InvalidState(format!(
+                "invalid spark promotion target: {to}"
+            )));
         }
 
         let content = spark.get("content").and_then(Value::as_str).unwrap_or("");
         let (content, action) = self.sanitize_content(content);
         if action == SanitizeAction::Discard {
-            return Err(InnateError::InvalidState("sanitize discard on promote".into()));
+            return Err(InnateError::InvalidState(
+                "sanitize discard on promote".into(),
+            ));
         }
 
         let promoted_hash = content_hash(&content);
         if self.storage.is_hash_invalidated(&promoted_hash)? {
-            return Err(InnateError::InvalidState("spark content hash is invalidated".into()));
+            return Err(InnateError::InvalidState(
+                "spark content hash is invalidated".into(),
+            ));
         }
 
         let now = utc_now_iso();
@@ -1196,7 +1528,11 @@ impl KnowledgeBase {
             ("active", 0.60, 0, "captured", "init:captured")
         };
 
-        let conf = if action == SanitizeAction::Redact { 0.4_f64 } else { conf };
+        let conf = if action == SanitizeAction::Redact {
+            0.4_f64
+        } else {
+            conf
+        };
         let new_id = gen_uuid();
         let trigger = spark.get("trigger_desc").and_then(Value::as_str);
         let anti = spark.get("anti_trigger_desc").and_then(Value::as_str);
@@ -1229,38 +1565,57 @@ impl KnowledgeBase {
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
-            self.storage.insert_vec_content(&new_id, &pack_embedding(&cvec))?;
-            self.storage.insert_vec_trigger(&new_id, &pack_embedding(&tvec))?;
+            self.storage
+                .insert_vec_content(&new_id, &pack_embedding(&cvec))?;
+            self.storage
+                .insert_vec_trigger(&new_id, &pack_embedding(&tvec))?;
             self.storage.query_chunks_params(
                 "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
                 rusqlite::params![now, spark_id],
             )?;
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result?;
         Ok(new_id)
     }
 
     pub fn drop_spark(&self, spark_id: &str, reason: &str) -> Result<()> {
-        let spark = self.storage.get_chunk(spark_id)?
+        let spark = self
+            .storage
+            .get_chunk(spark_id)?
             .ok_or_else(|| InnateError::ChunkNotFound(spark_id.to_string()))?;
         if spark.get("origin").and_then(Value::as_str) != Some("spark") {
             return Err(InnateError::ChunkNotFound(spark_id.to_string()));
         }
         let maturity = spark.get("maturity").and_then(Value::as_str).unwrap_or("");
         if maturity == "promoted" {
-            return Err(InnateError::InvalidState(format!("spark {spark_id} already promoted")));
+            return Err(InnateError::InvalidState(format!(
+                "spark {spark_id} already promoted"
+            )));
         }
-        if maturity == "dropped" { return Ok(()); }
+        if maturity == "dropped" {
+            return Ok(());
+        }
         let now = utc_now_iso();
-        let reason_str = if reason.is_empty() { "dropped".to_string() } else { format!("dropped:{reason}") };
+        let reason_str = if reason.is_empty() {
+            "dropped".to_string()
+        } else {
+            format!("dropped:{reason}")
+        };
         self.storage.begin_immediate()?;
-        let result = self.storage.query_chunks_params(
-            "UPDATE chunks SET maturity='dropped', state_reason=?, updated_at=? WHERE id=?",
-            rusqlite::params![reason_str, now, spark_id],
-        ).and_then(|_| self.storage.commit());
-        if result.is_err() { let _ = self.storage.rollback(); }
+        let result = self
+            .storage
+            .query_chunks_params(
+                "UPDATE chunks SET maturity='dropped', state_reason=?, updated_at=? WHERE id=?",
+                rusqlite::params![reason_str, now, spark_id],
+            )
+            .and_then(|_| self.storage.commit());
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result.map(|_| ())
     }
 
@@ -1269,49 +1624,78 @@ impl KnowledgeBase {
     // ------------------------------------------------------------------
 
     pub fn approve(&self, chunk_id: &str) -> Result<()> {
-        let chunk = self.storage.get_chunk(chunk_id)?
+        let chunk = self
+            .storage
+            .get_chunk(chunk_id)?
             .ok_or_else(|| InnateError::ChunkNotFound(chunk_id.to_string()))?;
         if chunk.get("origin").and_then(Value::as_str) == Some("spark") {
-            return Err(InnateError::InvalidState("spark lifecycle uses promote_spark() or invalidate()".into()));
+            return Err(InnateError::InvalidState(
+                "spark lifecycle uses promote_spark() or invalidate()".into(),
+            ));
         }
-        if chunk.get("state").and_then(Value::as_str) == Some("active") { return Ok(()); }
+        if chunk.get("state").and_then(Value::as_str) == Some("active") {
+            return Ok(());
+        }
         if chunk.get("state").and_then(Value::as_str) != Some("pending") {
-            return Err(InnateError::InvalidState("approve requires pending chunk".into()));
+            return Err(InnateError::InvalidState(
+                "approve requires pending chunk".into(),
+            ));
         }
         let now = utc_now_iso();
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
-            self.storage.update_chunk_state(chunk_id, "active", Some("approved"), &now)?;
+            self.storage
+                .update_chunk_state(chunk_id, "active", Some("approved"), &now)?;
             self.storage.query_chunks_params(
                 "UPDATE chunks SET confidence_reason='manual_set', updated_at=? WHERE id=?",
                 rusqlite::params![now, chunk_id],
             )?;
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result
     }
 
     pub fn archive(&self, chunk_id: &str, reason: &str) -> Result<()> {
-        let chunk = self.storage.get_chunk(chunk_id)?
+        let chunk = self
+            .storage
+            .get_chunk(chunk_id)?
             .ok_or_else(|| InnateError::ChunkNotFound(chunk_id.to_string()))?;
         if chunk.get("origin").and_then(Value::as_str) == Some("spark") {
-            return Err(InnateError::InvalidState("spark lifecycle uses drop_spark() or invalidate()".into()));
+            return Err(InnateError::InvalidState(
+                "spark lifecycle uses drop_spark() or invalidate()".into(),
+            ));
         }
         let now = utc_now_iso();
         self.storage.begin_immediate()?;
-        let result = self.storage.update_chunk_state(chunk_id, "archived", Some(reason), &now)
+        let result = self
+            .storage
+            .update_chunk_state(chunk_id, "archived", Some(reason), &now)
             .and_then(|_| self.storage.commit());
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result
     }
 
     pub fn invalidate(&self, chunk_id: &str, reason: &str) -> Result<()> {
-        let chunk = self.storage.get_chunk(chunk_id)?
+        let chunk = self
+            .storage
+            .get_chunk(chunk_id)?
             .ok_or_else(|| InnateError::ChunkNotFound(chunk_id.to_string()))?;
-        let h = chunk.get("content_hash").and_then(Value::as_str).unwrap_or("").to_string();
+        let h = chunk
+            .get("content_hash")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let now = utc_now_iso();
-        let reason_str = if reason.is_empty() { "invalidated".to_string() } else { format!("invalidated:{reason}") };
+        let reason_str = if reason.is_empty() {
+            "invalidated".to_string()
+        } else {
+            format!("invalidated:{reason}")
+        };
 
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
@@ -1323,31 +1707,46 @@ impl KnowledgeBase {
                 "UPDATE chunks SET state='archived', confidence=0.0, state_reason='invalidated:same_hash', state_updated_at=?, updated_at=? WHERE content_hash=? AND id!=?",
                 rusqlite::params![now, now, h, chunk_id],
             )?;
-            self.storage.insert_invalidated_hash(&h, Some(reason), &now)?;
+            self.storage
+                .insert_invalidated_hash(&h, Some(reason), &now)?;
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result
     }
 
     pub fn restore(&self, chunk_id: &str) -> Result<()> {
-        let chunk = self.storage.get_chunk(chunk_id)?
+        let chunk = self
+            .storage
+            .get_chunk(chunk_id)?
             .ok_or_else(|| InnateError::ChunkNotFound(chunk_id.to_string()))?;
         let state = chunk.get("state").and_then(Value::as_str).unwrap_or("");
-        if state == "active" { return Ok(()); }
-        if state != "archived" {
-            return Err(InnateError::InvalidState("restore requires archived chunk".into()));
+        if state == "active" {
+            return Ok(());
         }
-        let was_invalidated = chunk.get("state_reason")
+        if state != "archived" {
+            return Err(InnateError::InvalidState(
+                "restore requires archived chunk".into(),
+            ));
+        }
+        let was_invalidated = chunk
+            .get("state_reason")
             .and_then(Value::as_str)
             .map(|r| r.starts_with("invalidated"))
             .unwrap_or(false);
-        let h = chunk.get("content_hash").and_then(Value::as_str).unwrap_or("").to_string();
+        let h = chunk
+            .get("content_hash")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let now = utc_now_iso();
 
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
-            self.storage.update_chunk_state(chunk_id, "active", Some("restore"), &now)?;
+            self.storage
+                .update_chunk_state(chunk_id, "active", Some("restore"), &now)?;
             if was_invalidated {
                 self.storage.query_chunks_params(
                     "DELETE FROM invalidated_hashes WHERE content_hash=?",
@@ -1360,7 +1759,9 @@ impl KnowledgeBase {
             )?;
             self.storage.commit()
         })();
-        if result.is_err() { let _ = self.storage.rollback(); }
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
         result
     }
 
@@ -1370,15 +1771,21 @@ impl KnowledgeBase {
 
     pub fn evolve(&self, trigger: &str) -> Result<Value> {
         if !matches!(trigger, "manual" | "scheduled" | "threshold") {
-            return Err(InnateError::InvalidState(format!("invalid evolve trigger: {trigger}")));
+            return Err(InnateError::InvalidState(format!(
+                "invalid evolve trigger: {trigger}"
+            )));
         }
 
         // Threshold check
         if trigger == "threshold" {
             let rows = self.storage.query_chunks(
-                "SELECT COUNT(*) AS cnt FROM episodic_log WHERE distill_state='new'"
+                "SELECT COUNT(*) AS cnt FROM episodic_log WHERE distill_state='new'",
             )?;
-            let cnt = rows.first().and_then(|r| r.get("cnt")).and_then(Value::as_i64).unwrap_or(0);
+            let cnt = rows
+                .first()
+                .and_then(|r| r.get("cnt"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             if cnt < self.evolve_threshold {
                 return Ok(json!({"distilled": 0, "curate": null}));
             }
@@ -1407,9 +1814,18 @@ impl KnowledgeBase {
 
         // Atomically claim a batch of 'new' logs → mark 'screening'.
         self.storage.begin_immediate()?;
-        let logs = match self.storage.claim_distill_batch(&run_id, self.distill_batch_size, &now) {
-            Ok(l) => { self.storage.commit()?; l }
-            Err(e) => { let _ = self.storage.rollback(); return Err(e); }
+        let logs = match self
+            .storage
+            .claim_distill_batch(&run_id, self.distill_batch_size, &now)
+        {
+            Ok(l) => {
+                self.storage.commit()?;
+                l
+            }
+            Err(e) => {
+                let _ = self.storage.rollback();
+                return Err(e);
+            }
         };
 
         let mut count = 0;
@@ -1419,7 +1835,10 @@ impl KnowledgeBase {
             if chunks.is_empty() {
                 // Mark log discarded — use id not trace_id for the update query
                 let _ = self.storage.update_episodic_log_state_by_id(
-                    log_id, "discarded", Some("insufficient_material"), None,
+                    log_id,
+                    "discarded",
+                    Some("insufficient_material"),
+                    None,
                 );
                 continue;
             }
@@ -1428,14 +1847,20 @@ impl KnowledgeBase {
                 let (content, action) = self.sanitize_content(&dc.content);
                 if action == SanitizeAction::Discard {
                     let _ = self.storage.update_episodic_log_state_by_id(
-                        log_id, "discarded", Some("sanitize_discard"), None,
+                        log_id,
+                        "discarded",
+                        Some("sanitize_discard"),
+                        None,
                     );
                     continue;
                 }
                 let h = content_hash(&content);
                 if self.storage.is_hash_invalidated(&h)? {
                     let _ = self.storage.update_episodic_log_state_by_id(
-                        log_id, "discarded", Some("invalidated_hash"), None,
+                        log_id,
+                        "discarded",
+                        Some("invalidated_hash"),
+                        None,
                     );
                     continue;
                 }
@@ -1466,51 +1891,51 @@ impl KnowledgeBase {
                 let cvec = match self.embedding.embed_content(&content) {
                     Ok(v) => v,
                     Err(_) => {
-                        // embedding failed — write chunk with embed_version=0 (pending rebuild)
-                        let mut row2 = row.clone();
-                        row2.embed_version = 0;
-                        row2.state_reason = Some("embedding_pending:target=pending".to_string());
-                        self.storage.begin_immediate()?;
-                        let r = (|| -> Result<()> {
-                            self.storage.insert_chunk(&row2)?;
-                            self.storage.commit()
-                        })();
-                        if r.is_err() { let _ = self.storage.rollback(); }
-                        continue;
+                        // embedding failed — do NOT write chunk; mark log failed
+                        let _ = self.storage.update_episodic_log_state_by_id(
+                            log_id,
+                            "failed",
+                            Some("embedding_failed"),
+                            None,
+                        );
+                        continue; // skip to next log entry
                     }
                 };
-                let tvec = match self.embedding.embed_trigger(
-                    row.trigger_desc.as_deref().unwrap_or(&content)
-                ) {
+                let tvec = match self
+                    .embedding
+                    .embed_trigger(row.trigger_desc.as_deref().unwrap_or(&content))
+                {
                     Ok(v) => v,
                     Err(_) => {
-                        let mut row2 = row.clone();
-                        row2.embed_version = 0;
-                        row2.state_reason = Some("embedding_pending:target=pending".to_string());
-                        self.storage.begin_immediate()?;
-                        let r = (|| -> Result<()> {
-                            self.storage.insert_chunk(&row2)?;
-                            self.storage.commit()
-                        })();
-                        if r.is_err() { let _ = self.storage.rollback(); }
+                        let _ = self.storage.update_episodic_log_state_by_id(
+                            log_id,
+                            "failed",
+                            Some("embedding_failed"),
+                            None,
+                        );
                         continue;
                     }
                 };
                 self.storage.begin_immediate()?;
                 let r = (|| -> Result<()> {
                     self.storage.insert_chunk(&row)?;
-                    self.storage.insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-                    self.storage.insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+                    self.storage
+                        .insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
+                    self.storage
+                        .insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
                     self.storage.commit()
                 })();
-                if r.is_err() { let _ = self.storage.rollback(); r?; }
+                if r.is_err() {
+                    let _ = self.storage.rollback();
+                    r?;
+                }
                 count += 1;
                 log_written = true;
             }
             if log_written {
-                let _ = self.storage.update_episodic_log_state_by_id(
-                    log_id, "distilled", None, None,
-                );
+                let _ =
+                    self.storage
+                        .update_episodic_log_state_by_id(log_id, "distilled", None, None);
             }
         }
         Ok(count)
@@ -1524,14 +1949,18 @@ impl KnowledgeBase {
             let archived_count: i64 = count_query(&self.storage,
                 "SELECT COUNT(*) FROM chunks WHERE origin!='spark' AND protected=0 AND state='active'")?;
             report.stats.insert("dry_run".to_string(), json!(true));
-            report.stats.insert("eligible_for_governance".to_string(), json!(archived_count));
+            report
+                .stats
+                .insert("eligible_for_governance".to_string(), json!(archived_count));
             return Ok(report);
         }
 
         // ── Step 1-4: aggregate (single BEGIN IMMEDIATE, half-open cutoff window) ──
         self.storage.begin_immediate()?;
         let agg_result = (|| -> Result<()> {
-            let last_ts = self.storage.get_meta("last_agg_ts")?
+            let last_ts = self
+                .storage
+                .get_meta("last_agg_ts")?
                 .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string());
             let cutoff_ts = now_iso.clone();
 
@@ -1585,7 +2014,10 @@ impl KnowledgeBase {
             self.storage.purge_usage_trace(&cutoff_ts)?;
             self.storage.commit()
         })();
-        if agg_result.is_err() { let _ = self.storage.rollback(); agg_result?; }
+        if agg_result.is_err() {
+            let _ = self.storage.rollback();
+            agg_result?;
+        }
 
         // ── Step 2: recover_logs ──
         self.storage.begin_immediate()?;
@@ -1599,7 +2031,10 @@ impl KnowledgeBase {
             )?;
             for row in &stale {
                 let id = row.get("id").and_then(Value::as_str).unwrap_or("");
-                let run_id = row.get("distill_run_id").and_then(Value::as_str).unwrap_or("unknown");
+                let run_id = row
+                    .get("distill_run_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 let note = format!("screening_timeout:{run_id}");
                 self.storage.conn_execute(
                     "UPDATE episodic_log
@@ -1608,7 +2043,9 @@ impl KnowledgeBase {
                      WHERE id=?",
                     rusqlite::params![note, id],
                 )?;
-                report.warnings.push(format!("stale screening recovered as failed: {id}"));
+                report
+                    .warnings
+                    .push(format!("stale screening recovered as failed: {id}"));
             }
 
             // Open logs past TTL → discarded (insufficient material, never record'd).
@@ -1621,9 +2058,14 @@ impl KnowledgeBase {
             )?;
             self.storage.commit()
         })();
-        if recover_result.is_err() { let _ = self.storage.rollback(); recover_result?; }
+        if recover_result.is_err() {
+            let _ = self.storage.rollback();
+            recover_result?;
+        }
 
         // ── Steps 3-7: governance (archive, dedupe, decay, promote, cycle) ──
+        let scope_origin = scope.origin.clone();
+        let scope_skill = scope.skill_name.clone();
         self.storage.begin_immediate()?;
         let gov_result = (|| -> Result<()> {
             // ── 3a. Archive: low_confidence — only blocks that HAVE been used ──
@@ -1633,12 +2075,26 @@ impl KnowledgeBase {
                  WHERE origin!='spark' AND protected=0 AND state='active'
                    AND last_used_at IS NOT NULL
                    AND confidence < ?
-                   AND last_used_at < ?",
-                rusqlite::params![self.low_conf_threshold, low_conf_cutoff],
+                   AND last_used_at < ?
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)",
+                rusqlite::params![
+                    self.low_conf_threshold,
+                    low_conf_cutoff,
+                    scope_origin,
+                    scope_origin,
+                    scope_skill,
+                    scope_skill
+                ],
             )?;
             for c in &low_conf {
                 if let Some(id) = c.get("id").and_then(Value::as_str) {
-                    self.storage.update_chunk_state(id, "archived", Some("low_confidence"), &now_iso)?;
+                    self.storage.update_chunk_state(
+                        id,
+                        "archived",
+                        Some("low_confidence"),
+                        &now_iso,
+                    )?;
                     report.archived.push(id.to_string());
                 }
             }
@@ -1647,13 +2103,27 @@ impl KnowledgeBase {
             let rep_sel = self.storage.query_chunks_params(
                 "SELECT id FROM chunks
                  WHERE origin!='spark' AND protected=0 AND state='active'
-                   AND selected_count >= ? AND used_count = 0 AND confidence < ?",
-                rusqlite::params![self.repeat_select_min, self.repeat_select_conf_max],
+                   AND selected_count >= ? AND used_count = 0 AND confidence < ?
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)",
+                rusqlite::params![
+                    self.repeat_select_min,
+                    self.repeat_select_conf_max,
+                    scope_origin,
+                    scope_origin,
+                    scope_skill,
+                    scope_skill
+                ],
             )?;
             for c in &rep_sel {
                 if let Some(id) = c.get("id").and_then(Value::as_str) {
                     if !report.archived.contains(&id.to_string()) {
-                        self.storage.update_chunk_state(id, "archived", Some("repeated_selected_unused"), &now_iso)?;
+                        self.storage.update_chunk_state(
+                            id,
+                            "archived",
+                            Some("repeated_selected_unused"),
+                            &now_iso,
+                        )?;
                         report.archived.push(id.to_string());
                     }
                 }
@@ -1665,13 +2135,26 @@ impl KnowledgeBase {
                 "SELECT id FROM chunks
                  WHERE origin!='spark' AND protected=0 AND state='active'
                    AND used_count = 0 AND selected_count = 0
-                   AND created_at < ?",
-                rusqlite::params![never_used_cutoff],
+                   AND created_at < ?
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)",
+                rusqlite::params![
+                    never_used_cutoff,
+                    scope_origin,
+                    scope_origin,
+                    scope_skill,
+                    scope_skill
+                ],
             )?;
             for c in &never_used {
                 if let Some(id) = c.get("id").and_then(Value::as_str) {
                     if !report.archived.contains(&id.to_string()) {
-                        self.storage.update_chunk_state(id, "archived", Some("never_used"), &now_iso)?;
+                        self.storage.update_chunk_state(
+                            id,
+                            "archived",
+                            Some("never_used"),
+                            &now_iso,
+                        )?;
                         report.archived.push(id.to_string());
                     }
                 }
@@ -1681,7 +2164,7 @@ impl KnowledgeBase {
             let dupes = self.storage.query_chunks(
                 "SELECT content_hash FROM chunks
                  WHERE origin!='spark' AND state IN ('active','pending')
-                 GROUP BY content_hash HAVING COUNT(*) > 1"
+                 GROUP BY content_hash HAVING COUNT(*) > 1",
             )?;
             for d in &dupes {
                 if let Some(h) = d.get("content_hash").and_then(Value::as_str) {
@@ -1697,8 +2180,16 @@ impl KnowledgeBase {
                         if !kept {
                             kept = true; // keep the best
                         } else {
-                            let reason = format!("duplicate:{}", group[0].get("id").and_then(Value::as_str).unwrap_or(""));
-                            self.storage.update_chunk_state(id, "archived", Some(&reason), &now_iso)?;
+                            let reason = format!(
+                                "duplicate:{}",
+                                group[0].get("id").and_then(Value::as_str).unwrap_or("")
+                            );
+                            self.storage.update_chunk_state(
+                                id,
+                                "archived",
+                                Some(&reason),
+                                &now_iso,
+                            )?;
                             report.deduped.push(id.to_string());
                         }
                     }
@@ -1706,23 +2197,35 @@ impl KnowledgeBase {
             }
 
             // ── 5. Decay: confidence time-decay for idle non-spark non-protected active chunks ──
-            let decay_candidates = self.storage.query_chunks(
+            let decay_candidates = self.storage.query_chunks_params(
                 "SELECT id, confidence, last_used_at FROM chunks
                  WHERE origin!='spark' AND protected=0 AND state='active'
-                   AND last_used_at IS NOT NULL"
+                   AND last_used_at IS NOT NULL
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)",
+                rusqlite::params![scope_origin, scope_origin, scope_skill, scope_skill],
             )?;
             for c in &decay_candidates {
-                let id = match c.get("id").and_then(Value::as_str) { Some(v) => v, None => continue };
+                let id = match c.get("id").and_then(Value::as_str) {
+                    Some(v) => v,
+                    None => continue,
+                };
                 let conf = c.get("confidence").and_then(Value::as_f64).unwrap_or(0.5);
-                let last_used = c.get("last_used_at").and_then(Value::as_str).unwrap_or(&now_iso);
+                let last_used = c
+                    .get("last_used_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&now_iso);
                 let days_idle = iso_days_diff(&now_iso, last_used);
-                if days_idle <= 0 { continue; }
+                if days_idle <= 0 {
+                    continue;
+                }
                 let floor = 0.3_f64;
                 let new_conf = floor + (conf - floor) * 0.5_f64.powf(days_idle as f64 / 90.0);
                 let new_conf = new_conf.clamp(floor, 1.0);
                 if (new_conf - conf).abs() > 0.001 {
                     let note = format!("decay:{days_idle}d");
-                    self.storage.update_chunk_confidence(id, new_conf, Some(&note), &now_iso)?;
+                    self.storage
+                        .update_chunk_confidence(id, new_conf, Some(&note), &now_iso)?;
                     report.decayed.push(id.to_string());
                 }
             }
@@ -1733,36 +2236,59 @@ impl KnowledgeBase {
                  WHERE state='pending' AND origin!='spark'
                    AND used_success_count >= ?
                    AND success_trace_ids_count >= 2
-                   AND confidence >= ?",
-                rusqlite::params![self.promote_used_success_min, self.promote_confidence_min],
+                   AND confidence >= ?
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)",
+                rusqlite::params![
+                    self.promote_used_success_min,
+                    self.promote_confidence_min,
+                    scope_origin,
+                    scope_origin,
+                    scope_skill,
+                    scope_skill
+                ],
             )?;
             for c in &promotable {
                 if let Some(id) = c.get("id").and_then(Value::as_str) {
-                    self.storage.update_chunk_state(id, "active", Some("repeated_success"), &now_iso)?;
+                    self.storage.update_chunk_state(
+                        id,
+                        "active",
+                        Some("repeated_success"),
+                        &now_iso,
+                    )?;
                 }
             }
 
             // ── 7. Cycle detection (report only, no auto-fix) ──
-            let all_deps = self.storage.query_chunks(
-                "SELECT src, dst FROM deps WHERE kind='hard'"
-            )?;
+            let all_deps = self
+                .storage
+                .query_chunks("SELECT src, dst FROM deps WHERE kind='hard'")?;
             let cycles = detect_cycles(&all_deps);
             report.cycles = cycles;
 
             self.storage.commit()
         })();
-        if gov_result.is_err() { let _ = self.storage.rollback(); gov_result?; }
+        if gov_result.is_err() {
+            let _ = self.storage.rollback();
+            gov_result?;
+        }
 
         // ── Step 8: purge_old_logs (physical delete of terminal episodic_log rows >30d) ──
         self.storage.begin_immediate()?;
         let purge_cutoff = days_ago(&now_iso, 30);
-        let purge_result = self.storage.conn_execute(
-            "DELETE FROM episodic_log
+        let purge_result = self
+            .storage
+            .conn_execute(
+                "DELETE FROM episodic_log
              WHERE distill_state IN ('distilled','discarded','failed')
                AND ts < ?",
-            rusqlite::params![purge_cutoff],
-        ).and_then(|_| self.storage.commit());
-        if purge_result.is_err() { let _ = self.storage.rollback(); purge_result?; }
+                rusqlite::params![purge_cutoff],
+            )
+            .and_then(|_| self.storage.commit());
+        if purge_result.is_err() {
+            let _ = self.storage.rollback();
+            purge_result?;
+        }
 
         Ok(report)
     }
@@ -1772,13 +2298,34 @@ impl KnowledgeBase {
     // ------------------------------------------------------------------
 
     pub fn inspect(&self) -> Result<Value> {
-        let total: i64 = count_query(&self.storage, "SELECT COUNT(*) FROM chunks WHERE origin!='spark'")?;
-        let active: i64 = count_query(&self.storage, "SELECT COUNT(*) FROM chunks WHERE state='active' AND origin!='spark'")?;
-        let pending: i64 = count_query(&self.storage, "SELECT COUNT(*) FROM chunks WHERE state='pending' AND origin!='spark'")?;
-        let archived: i64 = count_query(&self.storage, "SELECT COUNT(*) FROM chunks WHERE state='archived' AND origin!='spark'")?;
-        let sparks: i64 = count_query(&self.storage, "SELECT COUNT(*) FROM chunks WHERE origin='spark' AND state!='archived'")?;
-        let open_logs: i64 = count_query(&self.storage, "SELECT COUNT(*) FROM episodic_log WHERE distill_state='open'")?;
-        let new_logs: i64 = count_query(&self.storage, "SELECT COUNT(*) FROM episodic_log WHERE distill_state='new'")?;
+        let total: i64 = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM chunks WHERE origin!='spark'",
+        )?;
+        let active: i64 = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM chunks WHERE state='active' AND origin!='spark'",
+        )?;
+        let pending: i64 = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM chunks WHERE state='pending' AND origin!='spark'",
+        )?;
+        let archived: i64 = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM chunks WHERE state='archived' AND origin!='spark'",
+        )?;
+        let sparks: i64 = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM chunks WHERE origin='spark' AND state!='archived'",
+        )?;
+        let open_logs: i64 = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM episodic_log WHERE distill_state='open'",
+        )?;
+        let new_logs: i64 = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM episodic_log WHERE distill_state='new'",
+        )?;
         let embed_rebuild: i64 = count_query(&self.storage,
             "SELECT COUNT(*) FROM chunks WHERE embed_version=0 OR embed_version < (SELECT COALESCE(CAST(value AS INTEGER),1) FROM meta WHERE key='embed_version')")?;
         let schema_version = self.storage.get_meta_or("schema_version", "?");
@@ -1787,35 +2334,52 @@ impl KnowledgeBase {
 
         // Health signal 1: knowledge debt ratio
         // Zombie = active, confidence in [0.4, 0.6], created > 7d ago, non-spark
-        let zombie: i64 = count_query(&self.storage,
+        let zombie: i64 = count_query(
+            &self.storage,
             "SELECT COUNT(*) FROM chunks
              WHERE origin!='spark' AND state='active'
                AND confidence >= 0.4 AND confidence <= 0.6
-               AND created_at < datetime('now','-7 days')")?;
+               AND created_at < datetime('now','-7 days')",
+        )?;
         let debt_numerator = pending + zombie;
         let debt_denominator = active.max(1);
         let debt_ratio = debt_numerator as f64 / debt_denominator as f64;
 
         // Health signal 5: stale screening count
         let screening_cutoff = minutes_ago(&utc_now_iso(), self.screening_timeout_minutes);
-        let stale_screening: i64 = count_query_params(&self.storage,
+        let stale_screening: i64 = count_query_params(
+            &self.storage,
             "SELECT COUNT(*) FROM episodic_log
              WHERE distill_state='screening' AND distill_locked_at < ?",
-            rusqlite::params![screening_cutoff])?;
+            rusqlite::params![screening_cutoff],
+        )?;
 
         // Health signal 4: distill cost estimate from pending logs
         let distill_cost = self.storage.query_chunks(
             "SELECT COALESCE(SUM(distill_prompt_tokens),0) AS pt,
                     COALESCE(SUM(distill_completion_tokens),0) AS ct
              FROM episodic_log
-             WHERE distill_state IN ('distilled','new')"
+             WHERE distill_state IN ('distilled','new')",
         )?;
-        let prompt_tokens = distill_cost.first().and_then(|r| r.get("pt")).and_then(Value::as_i64).unwrap_or(0);
-        let completion_tokens = distill_cost.first().and_then(|r| r.get("ct")).and_then(Value::as_i64).unwrap_or(0);
+        let prompt_tokens = distill_cost
+            .first()
+            .and_then(|r| r.get("pt"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let completion_tokens = distill_cost
+            .first()
+            .and_then(|r| r.get("ct"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
 
         // Health signal 2: sparks that have been recalled often (soft incubation threshold = 5)
-        let spark_threshold: i64 = self.storage.get_meta("curate.soft_mature_threshold")
-            .ok().flatten().and_then(|v| v.parse::<i64>().ok()).unwrap_or(5);
+        let spark_threshold: i64 = self
+            .storage
+            .get_meta("curate.soft_mature_threshold")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(5);
         let recurring_sparks = self.storage.query_chunks_params(
             "SELECT ut.chunk_id, COUNT(*) AS cnt,
                     c.content, c.trigger_desc, c.maturity
@@ -1826,13 +2390,18 @@ impl KnowledgeBase {
              GROUP BY ut.chunk_id HAVING cnt >= ?",
             rusqlite::params![spark_threshold],
         )?;
-        let recurring_spark_ids: Vec<Value> = recurring_sparks.iter().map(|r| json!({
-            "id": r.get("chunk_id").and_then(Value::as_str).unwrap_or(""),
-            "retrieved_count": r.get("cnt").and_then(Value::as_i64).unwrap_or(0),
-            "maturity": r.get("maturity").and_then(Value::as_str).unwrap_or(""),
-            "content_preview": r.get("content").and_then(Value::as_str).unwrap_or("")
-                .chars().take(80).collect::<String>(),
-        })).collect();
+        let recurring_spark_ids: Vec<Value> = recurring_sparks
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.get("chunk_id").and_then(Value::as_str).unwrap_or(""),
+                    "retrieved_count": r.get("cnt").and_then(Value::as_i64).unwrap_or(0),
+                    "maturity": r.get("maturity").and_then(Value::as_str).unwrap_or(""),
+                    "content_preview": r.get("content").and_then(Value::as_str).unwrap_or("")
+                        .chars().take(80).collect::<String>(),
+                })
+            })
+            .collect();
 
         let mut suggestions: Vec<Value> = Vec::new();
         if embed_rebuild > 0 {
@@ -1886,7 +2455,9 @@ impl KnowledgeBase {
     // ------------------------------------------------------------------
 
     pub fn rebuild_embeddings(&self) -> Result<usize> {
-        let meta_version = self.storage.get_meta("embed_version")?
+        let meta_version = self
+            .storage
+            .get_meta("embed_version")?
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(1);
         // Fetch chunks with embed_version=0 (failed writes) or below current meta version.
@@ -1897,10 +2468,19 @@ impl KnowledgeBase {
         )?;
         let mut count = 0;
         for row in &stale {
-            let id = match row.get("id").and_then(Value::as_str) { Some(v) => v, None => continue };
+            let id = match row.get("id").and_then(Value::as_str) {
+                Some(v) => v,
+                None => continue,
+            };
             let content = row.get("content").and_then(Value::as_str).unwrap_or("");
-            let trigger = row.get("trigger_desc").and_then(Value::as_str).unwrap_or(content);
-            let state_reason = row.get("state_reason").and_then(Value::as_str).unwrap_or("");
+            let trigger = row
+                .get("trigger_desc")
+                .and_then(Value::as_str)
+                .unwrap_or(content);
+            let state_reason = row
+                .get("state_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("");
 
             let cvec = match self.embedding.embed_content(content) {
                 Ok(v) => v,
@@ -1913,13 +2493,20 @@ impl KnowledgeBase {
 
             self.storage.begin_immediate()?;
             let r = (|| -> Result<()> {
-                self.storage.insert_vec_content(id, &pack_embedding(&cvec))?;
-                self.storage.insert_vec_trigger(id, &pack_embedding(&tvec))?;
+                self.storage
+                    .insert_vec_content(id, &pack_embedding(&cvec))?;
+                self.storage
+                    .insert_vec_trigger(id, &pack_embedding(&tvec))?;
                 // Restore intended state if encoded in state_reason.
                 let new_reason = if state_reason.starts_with("embedding_pending:target=") {
                     let target_state = state_reason.trim_start_matches("embedding_pending:target=");
                     let now = utc_now_iso();
-                    self.storage.update_chunk_state(id, target_state, Some("embedding_rebuilt"), &now)?;
+                    self.storage.update_chunk_state(
+                        id,
+                        target_state,
+                        Some("embedding_rebuilt"),
+                        &now,
+                    )?;
                     "embedding_rebuilt".to_string()
                 } else {
                     "embedding_rebuilt".to_string()
@@ -1931,7 +2518,11 @@ impl KnowledgeBase {
                 )?;
                 self.storage.commit()
             })();
-            if r.is_err() { let _ = self.storage.rollback(); } else { count += 1; }
+            if r.is_err() {
+                let _ = self.storage.rollback();
+            } else {
+                count += 1;
+            }
         }
         Ok(count)
     }
@@ -1999,7 +2590,11 @@ struct CandidateInfo {
 fn chunk_is_valid_for_recall(chunk: &Value, embed_version: i64) -> bool {
     chunk.get("state").and_then(Value::as_str) != Some("archived")
         && chunk.get("origin").and_then(Value::as_str) != Some("spark")
-        && chunk.get("embed_version").and_then(Value::as_i64).unwrap_or(1) >= embed_version
+        && chunk
+            .get("embed_version")
+            .and_then(Value::as_i64)
+            .unwrap_or(1)
+            >= embed_version
 }
 
 fn anti_trigger_hit(query: &str, anti: &str) -> bool {
@@ -2011,13 +2606,17 @@ fn anti_trigger_hit(query: &str, anti: &str) -> bool {
 }
 
 fn block_cost(block: &[Value]) -> usize {
-    block.iter().map(|b| {
-        b.get("token_count").and_then(Value::as_u64).map(|t| t as usize)
-            .unwrap_or_else(|| {
-                estimate_tokens(b.get("content").and_then(Value::as_str).unwrap_or(""))
-                    .max(100)
-            })
-    }).sum()
+    block
+        .iter()
+        .map(|b| {
+            b.get("token_count")
+                .and_then(Value::as_u64)
+                .map(|t| t as usize)
+                .unwrap_or_else(|| {
+                    estimate_tokens(b.get("content").and_then(Value::as_str).unwrap_or("")).max(100)
+                })
+        })
+        .sum()
 }
 
 fn limit_knowledge(knowledge: Vec<Value>, top: Option<usize>) -> Vec<Value> {
@@ -2030,13 +2629,16 @@ fn limit_knowledge(knowledge: Vec<Value>, top: Option<usize>) -> Vec<Value> {
 
 fn validate_source(source: &str) -> Result<()> {
     if !matches!(source, "sdk" | "cli" | "hook" | "daemon" | "augmented") {
-        return Err(InnateError::InvalidState(format!("invalid event source: {source}")));
+        return Err(InnateError::InvalidState(format!(
+            "invalid event source: {source}"
+        )));
     }
     Ok(())
 }
 
 fn count_query(storage: &Storage, sql: &str) -> Result<i64> {
-    Ok(storage.query_chunks(sql)?
+    Ok(storage
+        .query_chunks(sql)?
         .first()
         .and_then(|r| r.as_object())
         .and_then(|m| m.values().next())
@@ -2045,7 +2647,8 @@ fn count_query(storage: &Storage, sql: &str) -> Result<i64> {
 }
 
 fn count_query_params<P: rusqlite::Params>(storage: &Storage, sql: &str, p: P) -> Result<i64> {
-    Ok(storage.query_chunks_params(sql, p)?
+    Ok(storage
+        .query_chunks_params(sql, p)?
         .first()
         .and_then(|r| r.as_object())
         .and_then(|m| m.values().next())
@@ -2088,8 +2691,16 @@ fn detect_cycles(deps: &[Value]) -> Vec<Vec<String>> {
     use std::collections::HashMap;
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     for d in deps {
-        let src = d.get("src").and_then(Value::as_str).unwrap_or("").to_string();
-        let dst = d.get("dst").and_then(Value::as_str).unwrap_or("").to_string();
+        let src = d
+            .get("src")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let dst = d
+            .get("dst")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if !src.is_empty() && !dst.is_empty() {
             adj.entry(src).or_default().push(dst);
         }
@@ -2113,7 +2724,9 @@ fn detect_cycles(deps: &[Value]) -> Vec<Vec<String>> {
             cycles.push(path[start..].to_vec());
             return;
         }
-        if visited.contains(node) { return; }
+        if visited.contains(node) {
+            return;
+        }
         visited.insert(node.to_string());
         on_stack.insert(node.to_string());
         path.push(node.to_string());
@@ -2128,7 +2741,14 @@ fn detect_cycles(deps: &[Value]) -> Vec<Vec<String>> {
 
     for node in nodes {
         let mut path = vec![];
-        dfs(&node, &adj, &mut visited, &mut on_stack, &mut path, &mut cycles);
+        dfs(
+            &node,
+            &adj,
+            &mut visited,
+            &mut on_stack,
+            &mut path,
+            &mut cycles,
+        );
     }
     cycles
 }

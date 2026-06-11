@@ -11,11 +11,11 @@ use crate::errors::{InnateError, Result};
 
 // Embedded migration SQL ordered from lowest to highest target version.
 const MIGRATIONS: &[(&str, &str, &str)] = &[
-    ("4.0", "4.1",   include_str!("migrations/4.0_to_4.1.sql")),
-    ("4.1", "4.2",   include_str!("migrations/4.1_to_4.2.sql")),
-    ("4.2", "4.3",   include_str!("migrations/4.2_to_4.3.sql")),
-    ("4.3", "4.4",   include_str!("migrations/4.3_to_4.4.sql")),
-    ("4.4", "4.5",   include_str!("migrations/4.4_to_4.5.sql")),
+    ("4.0", "4.1", include_str!("migrations/4.0_to_4.1.sql")),
+    ("4.1", "4.2", include_str!("migrations/4.1_to_4.2.sql")),
+    ("4.2", "4.3", include_str!("migrations/4.2_to_4.3.sql")),
+    ("4.3", "4.4", include_str!("migrations/4.3_to_4.4.sql")),
+    ("4.4", "4.5", include_str!("migrations/4.4_to_4.5.sql")),
     ("4.5", "4.5.1", include_str!("migrations/4.5_to_4.5.1.sql")),
 ];
 
@@ -92,7 +92,11 @@ fn schema_version(conn: &Connection) -> Result<String> {
     }
 
     let ver: Option<String> = conn
-        .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0))
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
         .optional()?;
 
     ver.ok_or_else(|| InnateError::Other("meta table missing schema_version".into()))

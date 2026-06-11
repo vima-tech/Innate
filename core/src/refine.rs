@@ -1,6 +1,6 @@
-use serde_json::Value;
 use crate::errors::Result;
 use crate::utils::{sanitize, SanitizeAction};
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // Sanitizer — injectable content sanitizer (§二·六)
@@ -86,7 +86,8 @@ impl Distiller for HeuristicDistiller {
                 if !t.is_empty() {
                     // trigger_desc: prefer the recall query (it caused this log), else first
                     // non-trivial line of content — gives the distilled chunk a useful retrieval signal.
-                    let trigger_desc = entry["query"].as_str()
+                    let trigger_desc = entry["query"]
+                        .as_str()
                         .map(|q| q.trim().chars().take(80).collect::<String>())
                         .filter(|q| !q.is_empty())
                         .or_else(|| {

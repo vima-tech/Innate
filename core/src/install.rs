@@ -30,23 +30,38 @@ fn tty() -> bool {
     #[cfg(unix)]
     unsafe {
         use std::os::unix::io::AsRawFd;
-        libc::isatty(io::stdout().as_raw_fd()) == 1
-            && std::env::var("NO_COLOR").is_err()
+        libc::isatty(io::stdout().as_raw_fd()) == 1 && std::env::var("NO_COLOR").is_err()
     }
     #[cfg(not(unix))]
     false
 }
 
 fn c(s: &str, code: u8) -> String {
-    if tty() { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_string() }
+    if tty() {
+        format!("\x1b[{code}m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
 }
 
-fn green(s: &str)  -> String { c(s, 32) }
-fn gray(s: &str)   -> String { c(s, 90) }
-fn bold(s: &str)   -> String { c(s, 1)  }
-fn cyan(s: &str)   -> String { c(s, 36) }
-fn yellow(s: &str) -> String { c(s, 33) }
-fn dim(s: &str)    -> String { c(s, 2)  }
+fn green(s: &str) -> String {
+    c(s, 32)
+}
+fn gray(s: &str) -> String {
+    c(s, 90)
+}
+fn bold(s: &str) -> String {
+    c(s, 1)
+}
+fn cyan(s: &str) -> String {
+    c(s, 36)
+}
+fn yellow(s: &str) -> String {
+    c(s, 33)
+}
+fn dim(s: &str) -> String {
+    c(s, 2)
+}
 
 /// `┌  title`
 fn box_open(title: &str) {
@@ -61,19 +76,29 @@ fn box_close(msg: &str) {
 }
 
 /// Gray vertical bar separator
-fn sep() { println!("{}", gray("│")); }
+fn sep() {
+    println!("{}", gray("│"));
+}
 
 /// `◇  question`
-fn question(q: &str) { println!("{}", cyan(&format!("◇  {q}"))); }
+fn question(q: &str) {
+    println!("{}", cyan(&format!("◇  {q}")));
+}
 
 /// `│  text`
-fn info(text: &str) { println!("{}  {text}", gray("│")); }
+fn info(text: &str) {
+    println!("{}  {text}", gray("│"));
+}
 
 /// `◆  text`  (result / completed step)
-fn result_line(text: &str) { println!("{}  {text}", green("◆")); }
+fn result_line(text: &str) {
+    println!("{}  {text}", green("◆"));
+}
 
 /// `◆  text` in yellow (warning / unchanged)
-fn warn_line(text: &str) { println!("{}  {}", yellow("◆"), text); }
+fn warn_line(text: &str) {
+    println!("{}  {}", yellow("◆"), text);
+}
 
 // ── Interactive prompts ───────────────────────────────────────────────────────
 
@@ -96,7 +121,11 @@ fn prompt_multi_select(prompt: &str, options: &[(&str, bool)]) -> Vec<bool> {
 
     loop {
         for (i, (name, _)) in options.iter().enumerate() {
-            let mark = if selected[i] { green("✓") } else { gray("✗") };
+            let mark = if selected[i] {
+                green("✓")
+            } else {
+                gray("✗")
+            };
             info(&format!("[{}] {mark} {name}", i + 1));
         }
         sep();
@@ -105,7 +134,9 @@ fn prompt_multi_select(prompt: &str, options: &[(&str, bool)]) -> Vec<bool> {
         io::stdout().flush().ok();
 
         let line = read_line().trim().to_string();
-        if line.is_empty() { break; }
+        if line.is_empty() {
+            break;
+        }
 
         if let Ok(n) = line.parse::<usize>() {
             if n >= 1 && n <= options.len() {
@@ -123,11 +154,17 @@ fn prompt_multi_select(prompt: &str, options: &[(&str, bool)]) -> Vec<bool> {
     }
 
     // Print the confirmed answer line.
-    let chosen: Vec<&str> = options.iter().zip(selected.iter())
+    let chosen: Vec<&str> = options
+        .iter()
+        .zip(selected.iter())
         .filter(|(_, &s)| s)
         .map(|((name, _), _)| *name)
         .collect();
-    let answer = if chosen.is_empty() { "none".to_string() } else { chosen.join(", ") };
+    let answer = if chosen.is_empty() {
+        "none".to_string()
+    } else {
+        chosen.join(", ")
+    };
     info(&green(&answer));
     sep();
 
@@ -163,7 +200,11 @@ fn prompt_select(prompt: &str, options: &[&str]) -> usize {
     io::stdout().flush().ok();
 
     let line = read_line().trim().to_string();
-    let idx = line.parse::<usize>().unwrap_or(1).saturating_sub(1).min(options.len() - 1);
+    let idx = line
+        .parse::<usize>()
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .min(options.len() - 1);
     info(&green(options[idx]));
     sep();
     idx
@@ -176,7 +217,9 @@ fn read_line() -> String {
     // In pipe/non-TTY mode stdin has no echo, so we need an explicit newline
     // to move past the ▶ prompt before printing the answer.
     #[cfg(unix)]
-    if unsafe { libc::isatty(0) } == 0 { println!(); }
+    if unsafe { libc::isatty(0) } == 0 {
+        println!();
+    }
     line
 }
 
@@ -184,10 +227,10 @@ fn read_line() -> String {
 
 #[derive(Debug)]
 struct Agent {
-    id:       &'static str,
-    label:    String,      // display name with "(detected)" suffix if found
+    id: &'static str,
+    label: String, // display name with "(detected)" suffix if found
     detected: bool,
-    config:   PathBuf,
+    config: PathBuf,
 }
 
 fn detect_agents(global: bool) -> Vec<Agent> {
@@ -196,10 +239,13 @@ fn detect_agents(global: bool) -> Vec<Agent> {
     // Claude Code: global = ~/.claude/settings.json, project = .claude/settings.json
     let claude_global = home.join(".claude").join("settings.json");
     let claude_project = PathBuf::from(".claude").join("settings.json");
-    let claude_config = if global { claude_global.clone() } else { claude_project };
-    let claude_detected = claude_global.exists()
-        || home.join(".claude").exists()
-        || which_binary("claude").is_some();
+    let claude_config = if global {
+        claude_global.clone()
+    } else {
+        claude_project
+    };
+    let claude_detected =
+        claude_global.exists() || home.join(".claude").exists() || which_binary("claude").is_some();
 
     // Codex CLI: always global
     let codex_config = home.join(".codex").join("config.toml");
@@ -247,7 +293,11 @@ fn which_binary(name: &str) -> Option<PathBuf> {
     std::env::var("PATH").ok().and_then(|path| {
         path.split(':').find_map(|dir| {
             let p = PathBuf::from(dir).join(name);
-            if p.exists() { Some(p) } else { None }
+            if p.exists() {
+                Some(p)
+            } else {
+                None
+            }
         })
     })
 }
@@ -262,22 +312,20 @@ enum ConfigStatus {
     Error(String),
 }
 
-fn configure_claude(
-    agent: &Agent,
-    binary: &Path,
-    auto_allow: bool,
-) -> ConfigStatus {
+fn configure_claude(agent: &Agent, binary: &Path, auto_allow: bool) -> ConfigStatus {
     let path = &agent.config;
     let mut settings: Value = read_json(path).unwrap_or(json!({}));
 
     let binary_str = binary.to_string_lossy().to_string();
 
     // Check current state
-    let existing_cmd = settings.pointer("/mcpServers/innate/command")
+    let existing_cmd = settings
+        .pointer("/mcpServers/innate/command")
         .and_then(Value::as_str)
         .unwrap_or("");
     let already_allowed = !auto_allow
-        || settings.pointer("/permissions/allow")
+        || settings
+            .pointer("/permissions/allow")
             .and_then(Value::as_array)
             .map(|arr| arr.iter().any(|v| v.as_str() == Some("mcp__innate__*")))
             .unwrap_or(false);
@@ -287,20 +335,32 @@ fn configure_claude(
     }
 
     // Set mcpServers.innate
-    settings.as_object_mut().unwrap()
-        .entry("mcpServers").or_insert(json!({}))
-        .as_object_mut().unwrap()
-        .insert("innate".to_string(), json!({
-            "command": binary_str,
-            "args": ["mcp"]
-        }));
+    settings
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert(json!({}))
+        .as_object_mut()
+        .unwrap()
+        .insert(
+            "innate".to_string(),
+            json!({
+                "command": binary_str,
+                "args": ["mcp"]
+            }),
+        );
 
     // Set permissions.allow
     if auto_allow {
-        let allow = settings.as_object_mut().unwrap()
-            .entry("permissions").or_insert(json!({}))
-            .as_object_mut().unwrap()
-            .entry("allow").or_insert(json!([]));
+        let allow = settings
+            .as_object_mut()
+            .unwrap()
+            .entry("permissions")
+            .or_insert(json!({}))
+            .as_object_mut()
+            .unwrap()
+            .entry("allow")
+            .or_insert(json!([]));
         let arr = allow.as_array_mut().unwrap();
         let pat = "mcp__innate__*";
         if !arr.iter().any(|v| v.as_str() == Some(pat)) {
@@ -314,16 +374,10 @@ fn configure_claude(
     }
 }
 
-fn configure_codex(
-    agent: &Agent,
-    binary: &Path,
-    auto_allow: bool,
-) -> ConfigStatus {
+fn configure_codex(agent: &Agent, binary: &Path, auto_allow: bool) -> ConfigStatus {
     let path = &agent.config;
     if !path.parent().map(|p| p.exists()).unwrap_or(false) {
-        return ConfigStatus::Skipped(format!(
-            "~/.codex/ not found — install Codex CLI first"
-        ));
+        return ConfigStatus::Skipped("~/.codex/ not found — install Codex CLI first".to_string());
     }
 
     let existing = std::fs::read_to_string(path).unwrap_or_default();
@@ -338,9 +392,8 @@ fn configure_codex(
         }
     }
 
-    let mut addition = format!(
-        "\n[mcp_servers.innate]\ncommand = \"{binary_str}\"\nargs = [\"mcp\"]\n"
-    );
+    let mut addition =
+        format!("\n[mcp_servers.innate]\ncommand = \"{binary_str}\"\nargs = [\"mcp\"]\n");
 
     if auto_allow {
         for tool in INNATE_TOOLS {
@@ -365,11 +418,7 @@ fn configure_codex(
     }
 }
 
-fn configure_opencode(
-    agent: &Agent,
-    binary: &Path,
-    _auto_allow: bool,
-) -> ConfigStatus {
+fn configure_opencode(agent: &Agent, binary: &Path, _auto_allow: bool) -> ConfigStatus {
     let path = &agent.config;
     if !path.exists() {
         return ConfigStatus::Skipped("opencode.jsonc not found".into());
@@ -390,21 +439,31 @@ fn configure_opencode(
 
     // Check if already configured
     if let Some(existing_cmd) = config.pointer("/mcp/innate/command") {
-        let already = existing_cmd.as_array()
+        let already = existing_cmd
+            .as_array()
             .and_then(|a| a.first())
             .and_then(Value::as_str)
             == Some(&binary_str);
-        if already { return ConfigStatus::Unchanged(path.clone()); }
+        if already {
+            return ConfigStatus::Unchanged(path.clone());
+        }
     }
 
-    config.as_object_mut().unwrap()
-        .entry("mcp").or_insert(json!({}))
-        .as_object_mut().unwrap()
-        .insert("innate".to_string(), json!({
-            "type": "local",
-            "command": [binary_str, "mcp"],
-            "enabled": true
-        }));
+    config
+        .as_object_mut()
+        .unwrap()
+        .entry("mcp")
+        .or_insert(json!({}))
+        .as_object_mut()
+        .unwrap()
+        .insert(
+            "innate".to_string(),
+            json!({
+                "type": "local",
+                "command": [binary_str, "mcp"],
+                "enabled": true
+            }),
+        );
 
     match write_json(path, &config) {
         Ok(()) => ConfigStatus::Updated(path.clone()),
@@ -460,14 +519,13 @@ pub fn run_install() -> anyhow::Result<()> {
 
     // ── 2. Agent selection ─────────────────────────────────────────────────
     let agents = detect_agents(global);
-    let options: Vec<(&str, bool)> = agents.iter()
+    let options: Vec<(&str, bool)> = agents
+        .iter()
         .map(|a| (a.label.as_str(), a.detected))
         .collect();
-    let selected = prompt_multi_select(
-        "Which agents should Innate configure?",
-        &options,
-    );
-    let chosen_agents: Vec<&Agent> = agents.iter()
+    let selected = prompt_multi_select("Which agents should Innate configure?", &options);
+    let chosen_agents: Vec<&Agent> = agents
+        .iter()
         .zip(selected.iter())
         .filter(|(_, &s)| s)
         .map(|(a, _)| a)
@@ -498,7 +556,7 @@ pub fn run_install() -> anyhow::Result<()> {
                     if !path_has_local_bin() {
                         warn_line(&yellow(
                             "Add ~/.local/bin to PATH in your shell profile:\
-                            \n│    export PATH=\"$HOME/.local/bin:$PATH\""
+                            \n│    export PATH=\"$HOME/.local/bin:$PATH\"",
                         ));
                     }
                     sep();
@@ -525,18 +583,18 @@ pub fn run_install() -> anyhow::Result<()> {
     // ── 5. Apply configs ───────────────────────────────────────────────────
     for agent in &chosen_agents {
         let status = match agent.id {
-            "claude"   => configure_claude(agent, &binary_path, auto_allow),
-            "codex"    => configure_codex(agent, &binary_path, auto_allow),
+            "claude" => configure_claude(agent, &binary_path, auto_allow),
+            "codex" => configure_codex(agent, &binary_path, auto_allow),
             "opencode" => configure_opencode(agent, &binary_path, auto_allow),
-            _          => ConfigStatus::Skipped("unknown agent".into()),
+            _ => ConfigStatus::Skipped("unknown agent".into()),
         };
 
         match &status {
             ConfigStatus::Updated(p) => {
                 result_line(&format!(
-                    "{}: {}",
+                    "{}: Updated {}",
                     bold(agent.id),
-                    format!("Updated {}", gray(&tilde_path(p)))
+                    gray(&tilde_path(p))
                 ));
             }
             ConfigStatus::Unchanged(p) => {
@@ -554,11 +612,7 @@ pub fn run_install() -> anyhow::Result<()> {
                 ));
             }
             ConfigStatus::Error(e) => {
-                warn_line(&format!(
-                    "{}: {}",
-                    bold(agent.id),
-                    format!("\x1b[31mError — {e}\x1b[0m")
-                ));
+                warn_line(&format!("{}: \x1b[31mError — {e}\x1b[0m", bold(agent.id)));
             }
         }
     }
@@ -570,16 +624,18 @@ pub fn run_install() -> anyhow::Result<()> {
     // Bottom dashes = 28 + 2 = 30.
     const INNER: usize = 28;
     let bar = gray("│");
-    let qs_top = format!("{}  Quick start {}{}",
+    let qs_top = format!(
+        "{}  Quick start {}{}",
         cyan("◇"),
         gray(&"─".repeat(INNER - 12)),
-        gray("╮"));
+        gray("╮")
+    );
     let qs_row = |s: &str| -> String {
         let pad = INNER.saturating_sub(s.chars().count());
         format!("{bar}  {s}{}{bar}", " ".repeat(pad))
     };
     let qs_empty = qs_row("");
-    let qs_sep   = format!("{}{}╯", gray("├"), gray(&"─".repeat(INNER + 2)));
+    let qs_sep = format!("{}{}╯", gray("├"), gray(&"─".repeat(INNER + 2)));
 
     println!("{qs_top}");
     println!("{qs_empty}");
@@ -630,19 +686,36 @@ fn strip_jsonc_comments(s: &str) -> String {
     let mut escape = false;
 
     while let Some(c) = chars.next() {
-        if escape { out.push(c); escape = false; continue; }
+        if escape {
+            out.push(c);
+            escape = false;
+            continue;
+        }
         if in_str {
-            if c == '\\' { escape = true; out.push(c); continue; }
-            if c == '"' { in_str = false; }
+            if c == '\\' {
+                escape = true;
+                out.push(c);
+                continue;
+            }
+            if c == '"' {
+                in_str = false;
+            }
             out.push(c);
             continue;
         }
-        if c == '"' { in_str = true; out.push(c); continue; }
+        if c == '"' {
+            in_str = true;
+            out.push(c);
+            continue;
+        }
         if c == '/' {
             match chars.peek() {
                 Some('/') => {
-                    while let Some(nc) = chars.next() {
-                        if nc == '\n' { out.push('\n'); break; }
+                    for nc in chars.by_ref() {
+                        if nc == '\n' {
+                            out.push('\n');
+                            break;
+                        }
                     }
                     continue;
                 }
