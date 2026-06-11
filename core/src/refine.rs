@@ -84,9 +84,20 @@ impl Distiller for HeuristicDistiller {
             if let Some(t) = text {
                 let t = t.trim();
                 if !t.is_empty() {
+                    // trigger_desc: prefer the recall query (it caused this log), else first
+                    // non-trivial line of content — gives the distilled chunk a useful retrieval signal.
+                    let trigger_desc = entry["query"].as_str()
+                        .map(|q| q.trim().chars().take(80).collect::<String>())
+                        .filter(|q| !q.is_empty())
+                        .or_else(|| {
+                            t.lines()
+                                .map(str::trim)
+                                .find(|l| l.len() > 10)
+                                .map(|l| l.chars().take(80).collect())
+                        });
                     out.push(DistilledChunk {
                         content: t.to_string(),
-                        trigger_desc: None,
+                        trigger_desc,
                         anti_trigger_desc: None,
                         source_log_id: id,
                         nomination: entry["nomination"].as_str().map(str::to_string),

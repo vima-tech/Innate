@@ -95,12 +95,92 @@ impl Storage {
                 Ok(())
             }
             std::cmp::Ordering::Less => {
-                Err(InnateError::Other(format!(
-                    "Database schema {current} is older than {EXPECTED_SCHEMA_VERSION}; \
-                     run `innate migrate` to upgrade."
-                )))
+                self.run_migrations(&current)
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Migrations — applied when db schema < EXPECTED_SCHEMA_VERSION
+    // ------------------------------------------------------------------
+
+    fn run_migrations(&self, from: &str) -> Result<()> {
+        let from_v = ver_tuple(from);
+
+        if from_v < ver_tuple("4.5.1") {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let r = (|| -> Result<()> {
+                // chunks — new columns added in 4.x → 4.5.1
+                for col in &[
+                    "skill_name TEXT",
+                    "maturity TEXT",
+                    "related_ids TEXT",
+                    "state_reason TEXT",
+                    "state_updated_at TEXT",
+                    "confidence_reason TEXT",
+                    "selected_count INTEGER NOT NULL DEFAULT 0",
+                    "used_count INTEGER NOT NULL DEFAULT 0",
+                    "used_success_count INTEGER NOT NULL DEFAULT 0",
+                    "success_trace_ids_count INTEGER NOT NULL DEFAULT 0",
+                    "last_success_at TEXT",
+                    "last_agg_ts TEXT",
+                    "embed_version INTEGER NOT NULL DEFAULT 1",
+                ] {
+                    try_add_column(&self.conn, "chunks", col)?;
+                }
+
+                // episodic_log — new columns
+                for col in &[
+                    "nomination TEXT",
+                    "priority INTEGER NOT NULL DEFAULT 0",
+                    "distill_note TEXT",
+                    "distill_run_id TEXT",
+                    "distill_locked_at TEXT",
+                    "distill_prompt_tokens INTEGER",
+                    "distill_completion_tokens INTEGER",
+                ] {
+                    try_add_column(&self.conn, "episodic_log", col)?;
+                }
+
+                // usage_trace — new columns
+                for col in &["refine_mode TEXT", "tokens INTEGER"] {
+                    try_add_column(&self.conn, "usage_trace", col)?;
+                }
+
+                // New tables (IF NOT EXISTS — safe to re-run)
+                self.conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS invalidated_hashes (
+                         content_hash TEXT PRIMARY KEY, reason TEXT, ts TEXT NOT NULL);
+                     CREATE TABLE IF NOT EXISTS vec_content (
+                         chunk_id TEXT PRIMARY KEY, embedding BLOB NOT NULL);
+                     CREATE TABLE IF NOT EXISTS vec_trigger (
+                         chunk_id TEXT PRIMARY KEY, embedding BLOB NOT NULL);
+                     CREATE TABLE IF NOT EXISTS deps (
+                         src TEXT NOT NULL, dst TEXT NOT NULL,
+                         kind TEXT NOT NULL DEFAULT 'hard',
+                         dst_lib TEXT, dst_ref TEXT,
+                         PRIMARY KEY (src, dst, kind));
+                     CREATE TABLE IF NOT EXISTS chunk_success_traces (
+                         chunk_id TEXT NOT NULL, trace_id TEXT NOT NULL,
+                         ts TEXT NOT NULL, PRIMARY KEY (chunk_id, trace_id));
+                     CREATE INDEX IF NOT EXISTS idx_chunks_embed_v ON chunks(embed_version);
+                     CREATE INDEX IF NOT EXISTS idx_deps_src ON deps(src);
+                     CREATE INDEX IF NOT EXISTS idx_deps_dst ON deps(dst);
+                     CREATE INDEX IF NOT EXISTS idx_cst_chunk ON chunk_success_traces(chunk_id);",
+                )?;
+
+                // Bump schema_version
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+                    params![EXPECTED_SCHEMA_VERSION],
+                )?;
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            })();
+            if r.is_err() { let _ = self.conn.execute_batch("ROLLBACK"); }
+            r?;
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -625,6 +705,17 @@ fn configure_pragmas(conn: &Connection) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Try to add a column; silently succeed if it already exists.
+fn try_add_column(conn: &Connection, table: &str, col_def: &str) -> Result<()> {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {col_def}");
+    match conn.execute_batch(&sql) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+            if msg.contains("duplicate column") => Ok(()),
+        Err(e) => Err(InnateError::Db(e)),
+    }
 }
 
 fn ver_tuple(v: &str) -> (u32, u32, u32) {
