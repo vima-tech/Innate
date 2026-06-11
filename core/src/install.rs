@@ -239,8 +239,8 @@ struct Agent {
 fn detect_agents(global: bool) -> Vec<Agent> {
     let home = home_dir();
 
-    // Claude Code: global = ~/.claude/settings.json, project = .claude/settings.json
-    let claude_global = home.join(".claude").join("settings.json");
+    // Claude Code: global = ~/.claude.json (User MCPs), project = .claude/settings.json
+    let claude_global = home.join(".claude.json");
     let claude_project = PathBuf::from(".claude").join("settings.json");
     let claude_config = if global {
         claude_global.clone()
@@ -357,6 +357,7 @@ fn configure_claude(agent: &Agent, binary: &Path, auto_allow: bool) -> ConfigSta
         .insert(
             "innate".to_string(),
             json!({
+                "type": "stdio",
                 "command": binary_str,
                 "args": ["mcp"]
             }),
@@ -765,11 +766,14 @@ pub fn run_uninstall(yes: bool, purge_data: bool) -> anyhow::Result<()> {
             ));
 
     // ── 3. Remove agent configs ────────────────────────────────────────────
-    let global_claude = home_dir().join(".claude").join("settings.json");
+    let global_claude = home_dir().join(".claude.json");
+    // Also clean up the old incorrect path for users who installed with older versions.
+    let global_claude_legacy = home_dir().join(".claude").join("settings.json");
     let project_claude = PathBuf::from(".claude").join("settings.json");
 
     for (label, path) in &[
         ("claude (global)", global_claude.as_path()),
+        ("claude (global, legacy)", global_claude_legacy.as_path()),
         ("claude (project)", project_claude.as_path()),
     ] {
         match remove_claude_config(path) {
