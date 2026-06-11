@@ -1,5 +1,38 @@
 use serde_json::Value;
 use crate::errors::Result;
+use crate::utils::{sanitize, SanitizeAction};
+
+// ---------------------------------------------------------------------------
+// Sanitizer — injectable content sanitizer (§二·六)
+// ---------------------------------------------------------------------------
+
+/// Replaceable sanitizer. Inject via `KnowledgeBase::open_with`.
+/// Default: `DefaultSanitizer` (wraps built-in heuristics).
+pub trait Sanitizer: Send + Sync {
+    fn sanitize(&self, content: &str) -> (String, SanitizeAction);
+}
+
+/// Built-in sanitizer — wraps `utils::sanitize()`.
+pub struct DefaultSanitizer;
+
+impl Sanitizer for DefaultSanitizer {
+    fn sanitize(&self, content: &str) -> (String, SanitizeAction) {
+        sanitize(content)
+    }
+}
+
+/// No-op sanitizer — passes content through unchanged (use to disable sanitization).
+pub struct NoopSanitizer;
+
+impl Sanitizer for NoopSanitizer {
+    fn sanitize(&self, content: &str) -> (String, SanitizeAction) {
+        (content.to_string(), SanitizeAction::Allow)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Refiner — online trim / adapt
+// ---------------------------------------------------------------------------
 
 /// Online refiner — trims or adapts recalled chunks.
 pub trait Refiner: Send + Sync {

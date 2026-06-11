@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .errors import OutcomeConflictError
+
 
 def _binary() -> str:
     return os.environ.get("INNATE_BIN", "innate")
@@ -36,7 +38,10 @@ def _run(*args: str, check: bool = True) -> dict[str, Any]:
             "cargo install --path <repo>/innate"
         ) from None
     if result.returncode != 0:
-        raise RuntimeError(f"innate error: {result.stderr.strip()}")
+        stderr = result.stderr.strip()
+        if "outcome_conflict" in stderr or "OutcomeConflict" in stderr:
+            raise OutcomeConflictError(stderr)
+        raise RuntimeError(f"innate error: {stderr}")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError:

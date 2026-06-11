@@ -617,6 +617,13 @@ fn configure_pragmas(conn: &Connection) -> Result<()> {
          PRAGMA foreign_keys=ON;
          PRAGMA synchronous=NORMAL;",
     )?;
+    // Validate WAL mode was accepted (some VFS/filesystems silently downgrade).
+    let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+    if mode != "wal" {
+        return Err(crate::errors::InnateError::Other(format!(
+            "WAL mode required but got '{mode}'; check filesystem support"
+        )));
+    }
     Ok(())
 }
 
