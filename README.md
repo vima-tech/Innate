@@ -25,7 +25,7 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 
 ```bash
 # 从源码编译
-cd innate-rs && cargo build --release
+cd innate && cargo build --release
 cp target/release/innate ~/.local/bin/   # 加入 PATH
 
 # 验证
@@ -72,7 +72,7 @@ npm install @innate/sdk  # 或 npm install ./sdks/typescript/
 1. 编译并安装 Rust 二进制:
 
 ```bash
-cd innate-rs && cargo build --release
+cd innate && cargo build --release
 cp target/release/innate ~/.local/bin/
 ```
 
@@ -273,7 +273,7 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 
 ```
 Innate System
-├── Rust 核心 (innate-rs/)
+├── Rust 核心 (innate/)
 │   ├── KnowledgeBase (lib)     8 类 Public API, SQLite + 纯 Rust 余弦相似度
 │   ├── CLI (innate <cmd>)      clap 薄封装, 参数解析 → KnowledgeBase 调用
 │   └── MCP Server (innate mcp) JSON-RPC 2.0 over stdio, 13 个 MCP 工具
@@ -329,13 +329,13 @@ Innate System
 
 ```bash
 # 编译
-cd innate-rs && cargo build --release
+cd innate && cargo build --release
 
 # 运行全量测试
-cd innate-rs && cargo test
+cd innate && cargo test
 
 # 运行单个测试
-cd innate-rs && cargo test test_add_and_recall
+cd innate && cargo test test_add_and_recall
 
 # 检视默认知识库
 innate inspect

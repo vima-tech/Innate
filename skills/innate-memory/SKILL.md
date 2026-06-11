@@ -11,7 +11,7 @@ metadata:
   version: "0.2.0"
   architecture: mcp
 compatibility: >
-  Requires `innate` binary (Rust). Install: `cargo build --release` from the innate-rs directory.
+  Requires `innate` binary (Rust). Install: `cargo build --release` from the innate directory.
   Configure as MCP server (recommended) or use CLI directly.
 ---
 
