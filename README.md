@@ -14,7 +14,7 @@ Innate does not manage *declarative memory* ("what the world looks like / user p
 ### One-line install (Linux / macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | sh
 ```
 
 Downloads the pre-built binary for your platform, verifies the checksum, places it in `~/.local/bin`, and runs `innate install` to configure agent integration — all in one step.
@@ -23,13 +23,13 @@ Options:
 
 ```bash
 # Pin a specific version
-curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | INNATE_VERSION=0.1.5 sh
+curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | INNATE_VERSION=0.1.5 sh
 
 # Skip agent setup (binary only)
-curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | NO_INNATE_SETUP=1 sh
+curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | NO_INNATE_SETUP=1 sh
 
 # Custom install directory
-curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | INNATE_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | INNATE_DIR=/usr/local/bin sh
 ```
 
 ### Other install methods
@@ -70,7 +70,7 @@ Detects Claude Code, Codex CLI, and opencode automatically.
 Paste the following prompt into Claude Code (or any agent with shell access):
 
 ```
-Install Innate by running: curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
+Install Innate by running: curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | sh
 This downloads the binary, verifies the checksum, and configures the MCP server and agent skill automatically.
 Verify with `innate inspect` when done.
 ```
