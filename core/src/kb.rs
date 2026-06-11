@@ -653,13 +653,13 @@ impl KnowledgeBase {
             // feedback
             if let Some(ups) = feedback_up {
                 for cid in ups {
-                    self.update_confidence(cid, 1.0, 1.0, "user_up", &now)?;
+                    self.update_confidence(cid, 1.0, 1.0, "user_up", &now, true)?;
                     self.storage.update_chunk_last_used(cid, &now)?;
                 }
             }
             if let Some(downs) = feedback_down {
                 for cid in downs {
-                    self.update_confidence(cid, 0.0, 1.0, "user_down", &now)?;
+                    self.update_confidence(cid, 0.0, 1.0, "user_down", &now, true)?;
                 }
             }
 
@@ -713,9 +713,9 @@ impl KnowledgeBase {
             (0.0, 0.15, "task_fail")
         };
         for cid in &used_set {
-            self.update_confidence(cid, target, strength, reason, now)?;
+            self.update_confidence(cid, target, strength, reason, now, false)?;
         }
-        // selected but not used: very weak downgrade
+        // selected but not used: very weak downgrade (implicit)
         let selected_rows = self.storage.query_chunks_params(
             "SELECT chunk_id FROM usage_trace WHERE trace_id=? AND event='selected' AND chunk_id IS NOT NULL",
             rusqlite::params![trace_id],
@@ -723,13 +723,16 @@ impl KnowledgeBase {
         for row in selected_rows {
             if let Some(cid) = row.get("chunk_id").and_then(Value::as_str) {
                 if !used_set.contains(cid) {
-                    self.update_confidence(cid, 0.3, 0.1, "selected_unused", now)?;
+                    self.update_confidence(cid, 0.3, 0.1, "selected_unused", now, false)?;
                 }
             }
         }
         Ok(())
     }
 
+    /// Update confidence via EMA.
+    /// `explicit=true` → user_up/user_down/judge signals; applies recency_w (κ=0.5, W=14d).
+    /// `explicit=false` → implicit/agent signals; recency_w ≡ 1.
     fn update_confidence(
         &self,
         chunk_id: &str,
@@ -737,6 +740,7 @@ impl KnowledgeBase {
         strength: f64,
         reason: &str,
         now: &str,
+        explicit: bool,
     ) -> Result<()> {
         let chunk = match self.storage.get_chunk(chunk_id)? {
             Some(c) => c,
@@ -745,9 +749,22 @@ impl KnowledgeBase {
         if chunk.get("origin").and_then(Value::as_str) == Some("spark") {
             return Ok(());
         }
-        let alpha = 0.2_f64;
         let conf = chunk.get("confidence").and_then(Value::as_f64).unwrap_or(0.5);
-        let effective_alpha = alpha * strength;
+
+        // §二·五B v3.8: recency_w only for explicit signals.
+        let recency_w = if explicit {
+            const KAPPA: f64 = 0.5;
+            const W_DAYS: f64 = 14.0;
+            let gap_days = chunk.get("last_used_at").and_then(Value::as_str)
+                .map(|t| iso_days_diff(now, t) as f64)
+                .unwrap_or(0.0);
+            1.0 + KAPPA * (-(gap_days / W_DAYS) * std::f64::consts::LN_2).exp()
+        } else {
+            1.0
+        };
+
+        let alpha = 0.2_f64;
+        let effective_alpha = (alpha * strength * recency_w).min(1.0);
         let new_conf = (conf + effective_alpha * (target - conf)).clamp(0.0, 1.0);
         self.storage.update_chunk_confidence(chunk_id, new_conf, Some(reason), now)?;
         Ok(())
