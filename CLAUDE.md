@@ -42,7 +42,7 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 ## Architecture
 
-Single Rust binary (`innate/`) — three modes, one process:
+Single Rust binary (`core/`) — three modes, one process:
 
 ```
 innate recall/record/...  ← CLI adapter (clap, thin wrapper over KnowledgeBase)
@@ -60,8 +60,8 @@ KnowledgeBase (lib)       ← core: all 8 Public APIs, SQLite + pure-Rust vector
 | `embedding.rs` | `EmbeddingProvider` trait + `DummyEmbeddingProvider` (hash-based, for tests) |
 | `refine.rs` | `Refiner`/`Distiller` traits + `NullRefiner`/`HeuristicDistiller` defaults |
 | `errors.rs` | `InnateError` enum covering all error kinds |
-| `mcp/mod.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
-| `cli/mod.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
+| `mcp.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
+| `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
 | `schema.sql` | Embedded schema (v4.5.1); `include_str!` at compile time |
 
 ### The 8 Public APIs (on `KnowledgeBase`)
