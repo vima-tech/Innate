@@ -315,6 +315,7 @@ impl Storage {
         event: &str,
         strength: f64,
         similarity: Option<f64>,
+        refine_mode: Option<&str>,
         tokens: Option<i64>,
         rank: Option<i64>,
         source: &str,
@@ -322,9 +323,9 @@ impl Storage {
     ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO usage_trace
-             (trace_id, chunk_id, event, strength, similarity, tokens, rank, source, ts)
-             VALUES (?,?,?,?,?,?,?,?,?)",
-            params![trace_id, chunk_id, event, strength, similarity, tokens, rank, source, ts],
+             (trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, source, ts)
+             VALUES (?,?,?,?,?,?,?,?,?,?)",
+            params![trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, source, ts],
         )?;
         Ok(())
     }

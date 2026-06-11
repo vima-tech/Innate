@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def _binary() -> str:
@@ -66,16 +68,23 @@ class KnowledgeBase:
         top: int | None = None,
         include_sparks: bool = False,
         source: str = "sdk",
+        expand_deps: str = "false",
+        allow_trim: bool = False,
+        refine_mode: str = "off",
     ) -> RecallResult:
         args = self._args() + [
             "recall", query,
             "--budget", str(budget),
             "--format", "json",
+            "--expand-deps", expand_deps,
+            "--refine-mode", refine_mode,
         ]
         if top is not None:
             args += ["--top", str(top)]
         if include_sparks:
             args.append("--include-sparks")
+        if allow_trim:
+            args.append("--allow-trim")
         data = _run(*args)
         return RecallResult(
             knowledge=data.get("knowledge", []),
@@ -177,3 +186,74 @@ class KnowledgeBase:
         if reason:
             args += ["--reason", reason]
         _run(*args)
+
+    def augmented(
+        self,
+        *,
+        budget: int = 6000,
+        source: str = "augmented",
+        expand_deps: str = "false",
+        allow_trim: bool = False,
+    ) -> Callable:
+        """Decorator that auto-injects recalled knowledge into the wrapped function.
+
+        Two outcome modes (§五 @augmented 边界):
+        - Auto: function returns ``{"result": ..., "outcome": "ok"|"fail"}``
+          → decorator calls ``kb.record()`` automatically.
+        - Manual: function receives ``trace_id`` as a keyword argument; caller
+          must call ``kb.record(trace_id, ...)`` explicitly.
+
+        Example::
+
+            @kb.augmented(budget=4000)
+            def my_agent(query, *, knowledge, trace_id, **kw):
+                answer = call_llm(query, knowledge)
+                return {"result": answer, "outcome": "ok"}
+        """
+        def decorator(fn: Callable) -> Callable:
+            sig = inspect.signature(fn)
+            accepts_knowledge = "knowledge" in sig.parameters
+            accepts_trace_id = "trace_id" in sig.parameters
+
+            @functools.wraps(fn)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                query = ""
+                if args:
+                    query = str(args[0])
+                elif "query" in kwargs:
+                    query = str(kwargs["query"])
+
+                recall_result = self.recall(
+                    query,
+                    budget=budget,
+                    source=source,
+                    expand_deps=expand_deps,
+                    allow_trim=allow_trim,
+                )
+
+                if accepts_knowledge:
+                    kwargs["knowledge"] = recall_result.knowledge
+                if accepts_trace_id:
+                    kwargs["trace_id"] = recall_result.trace_id
+
+                result = fn(*args, **kwargs)
+
+                # Auto-record if function returns dict with "outcome" key.
+                if isinstance(result, dict) and "outcome" in result:
+                    outcome = result.get("outcome")
+                    used_ids = result.get("used", [])
+                    summary = result.get("output_summary") or result.get("summary")
+                    self.record(
+                        recall_result.trace_id,
+                        outcome=outcome,
+                        used=used_ids if used_ids else None,
+                        output_summary=summary,
+                        nomination=result.get("nomination"),
+                        source=source,
+                    )
+                    return result.get("result", result)
+
+                return result
+
+            return wrapper
+        return decorator

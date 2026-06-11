@@ -63,6 +63,32 @@ pub struct CurateReport {
     pub stats: HashMap<String, Value>,
 }
 
+/// Scope for a single Curate run — allows limiting governance to a subset of chunks.
+#[derive(Debug, Default, Clone)]
+pub struct CurateScope {
+    /// If set, only process chunks with this origin (e.g. "distilled").
+    pub origin: Option<String>,
+    /// If set, only process chunks belonging to this skill.
+    pub skill_name: Option<String>,
+    /// When true, compute the report but do not write any changes.
+    pub dry_run: bool,
+}
+
+/// Replaceable governance interface (§二·六). Inject via `KnowledgeBase::open_with`.
+/// Default implementation: `BuiltinCurator`.
+pub trait Curator: Send + Sync {
+    fn run(&self, kb: &KnowledgeBase, scope: &CurateScope) -> Result<CurateReport>;
+}
+
+/// Built-in curator — implements the full §四 governance pipeline.
+pub struct BuiltinCurator;
+
+impl Curator for BuiltinCurator {
+    fn run(&self, kb: &KnowledgeBase, scope: &CurateScope) -> Result<CurateReport> {
+        kb.builtin_curate_impl(scope)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // KnowledgeBase
 // ---------------------------------------------------------------------------
@@ -70,9 +96,9 @@ pub struct CurateReport {
 pub struct KnowledgeBase {
     pub storage: Storage,
     embedding: Arc<dyn EmbeddingProvider>,
-    #[allow(dead_code)]
     refiner: Arc<dyn Refiner>,
     distiller: Arc<dyn Distiller>,
+    curator: Arc<dyn Curator>,
     /// None = sanitize disabled (KnowledgeBase::open_with can set to false).
     sanitize: Option<bool>,
 
@@ -99,7 +125,7 @@ pub struct KnowledgeBase {
 
 impl KnowledgeBase {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with(db_path, None, None, None)
+        Self::open_with(db_path, None, None, None, None)
     }
 
     pub fn open_with(
@@ -107,11 +133,13 @@ impl KnowledgeBase {
         embedding: Option<Arc<dyn EmbeddingProvider>>,
         refiner: Option<Arc<dyn Refiner>>,
         distiller: Option<Arc<dyn Distiller>>,
+        curator: Option<Arc<dyn Curator>>,
     ) -> Result<Self> {
         let embedding = embedding
             .unwrap_or_else(|| Arc::new(DummyEmbeddingProvider::default()));
         let refiner = refiner.unwrap_or_else(|| Arc::new(NullRefiner));
         let distiller = distiller.unwrap_or_else(|| Arc::new(HeuristicDistiller));
+        let curator = curator.unwrap_or_else(|| Arc::new(BuiltinCurator));
 
         let storage = Storage::open(
             db_path,
@@ -124,6 +152,7 @@ impl KnowledgeBase {
             embedding,
             refiner,
             distiller,
+            curator,
             sanitize: Some(true),
             w_content: W_CONTENT,
             w_trigger: W_TRIGGER,
@@ -240,6 +269,9 @@ impl KnowledgeBase {
         include_sparks: bool,
         top: Option<usize>,
         source: &str,
+        expand_deps: &str,  // "false" | "direct" | "closure"
+        allow_trim: bool,   // if true, invoke Refiner::trim when block doesn't fit
+        refine_mode: &str,  // "off" | "trim" | "adapt" — recorded in trace
     ) -> Result<RecallResult> {
         validate_source(source)?;
         let trace_id = gen_uuid();
@@ -257,8 +289,8 @@ impl KnowledgeBase {
         // Score + anti-trigger penalty
         let scored = self.score_candidates(candidates, query);
 
-        // First-fit pack
-        let (selected, skipped, skipped_reasons) = self.pack(&scored, budget)?;
+        // First-fit pack with dep expansion
+        let (selected, skipped, skipped_reasons) = self.pack(&scored, budget, expand_deps, allow_trim, query)?;
 
         let depth_skipped: Vec<String> = skipped_reasons
             .iter()
@@ -284,7 +316,7 @@ impl KnowledgeBase {
         if trace {
             self.write_recall_trace(
                 &trace_id, query, &scored, &visible, &sparks,
-                &depth_skipped, &skipped_reasons, source, &now,
+                &depth_skipped, &skipped_reasons, refine_mode, source, &now,
             )?;
         }
 
@@ -394,10 +426,13 @@ impl KnowledgeBase {
         &self,
         scored: &[(f64, Value)],
         budget: usize,
+        expand_deps: &str,
+        allow_trim: bool,
+        query: &str,
     ) -> Result<(Vec<Value>, Vec<(Vec<Value>, f64, usize)>, HashMap<String, String>)> {
         let mut selected: Vec<Value> = vec![];
         let mut skipped: Vec<(Vec<Value>, f64, usize)> = vec![];
-        let skipped_reasons: HashMap<String, String> = HashMap::new();
+        let mut skipped_reasons: HashMap<String, String> = HashMap::new();
         let mut used_ids: HashSet<String> = HashSet::new();
         let mut used_tokens: usize = 0;
 
@@ -405,7 +440,13 @@ impl KnowledgeBase {
             let cid = chunk["id"].as_str().unwrap_or("").to_string();
             if used_ids.contains(&cid) { continue; }
 
-            let block = vec![chunk.clone()]; // No dep expansion in base implementation
+            // Build block with dep expansion; fail-closed on dep issues.
+            let (block, dep_skip_reason) = self.build_dep_block(chunk, expand_deps)?;
+            if let Some(reason) = dep_skip_reason {
+                skipped_reasons.insert(cid, reason);
+                continue;
+            }
+
             let new_block: Vec<Value> = block.iter()
                 .filter(|b| !used_ids.contains(b["id"].as_str().unwrap_or("")))
                 .cloned()
@@ -423,11 +464,109 @@ impl KnowledgeBase {
                     }
                 }
                 used_tokens += cost;
+            } else if allow_trim {
+                // Attempt refiner trim — NullRefiner returns None (no-op).
+                if let Some(trimmed) = self.refiner.trim(&block, query, budget.saturating_sub(used_tokens)) {
+                    let trim_cost = block_cost(&trimmed);
+                    if used_tokens + trim_cost <= budget {
+                        for b in &trimmed {
+                            let bid = b["id"].as_str().unwrap_or("").to_string();
+                            if !used_ids.contains(&bid) {
+                                let mut b = b.clone();
+                                b["_fused_score"] = json!(fused);
+                                selected.push(b);
+                                used_ids.insert(bid);
+                            }
+                        }
+                        used_tokens += trim_cost;
+                        continue;
+                    }
+                }
+                skipped.push((block, *fused, cost));
             } else {
                 skipped.push((block, *fused, cost));
             }
         }
         Ok((selected, skipped, skipped_reasons))
+    }
+
+    /// Expand a seed chunk into a block according to `expand_deps`.
+    /// Returns `(block, Some(skip_reason))` if the block should be discarded (fail-closed).
+    fn build_dep_block(&self, seed: &Value, expand_deps: &str) -> Result<(Vec<Value>, Option<String>)> {
+        if expand_deps == "false" || expand_deps.is_empty() {
+            return Ok((vec![seed.clone()], None));
+        }
+        let seed_id = seed["id"].as_str().unwrap_or("");
+        match expand_deps {
+            "direct" => {
+                let deps = self.storage.get_deps(seed_id)?;
+                let mut block = vec![seed.clone()];
+                for (dep_id, kind, _) in &deps {
+                    if kind != "hard" { continue; }
+                    match self.validate_hard_dep(dep_id)? {
+                        Some(chunk) => block.push(chunk),
+                        None => return Ok((vec![], Some("hard_dep_unavailable".to_string()))),
+                    }
+                }
+                Ok((block, None))
+            }
+            "closure" => {
+                let mut block = vec![seed.clone()];
+                let mut visited: HashSet<String> = [seed_id.to_string()].into();
+                match self.expand_hard_closure(seed_id, &mut visited, &mut block, 0, 3)? {
+                    Some(reason) => Ok((vec![], Some(reason))),
+                    None => Ok((block, None)),
+                }
+            }
+            _ => Ok((vec![seed.clone()], None)),
+        }
+    }
+
+    /// Returns the chunk if the hard dep is usable, None if it should cause fail-closed.
+    fn validate_hard_dep(&self, dep_id: &str) -> Result<Option<Value>> {
+        match self.storage.get_chunk(dep_id)? {
+            None => Ok(None),
+            Some(chunk) => {
+                let state = chunk.get("state").and_then(Value::as_str).unwrap_or("");
+                let origin = chunk.get("origin").and_then(Value::as_str).unwrap_or("");
+                let embed_v = chunk.get("embed_version").and_then(Value::as_i64).unwrap_or(0);
+                if state == "archived" || origin == "spark" || embed_v == 0 {
+                    Ok(None)
+                } else {
+                    Ok(Some(chunk))
+                }
+            }
+        }
+    }
+
+    /// BFS hard-dep expansion up to `max_depth`. Returns Some(reason) on fail-closed.
+    fn expand_hard_closure(
+        &self,
+        id: &str,
+        visited: &mut HashSet<String>,
+        block: &mut Vec<Value>,
+        depth: usize,
+        max_depth: usize,
+    ) -> Result<Option<String>> {
+        if depth >= max_depth {
+            return Ok(Some("dep_depth_limit".to_string()));
+        }
+        let deps = self.storage.get_deps(id)?;
+        for (dep_id, kind, _) in &deps {
+            if kind != "hard" { continue; }
+            if visited.contains(dep_id) { continue; } // cycle guard
+            visited.insert(dep_id.clone());
+            match self.validate_hard_dep(dep_id)? {
+                None => return Ok(Some("hard_dep_unavailable".to_string())),
+                Some(chunk) => {
+                    block.push(chunk);
+                    if let Some(reason) = self.expand_hard_closure(dep_id, visited, block, depth + 1, max_depth)? {
+                        return Ok(Some(reason));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn density_refill(
@@ -509,6 +648,7 @@ impl KnowledgeBase {
         sparks: &[Value],
         depth_skipped: &[String],
         skipped_reasons: &HashMap<String, String>,
+        refine_mode: &str,
         source: &str,
         now: &str,
     ) -> Result<()> {
@@ -518,16 +658,22 @@ impl KnowledgeBase {
             for (rank, (_, chunk)) in scored.iter().enumerate() {
                 let cid = chunk["id"].as_str().unwrap_or("");
                 let sim = chunk.get("_fused_score").and_then(Value::as_f64);
+                // For dep-skipped seeds, record their skip reason as refine_mode.
+                let rm = skipped_reasons.get(cid)
+                    .map(|r| format!("skipped:{r}"))
+                    .or_else(|| if refine_mode != "off" && !refine_mode.is_empty() {
+                        Some(refine_mode.to_string())
+                    } else { None });
                 self.storage.insert_usage_trace(
-                    trace_id, Some(cid), "retrieved", 1.0, sim, None,
-                    Some((rank + 1) as i64), source, now,
+                    trace_id, Some(cid), "retrieved", 1.0, sim, rm.as_deref(),
+                    None, Some((rank + 1) as i64), source, now,
                 )?;
             }
             for (rank, chunk) in visible.iter().enumerate() {
                 let cid = chunk["id"].as_str().unwrap_or("");
                 self.storage.insert_usage_trace(
                     trace_id, Some(cid), "selected", 1.0, None, None,
-                    Some((rank + 1) as i64), source, now,
+                    None, Some((rank + 1) as i64), source, now,
                 )?;
             }
             let snapshot = json!({
@@ -628,7 +774,7 @@ impl KnowledgeBase {
             if let Some(used_ids) = used {
                 for cid in used_ids {
                     self.storage.insert_usage_trace(
-                        trace_id, Some(cid), "used", 0.3, None, None, None, source, &now,
+                        trace_id, Some(cid), "used", 0.3, None, None, None, None, source, &now,
                     )?;
                     self.storage.update_chunk_last_used(cid, &now)?;
                 }
@@ -640,7 +786,7 @@ impl KnowledgeBase {
                     let event = if o == "ok" { "task_ok" } else { "task_fail" };
                     let strength = if event == "task_fail" { 0.15 } else { 1.0 };
                     self.storage.insert_usage_trace(
-                        trace_id, None, event, strength, None, None, None, source, &now,
+                        trace_id, None, event, strength, None, None, None, None, source, &now,
                     )?;
                 }
             }
@@ -878,7 +1024,7 @@ impl KnowledgeBase {
         }
 
         // Quick related recall (trace=false, no recursion risk)
-        let related: Vec<String> = self.recall(&content, 2000, false, false, Some(5), "sdk")
+        let related: Vec<String> = self.recall(&content, 2000, false, false, Some(5), "sdk", "false", false, "off")
             .map(|r| r.knowledge.iter().filter_map(|c| c["id"].as_str().map(str::to_string)).collect())
             .unwrap_or_default();
 
@@ -1188,7 +1334,8 @@ impl KnowledgeBase {
         }
 
         let distilled = self.distill_batch()?;
-        let curate = self.builtin_curate()?;
+        let curator = Arc::clone(&self.curator);
+        let curate = curator.run(self, &CurateScope::default())?;
 
         Ok(json!({
             "distilled": distilled,
@@ -1318,9 +1465,17 @@ impl KnowledgeBase {
         Ok(count)
     }
 
-    fn builtin_curate(&self) -> Result<CurateReport> {
+    pub(crate) fn builtin_curate_impl(&self, scope: &CurateScope) -> Result<CurateReport> {
         let mut report = CurateReport::default();
         let now_iso = utc_now_iso();
+        if scope.dry_run {
+            // dry_run: compute report without writing
+            let archived_count: i64 = count_query(&self.storage,
+                "SELECT COUNT(*) FROM chunks WHERE origin!='spark' AND protected=0 AND state='active'")?;
+            report.stats.insert("dry_run".to_string(), json!(true));
+            report.stats.insert("eligible_for_governance".to_string(), json!(archived_count));
+            return Ok(report);
+        }
 
         // ── Step 1-4: aggregate (single BEGIN IMMEDIATE, half-open cutoff window) ──
         self.storage.begin_immediate()?;
@@ -1608,14 +1763,25 @@ impl KnowledgeBase {
         let completion_tokens = distill_cost.first().and_then(|r| r.get("ct")).and_then(Value::as_i64).unwrap_or(0);
 
         // Health signal 2: sparks that have been recalled often (soft incubation threshold = 5)
-        let spark_threshold: i64 = 5;
+        let spark_threshold: i64 = self.storage.get_meta("curate.soft_mature_threshold")
+            .ok().flatten().and_then(|v| v.parse::<i64>().ok()).unwrap_or(5);
         let recurring_sparks = self.storage.query_chunks_params(
-            "SELECT chunk_id, COUNT(*) AS cnt FROM usage_trace
-             WHERE event='retrieved'
-               AND chunk_id IN (SELECT id FROM chunks WHERE origin='spark')
-             GROUP BY chunk_id HAVING cnt >= ?",
+            "SELECT ut.chunk_id, COUNT(*) AS cnt,
+                    c.content, c.trigger_desc, c.maturity
+             FROM usage_trace ut
+             JOIN chunks c ON c.id = ut.chunk_id
+             WHERE ut.event='retrieved'
+               AND c.origin='spark'
+             GROUP BY ut.chunk_id HAVING cnt >= ?",
             rusqlite::params![spark_threshold],
         )?;
+        let recurring_spark_ids: Vec<Value> = recurring_sparks.iter().map(|r| json!({
+            "id": r.get("chunk_id").and_then(Value::as_str).unwrap_or(""),
+            "retrieved_count": r.get("cnt").and_then(Value::as_i64).unwrap_or(0),
+            "maturity": r.get("maturity").and_then(Value::as_str).unwrap_or(""),
+            "content_preview": r.get("content").and_then(Value::as_str).unwrap_or("")
+                .chars().take(80).collect::<String>(),
+        })).collect();
 
         Ok(json!({
             "schema_version": schema_version,
@@ -1629,6 +1795,7 @@ impl KnowledgeBase {
             "stale_screening_count": stale_screening,
             "distill_cost_estimate": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
             "recurring_sparks": recurring_sparks.len(),
+            "recurring_spark_ids": recurring_spark_ids,
             "params": {
                 "recall.w_content": self.w_content,
                 "recall.w_trigger": self.w_trigger,
