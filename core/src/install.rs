@@ -484,6 +484,88 @@ fn configure_opencode(agent: &Agent, binary: &Path, _auto_allow: bool) -> Config
     }
 }
 
+// ── Slash-command install ─────────────────────────────────────────────────────
+
+/// A slash command definition parsed from a `command` fenced block in SKILL.md.
+struct SkillCommand {
+    name: String,
+    body: String,
+}
+
+/// Parse every ` ```command … ``` ` block from `skill_md`.
+/// Each block has a `name: <n>` header before a bare `---` separator; body follows after.
+fn parse_skill_commands(skill_md: &str) -> Vec<SkillCommand> {
+    let mut cmds = Vec::new();
+    let lines: Vec<&str> = skill_md.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() == "```command" {
+            i += 1;
+            let block_start = i;
+            while i < lines.len() && lines[i].trim() != "```" {
+                i += 1;
+            }
+            let block_lines = &lines[block_start..i];
+            if let Some(sep) = block_lines.iter().position(|l| l.trim() == "---") {
+                let mut name = String::new();
+                for line in &block_lines[..sep] {
+                    if let Some(v) = line.strip_prefix("name:") {
+                        name = v.trim().to_string();
+                    }
+                }
+                if !name.is_empty() {
+                    cmds.push(SkillCommand {
+                        name,
+                        body: block_lines[sep + 1..].join("\n"),
+                    });
+                }
+            }
+        }
+        i += 1;
+    }
+    cmds
+}
+
+/// Install slash commands to `~/.claude/commands/`. Returns one status per command.
+fn install_commands() -> Vec<(String, ConfigStatus)> {
+    let commands_dir = home_dir().join(".claude").join("commands");
+    if let Err(e) = std::fs::create_dir_all(&commands_dir) {
+        return vec![("*".into(), ConfigStatus::Error(e.to_string()))];
+    }
+    parse_skill_commands(SKILL_MD)
+        .into_iter()
+        .map(|cmd| {
+            let path = commands_dir.join(format!("{}.md", cmd.name));
+            let current = std::fs::read_to_string(&path).unwrap_or_default();
+            if current == cmd.body {
+                return (cmd.name, ConfigStatus::Unchanged(path));
+            }
+            match std::fs::write(&path, &cmd.body) {
+                Ok(()) => (cmd.name, ConfigStatus::Updated(path)),
+                Err(e) => (cmd.name, ConfigStatus::Error(e.to_string())),
+            }
+        })
+        .collect()
+}
+
+/// Remove slash commands from `~/.claude/commands/` (uninstall path).
+fn remove_commands() -> Vec<(String, ConfigStatus)> {
+    let commands_dir = home_dir().join(".claude").join("commands");
+    parse_skill_commands(SKILL_MD)
+        .into_iter()
+        .map(|cmd| {
+            let path = commands_dir.join(format!("{}.md", cmd.name));
+            if !path.exists() {
+                return (cmd.name, ConfigStatus::Skipped("not installed".into()));
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => (cmd.name, ConfigStatus::Updated(path)),
+                Err(e) => (cmd.name, ConfigStatus::Error(e.to_string())),
+            }
+        })
+        .collect()
+}
+
 fn skill_content_hash() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -822,7 +904,7 @@ pub fn run_uninstall(yes: bool, purge_data: bool) -> anyhow::Result<()> {
         _ => {}
     }
 
-    // ── 4. Remove skill ────────────────────────────────────────────────────
+    // ── 4. Remove skill + slash commands ──────────────────────────────────
     match remove_skill() {
         ConfigStatus::Updated(p) => {
             result_line(&format!(
@@ -838,6 +920,25 @@ pub fn run_uninstall(yes: bool, purge_data: bool) -> anyhow::Result<()> {
             ));
         }
         _ => {}
+    }
+
+    for (name, status) in remove_commands() {
+        match status {
+            ConfigStatus::Updated(p) => {
+                result_line(&format!(
+                    "{}: Removed /{name} {}",
+                    bold("claude"),
+                    gray(&tilde_path(&p))
+                ));
+            }
+            ConfigStatus::Error(e) => {
+                warn_line(&format!(
+                    "{}: \x1b[31mCommand /{name} error — {e}\x1b[0m",
+                    bold("claude")
+                ));
+            }
+            _ => {}
+        }
     }
 
     // ── 5. Remove binary ───────────────────────────────────────────────────
@@ -1052,6 +1153,27 @@ pub fn run_install() -> anyhow::Result<()> {
                         "{}: \x1b[31mSkill error — {e}\x1b[0m",
                         bold("claude")
                     ));
+                }
+            }
+
+            // Install slash commands alongside the skill
+            for (name, status) in install_commands() {
+                match status {
+                    ConfigStatus::Updated(p) => {
+                        result_line(&format!(
+                            "{}: /{name} {}",
+                            bold("claude"),
+                            gray(&tilde_path(&p))
+                        ));
+                    }
+                    ConfigStatus::Unchanged(_) => {}
+                    ConfigStatus::Skipped(_) => {}
+                    ConfigStatus::Error(e) => {
+                        warn_line(&format!(
+                            "{}: \x1b[31mCommand /{name} error — {e}\x1b[0m",
+                            bold("claude")
+                        ));
+                    }
                 }
             }
         }

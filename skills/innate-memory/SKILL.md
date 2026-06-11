@@ -149,3 +149,116 @@ Example:
 | Quick idea, half-formed hunch | Confirmed reusable principle |
 | Not yet validated | Validated in this session |
 | User says "note this for later" | User says "remember this rule" |
+
+## Commands
+
+Slash commands below are automatically installed to `~/.claude/commands/` by `innate install`
+and updated on every `innate install` re-run. Each `command` block defines one command:
+metadata before `---`, body (the agent prompt) after `---`.
+
+```command
+name: innate-recall
+description: Recall prior innate knowledge for the current task context
+---
+Run innate_recall for the current task context and inject the result into this conversation.
+
+If the user provided a query after the command, use that as the recall query exactly.
+If no query was provided ($ARGUMENTS is empty), infer the query from the most recent user
+message or current task intent — use the **intent** (e.g. "sqlite wal mode init") not the
+literal text.
+
+Steps:
+1. Formulate the query string (from $ARGUMENTS or inferred intent).
+2. Call `innate_recall` with `query=<query>`, `budget=4000`, `source="agent"`.
+3. If knowledge is returned: summarize in one sentence what was found, then inject the
+   relevant chunks into context.
+4. If empty: say "No prior knowledge found for: <query>" — do not fabricate.
+5. Save the `trace_id` for use in `/innate-record` later.
+```
+
+```command
+name: innate-record
+description: Close the current innate trace with an outcome and one-sentence summary
+---
+Close the current innate trace with an outcome and summary.
+
+Parse $ARGUMENTS for:
+- outcome: one of `ok`, `fail`, `unknown` (default: `ok` if not specified)
+- Any remaining text becomes the output_summary override
+
+Steps:
+1. Identify the active trace_id from this session's most recent `innate_recall` call.
+   If no trace_id is available, say "No active trace — run /innate-recall first."
+2. Determine which recalled chunk IDs were actually used in the final response (not
+   just candidates recalled).
+3. Write a one-sentence output_summary for a future agent reading cold:
+   - If the user provided summary text in $ARGUMENTS, use that.
+   - Otherwise synthesize from the task outcome.
+4. Call `innate_record` with `trace_id`, `outcome`, `used=[<chunk_ids>]`, `output_summary`.
+5. Confirm: "Recorded trace <trace_id> as <outcome>."
+```
+
+```command
+name: innate-save
+description: Save a confirmed insight to Innate as a pending knowledge chunk
+---
+Save a confirmed insight to Innate as a pending knowledge chunk.
+
+$ARGUMENTS is the insight text to save (required). If empty, ask: "What insight would
+you like to save?"
+
+Steps:
+1. Parse $ARGUMENTS as the insight content.
+2. Distil to reusable form: `<principle> — <trigger context> — <what to avoid/do>`.
+   Never store raw conversation text verbatim.
+3. Infer a trigger_desc from the distilled content (2-5 words describing when to recall it).
+4. Call `innate_add` with `content=<distilled>`, `trigger_desc=<trigger>`, `source="agent"`.
+5. Confirm: "Saved as pending chunk <id>. Awaits your review via innate_approve."
+```
+
+```command
+name: innate-spark
+description: Save a quick idea or half-formed hunch to Innate as a spark
+---
+Save a quick idea or half-formed hunch to Innate as a spark (no review needed).
+
+$ARGUMENTS is the idea text (required). If empty, ask: "What idea would you like to spark?"
+
+Steps:
+1. Parse $ARGUMENTS as the spark content.
+2. Distil to brief, reusable form (1-2 sentences max). Drop filler words.
+3. Call `innate_spark` with `content=<distilled>`.
+4. Confirm: "Sparked <id>. Use `innate_mature_spark` when ready to develop it further."
+```
+
+```command
+name: innate-evolve
+description: Run end-of-session evolution — distil logs and curate knowledge
+---
+Run end-of-session evolution: distil episodic logs into knowledge chunks, then curate.
+
+Steps:
+1. Call `innate_evolve` with `trigger="manual"`.
+2. Report the result: new chunks distilled, archived chunks, errors (if any).
+3. Then call `innate_inspect` and show: chunk counts, debt ratio, rebuild queue size.
+4. If debt_ratio > 0.3: suggest "Consider reviewing pending chunks with innate_approve."
+```
+
+```command
+name: innate-inspect
+description: Show innate knowledge base health — chunk counts, debt ratio, config params
+---
+Show innate knowledge base health: chunk counts, debt ratio, rebuild queue, config params.
+
+$ARGUMENTS can be empty (show all) or a param name prefix to filter (e.g. "recall" or "curate").
+
+Steps:
+1. Call `innate_inspect`.
+2. Display a readable summary:
+   - Total active chunks, pending count, spark count
+   - Debt ratio (pending / active)
+   - Rebuild queue depth
+   - Config params: if $ARGUMENTS specifies a prefix, filter to that prefix; otherwise show all.
+3. If debt_ratio > 0.3, highlight: "High debt ratio — consider running /innate-evolve and
+   reviewing pending chunks."
+```
