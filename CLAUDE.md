@@ -19,6 +19,11 @@ innate evolve --trigger manual
 
 # Start MCP server (for Claude Code / Claude Desktop integration)
 innate mcp
+
+# Daemon (Linux only) — background log/hook watcher
+innate daemon start --watch /path/to/log/dir
+innate daemon status
+innate daemon stop
 ```
 
 ## MCP Integration
@@ -42,13 +47,29 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 ## Architecture
 
-Single Rust binary (`core/`) — three modes, one process:
+Four access modules, one Rust KnowledgeBase Core:
 
 ```
-innate recall/record/...  ← CLI adapter (clap, thin wrapper over KnowledgeBase)
-innate mcp                ← MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
-KnowledgeBase (lib)       ← core: all 8 Public APIs, SQLite + pure-Rust vector search
+MCP    (innate mcp)          ← JSON-RPC 2.0 over stdio; 13 tools; direct Core calls
+CLI    (innate <cmd>)        ← clap thin wrapper; direct Core calls
+SDKs   (Python / TypeScript) ← subprocess wrapper over CLI binary
+Daemon (innate daemon start) ← background log/hook watcher; invokes CLI subprocesses
+                                    │
+                                    ▼
+                        KnowledgeBase (lib) ← all 8 Public APIs
+                        SQLite + pure-Rust vector search
 ```
+
+Dependency direction:
+
+```
+MCP    ──────────────────────> KnowledgeBase Core
+CLI    ──────────────────────> KnowledgeBase Core
+SDKs   ──> CLI ──────────────> KnowledgeBase Core
+Daemon ──> CLI ──────────────> KnowledgeBase Core
+```
+
+MCP and CLI call `KnowledgeBase` directly (in-process). SDKs and Daemon never open the database; they shell out to the `innate` binary.
 
 ### Crate layout (`core/src/`)
 
@@ -62,6 +83,7 @@ KnowledgeBase (lib)       ← core: all 8 Public APIs, SQLite + pure-Rust vector
 | `errors.rs` | `InnateError` enum covering all error kinds |
 | `mcp.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
 | `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
+| `daemon.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
 | `schema.sql` | Embedded schema (v4.5.1); `include_str!` at compile time |
 
 ### The 8 Public APIs (on `KnowledgeBase`)
@@ -114,6 +136,8 @@ Injectable at `KnowledgeBase::open_with(...)`:
 All tuning knobs in the `meta` table (keys `recall.*` and `curate.*`). Loaded once at `KnowledgeBase::open`. `innate inspect` prints current values.
 
 ## SDKs
+
+Both SDKs wrap the CLI binary via subprocess — they are not native Rust FFI bindings.
 
 | Path | Description |
 |---|---|

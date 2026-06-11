@@ -16,7 +16,7 @@ function getTarget() {
   if (!target) {
     throw new Error(
       `@innate/cli: unsupported platform ${process.platform}/${process.arch}.\n` +
-      `Install manually: https://github.com/innate-rs/innate/releases`
+      `Install manually: https://github.com/vima-tech/Innate/releases`
     );
   }
   return target;

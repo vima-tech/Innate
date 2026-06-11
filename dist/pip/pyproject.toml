@@ -30,9 +30,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/innate-rs/innate"
-Repository = "https://github.com/innate-rs/innate"
-Issues = "https://github.com/innate-rs/innate/issues"
+Homepage = "https://github.com/vima-tech/Innate"
+Repository = "https://github.com/vima-tech/Innate"
+Issues = "https://github.com/vima-tech/Innate/issues"
 
 [project.scripts]
 innate = "innate_cli:main"

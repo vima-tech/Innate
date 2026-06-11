@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "description": "Self-growing procedural knowledge layer for AI agents — CLI",
   "keywords": ["innate", "mcp", "ai", "knowledge", "agent", "memory"],
-  "homepage": "https://github.com/innate-rs/innate",
+  "homepage": "https://github.com/vima-tech/Innate",
   "repository": {
     "type": "git",
-    "url": "https://github.com/innate-rs/innate.git",
+    "url": "https://github.com/vima-tech/Innate.git",
     "directory": "dist/npm"
   },
   "license": "MIT",

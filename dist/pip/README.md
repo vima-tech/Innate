@@ -61,5 +61,5 @@ print(result.stdout)
 
 ## Links
 
-- [GitHub](https://github.com/innate-rs/innate)
-- [Releases](https://github.com/innate-rs/innate/releases)
+- [GitHub](https://github.com/vima-tech/Innate)
+- [Releases](https://github.com/vima-tech/Innate/releases)

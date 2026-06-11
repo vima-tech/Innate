@@ -11,7 +11,7 @@ from pathlib import Path
 from ._platform import get_target, get_binary_name, get_exe_suffix
 
 __version__ = "0.1.0"
-_REPO = "innate-rs/innate"
+_REPO = "vima-tech/Innate"
 
 
 def _bin_dir() -> Path:

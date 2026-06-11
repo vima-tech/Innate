@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-const REPO: &str = "innate-rs/innate";
+const REPO: &str = "vima-tech/Innate";
 const GITHUB_API: &str = "https://api.github.com";
 
 // ---------------------------------------------------------------------------

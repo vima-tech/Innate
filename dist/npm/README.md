@@ -62,6 +62,6 @@ Or run `innate install` to configure all detected agents automatically.
 
 ## Links
 
-- [Documentation](https://github.com/innate-rs/innate)
-- [Releases](https://github.com/innate-rs/innate/releases)
-- [Issues](https://github.com/innate-rs/innate/issues)
+- [Documentation](https://github.com/vima-tech/Innate)
+- [Releases](https://github.com/vima-tech/Innate/releases)
+- [Issues](https://github.com/vima-tech/Innate/issues)

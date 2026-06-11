@@ -1,6 +1,6 @@
 # innate-py
 
-Python SDK for [Innate](https://github.com/innate-rs/innate) — self-growing procedural knowledge layer for AI agents.
+Python SDK for [Innate](https://github.com/vima-tech/Innate) — self-growing procedural knowledge layer for AI agents.
 
 ## Installation
 
@@ -11,7 +11,7 @@ pip install innate-py
 Requires the `innate` binary in PATH. Install it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/innate-rs/innate/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vima-tech/Innate/main/install.sh | sh
 ```
 
 ## Usage

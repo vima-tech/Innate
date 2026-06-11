@@ -24,7 +24,7 @@ function findBinary() {
   console.error(
     '\n@innate/cli: binary not found.\n' +
     'Try re-installing: npm install @innate/cli\n' +
-    'Or install directly: https://github.com/innate-rs/innate/releases\n'
+    'Or install directly: https://github.com/vima-tech/Innate/releases\n'
   );
   process.exit(1);
 }

@@ -61,6 +61,23 @@ npm install @innate/sdk  # 或 npm install ./sdks/typescript/
 
 配置后 Agent 可直接使用 `innate_recall`、`innate_record` 等 MCP 工具, 无需手动调用 CLI。
 
+### Daemon (Linux only)
+
+后台守护进程，监听指定目录下的日志文件和 JSON Hook 事件，自动桥接到知识层：
+
+```bash
+# 启动: 监听一个或多个目录
+innate daemon start --watch /path/to/log/dir
+
+# 查看运行状态和错误统计
+innate daemon status
+
+# 停止
+innate daemon stop
+```
+
+Daemon 通过 subprocess 调用 `innate` CLI，不直接打开知识库；其自身状态（文件偏移、已处理事件、会话 trace）记录在独立的 `daemon_state.sqlite` 中。
+
 ---
 
 ## 接入 Agent (MCP 配置)
@@ -237,6 +254,9 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 | `innate invalidate <id>` | 治理 | `--reason` (归档 + 黑名单) |
 | `innate restore <id>` | 治理 | archived → active; 若此前 invalidate, 同步撤销 hash 黑名单 |
 | `innate mcp` | 集成 | 启动 MCP stdio 服务 (JSON-RPC 2.0), 供 Claude Code / Desktop 使用 |
+| `innate daemon start` | 集成 | 后台日志/Hook 监听守护进程 `--watch <dir>` (Linux only) |
+| `innate daemon status` | 集成 | 查看 daemon 运行状态与错误统计 |
+| `innate daemon stop` | 集成 | 停止运行中的 daemon |
 
 ### `recall` 输出格式
 
@@ -271,25 +291,41 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 
 ## 系统架构
 
+四种接入模块，共用一套 Rust KnowledgeBase Core：
+
+```
+MCP    (innate mcp)           ──────────────────────────┐
+CLI    (innate <cmd>)          ──────────────────────────┤──> KnowledgeBase Core ──> SQLite
+SDKs   (Python / TypeScript)   ──> CLI ─────────────────┤
+Daemon (innate daemon start)   ──> CLI ─────────────────┘
+```
+
+| 模块 | 实现方式 | 说明 |
+|---|---|---|
+| **MCP** | 直接调用 Core lib | JSON-RPC 2.0 over stdio；13 个工具；供 Claude Code / Claude Desktop 使用 |
+| **CLI** | 直接调用 Core lib | clap 薄封装；完整 Public API 的命令行入口 |
+| **Python SDK** | subprocess 调用 CLI | `innate-py`，零额外依赖 |
+| **TypeScript SDK** | subprocess 调用 CLI + async MCP client | `@innate/sdk`，Node.js 18+ |
+| **Daemon** | subprocess 调用 CLI | 后台监听日志 / JSON Hook；自动触发 recall / record / evolve；事件幂等、会话 trace、错误统计、断点续读（Linux only） |
+
 ```
 Innate System
 ├── Rust 核心 (core/)
-│   ├── KnowledgeBase (lib)     8 类 Public API, SQLite + 纯 Rust 余弦相似度
-│   ├── CLI (innate <cmd>)      clap 薄封装, 参数解析 → KnowledgeBase 调用
-│   └── MCP Server (innate mcp) JSON-RPC 2.0 over stdio, 13 个 MCP 工具
+│   ├── KnowledgeBase (lib)      8 类 Public API, SQLite + 纯 Rust 余弦相似度
+│   ├── CLI (innate <cmd>)       clap 薄封装, 参数解析 → KnowledgeBase 调用
+│   ├── MCP Server (innate mcp)  JSON-RPC 2.0 over stdio, 13 个 MCP 工具
+│   └── Daemon (innate daemon)   后台日志/Hook 监听, subprocess → CLI (Linux only)
 │
-├── 向量搜索                    f32 BLOB 存储 + 全扫描余弦相似度 (零 native 扩展)
-│   ├── vec_content             内容向量 (BLOB)
-│   └── vec_trigger             触发向量 (BLOB)
+├── 向量搜索                     f32 BLOB 存储 + 全扫描余弦相似度 (零 native 扩展)
+│   ├── vec_content              内容向量 (BLOB)
+│   └── vec_trigger              触发向量 (BLOB)
 │
 ├── SDKs
-│   ├── sdks/python/            innate-py  — subprocess wrapper, 零额外依赖
-│   └── sdks/typescript/        @innate/sdk — CLI subprocess + async MCP client
+│   ├── sdks/python/             innate-py  — subprocess → CLI, 零额外依赖
+│   └── sdks/typescript/         @innate/sdk — CLI subprocess + async MCP client
 │
-└── skills/innate-memory/       SKILL.md (MCP 工具为主, CLI 为 fallback)
+└── skills/innate-memory/        SKILL.md (MCP 工具为主, CLI 为 fallback)
 ```
-
-**依赖方向严格向下**: `SDK → CLI → KnowledgeBase`。SDKs 通过 subprocess 调用 CLI 二进制; MCP server 直接调用 KnowledgeBase lib。
 
 ---
 
@@ -313,8 +349,9 @@ Innate System
 - 核心运行时: Rust 1.70+ (bundled SQLite, 零外部运行时依赖)
 - Python SDK: Python 3.8+ (subprocess, 零额外依赖)
 - TypeScript SDK: Node.js 18+ (child_process, 零额外依赖)
+- Daemon: Linux only (依赖 `/proc` 与 `fork`；非 Linux 平台返回明确错误)
 - 数据库默认位置: `~/.innate/personal.db` (可通过 `INNATE_DB` 环境变量或 `--db` 覆盖)
-- 平台: Linux / macOS / Windows (WSL)
+- 平台: Linux / macOS / Windows (WSL)；Daemon 仅 Linux
 
 ---
 

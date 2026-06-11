@@ -26,7 +26,7 @@ def find_binary() -> Path:
     except Exception as e:
         print(
             f"innate-cli: binary not found and download failed: {e}\n"
-            "Install manually: https://github.com/innate-rs/innate/releases",
+            "Install manually: https://github.com/vima-tech/Innate/releases",
             file=sys.stderr,
         )
         sys.exit(1)

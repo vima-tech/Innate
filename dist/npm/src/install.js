@@ -11,7 +11,7 @@ const os     = require('os');
 const { getTarget, getBinaryName, getExt } = require('./platform');
 const { version } = require('../package.json');
 
-const REPO    = 'innate-rs/innate';
+const REPO    = 'vima-tech/Innate';
 const BIN_DIR = path.join(__dirname, '..', 'bin');
 const BIN_PATH = path.join(BIN_DIR, getBinaryName());
 
@@ -101,7 +101,7 @@ async function main() {
   } catch (e) {
     fs.rmSync(tmp, { force: true });
     console.error(`\n@innate/cli: installation failed — ${e.message}`);
-    console.error('  Install manually: https://github.com/innate-rs/innate/releases\n');
+    console.error('  Install manually: https://github.com/vima-tech/Innate/releases\n');
     // Don't exit 1 — allow npm install to succeed; binary just won't be there.
   }
 }
