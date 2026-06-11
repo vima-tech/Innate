@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+const SKILL_MD: &str = include_str!("../../skills/innate-memory/SKILL.md");
+
 const INNATE_TOOLS: &[&str] = &[
     "innate_recall",
     "innate_record",
@@ -471,6 +473,29 @@ fn configure_opencode(agent: &Agent, binary: &Path, _auto_allow: bool) -> Config
     }
 }
 
+fn install_claude_skill() -> ConfigStatus {
+    let dest_dir = home_dir()
+        .join(".claude")
+        .join("skills")
+        .join("innate-memory");
+    let dest = dest_dir.join("SKILL.md");
+
+    if let Ok(existing) = std::fs::read_to_string(&dest) {
+        if existing == SKILL_MD {
+            return ConfigStatus::Unchanged(dest);
+        }
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        return ConfigStatus::Error(e.to_string());
+    }
+
+    match std::fs::write(&dest, SKILL_MD) {
+        Ok(()) => ConfigStatus::Updated(dest),
+        Err(e) => ConfigStatus::Error(e.to_string()),
+    }
+}
+
 // ── PATH installation ─────────────────────────────────────────────────────────
 
 fn check_on_path() -> Option<PathBuf> {
@@ -613,6 +638,38 @@ pub fn run_install() -> anyhow::Result<()> {
             }
             ConfigStatus::Error(e) => {
                 warn_line(&format!("{}: \x1b[31mError — {e}\x1b[0m", bold(agent.id)));
+            }
+        }
+
+        if agent.id == "claude" {
+            match install_claude_skill() {
+                ConfigStatus::Updated(p) => {
+                    result_line(&format!(
+                        "{}: Installed skill {}",
+                        bold("claude"),
+                        gray(&tilde_path(&p))
+                    ));
+                }
+                ConfigStatus::Unchanged(p) => {
+                    result_line(&format!(
+                        "{}: {}",
+                        bold("claude"),
+                        gray(&format!("Skill unchanged {}", tilde_path(&p)))
+                    ));
+                }
+                ConfigStatus::Skipped(reason) => {
+                    warn_line(&format!(
+                        "{}: {}",
+                        bold("claude"),
+                        yellow(&format!("Skill skipped — {reason}"))
+                    ));
+                }
+                ConfigStatus::Error(e) => {
+                    warn_line(&format!(
+                        "{}: \x1b[31mSkill error — {e}\x1b[0m",
+                        bold("claude")
+                    ));
+                }
             }
         }
     }
