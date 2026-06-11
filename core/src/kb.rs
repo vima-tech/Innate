@@ -411,11 +411,21 @@ impl KnowledgeBase {
             .storage
             .search_vec_trigger(q_trigger, self.top_k_candidates * 2)?;
 
+        // Collect unique ids and batch-fetch all chunks in two queries instead of N individual ones.
+        let all_ids: Vec<&str> = {
+            let mut seen = HashSet::new();
+            content_res.iter().chain(trigger_res.iter())
+                .map(|(id, _)| id.as_str())
+                .filter(|id| seen.insert(*id))
+                .collect()
+        };
+        let chunks = self.storage.get_chunks_by_ids(&all_ids)?;
+
         let mut candidates: HashMap<String, CandidateInfo> = HashMap::new();
 
         for (cid, sim) in &content_res {
-            if let Some(chunk) = self.storage.get_chunk(cid)? {
-                if chunk_is_valid_for_recall(&chunk, embed_version) {
+            if let Some(chunk) = chunks.get(cid) {
+                if chunk_is_valid_for_recall(chunk, embed_version) {
                     let e = candidates
                         .entry(cid.clone())
                         .or_insert_with(|| CandidateInfo {
@@ -428,8 +438,8 @@ impl KnowledgeBase {
             }
         }
         for (cid, sim) in &trigger_res {
-            if let Some(chunk) = self.storage.get_chunk(cid)? {
-                if chunk_is_valid_for_recall(&chunk, embed_version) {
+            if let Some(chunk) = chunks.get(cid) {
+                if chunk_is_valid_for_recall(chunk, embed_version) {
                     let e = candidates
                         .entry(cid.clone())
                         .or_insert_with(|| CandidateInfo {
@@ -1903,7 +1913,6 @@ impl KnowledgeBase {
             self.storage
                 .update_episodic_log_tokens(log_id, prompt_tokens, completion_tokens)?;
             if chunks.is_empty() {
-                // Mark log discarded — use id not trace_id for the update query
                 let _ = self.storage.update_episodic_log_state_by_id(
                     log_id,
                     "discarded",
@@ -1912,7 +1921,10 @@ impl KnowledgeBase {
                 );
                 continue;
             }
-            let mut log_written = false;
+
+            // Prepare all chunk rows + embeddings outside the write transaction
+            // so that slow embedding calls don't hold an exclusive lock.
+            let mut prepared: Vec<(ChunkRow, Vec<u8>, Vec<u8>)> = Vec::new();
             for dc in chunks {
                 let (content, action) = self.sanitize_content(&dc.content);
                 if action == SanitizeAction::Discard {
@@ -1961,14 +1973,13 @@ impl KnowledgeBase {
                 let cvec = match self.embedding.embed_content(&content) {
                     Ok(v) => v,
                     Err(_) => {
-                        // embedding failed — do NOT write chunk; mark log failed
                         let _ = self.storage.update_episodic_log_state_by_id(
                             log_id,
                             "failed",
                             Some("embedding_failed"),
                             None,
                         );
-                        continue; // skip to next log entry
+                        continue;
                     }
                 };
                 let tvec = match self
@@ -1986,26 +1997,28 @@ impl KnowledgeBase {
                         continue;
                     }
                 };
+                prepared.push((row, pack_embedding(&cvec), pack_embedding(&tvec)));
+            }
+
+            // Write all prepared chunks for this log in a single transaction.
+            if !prepared.is_empty() {
                 self.storage.begin_immediate()?;
                 let r = (|| -> Result<()> {
-                    self.storage.insert_chunk(&row)?;
-                    self.storage
-                        .insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-                    self.storage
-                        .insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+                    for (row, cvec_bytes, tvec_bytes) in &prepared {
+                        self.storage.insert_chunk(row)?;
+                        self.storage.insert_vec_content(&row.id, cvec_bytes)?;
+                        self.storage.insert_vec_trigger(&row.id, tvec_bytes)?;
+                    }
                     self.storage.commit()
                 })();
                 if r.is_err() {
                     let _ = self.storage.rollback();
                     r?;
                 }
-                count += 1;
-                log_written = true;
-            }
-            if log_written {
-                let _ =
-                    self.storage
-                        .update_episodic_log_state_by_id(log_id, "distilled", None, None);
+                count += prepared.len();
+                let _ = self.storage.update_episodic_log_state_by_id(
+                    log_id, "distilled", None, None,
+                );
             }
         }
         Ok(count)
@@ -2054,12 +2067,19 @@ impl KnowledgeBase {
             )?;
 
             // 2. Derive success counts from the persistent fact table.
+            // CTE computes COUNT and MAX(ts) once per chunk_id to avoid duplicate subqueries.
             self.storage.conn_execute(
-                "UPDATE chunks SET
-                   used_success_count      = (SELECT COUNT(*)   FROM chunk_success_traces WHERE chunk_id = chunks.id),
-                   success_trace_ids_count = (SELECT COUNT(*)   FROM chunk_success_traces WHERE chunk_id = chunks.id),
-                   last_success_at         = (SELECT MAX(ts)    FROM chunk_success_traces WHERE chunk_id = chunks.id)
-                 WHERE id IN (SELECT DISTINCT chunk_id FROM chunk_success_traces)",
+                "WITH cst AS (
+                   SELECT chunk_id, COUNT(*) AS cnt, MAX(ts) AS max_ts
+                   FROM chunk_success_traces
+                   GROUP BY chunk_id
+                 )
+                 UPDATE chunks SET
+                   used_success_count      = cst.cnt,
+                   success_trace_ids_count = cst.cnt,
+                   last_success_at         = cst.max_ts
+                 FROM cst
+                 WHERE chunks.id = cst.chunk_id",
                 rusqlite::params![],
             )?;
 

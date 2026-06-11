@@ -290,26 +290,31 @@ pub fn sanitize(content: &str) -> (String, SanitizeAction) {
 
 /// Pack a Vec<f32> into bytes (little-endian f32 array).
 pub fn pack_embedding(v: &[f32]) -> Vec<u8> {
-    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for f in v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
 }
 
 /// Unpack bytes into Vec<f32>.
 pub fn unpack_embedding(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    out.extend(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+    out
 }
 
 /// Cosine similarity between two equal-length slices. Returns 0.0 on zero norms.
+/// Single-pass fold: computes dot product and both norms in one traversal.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 {
+    let (dot, na2, nb2) = a.iter().zip(b.iter()).fold(
+        (0.0f32, 0.0f32, 0.0f32),
+        |(d, na, nb), (x, y)| (d + x * y, na + x * x, nb + y * y),
+    );
+    if na2 == 0.0 || nb2 == 0.0 {
         0.0
     } else {
-        dot / (na * nb)
+        dot / (na2.sqrt() * nb2.sqrt())
     }
 }
 

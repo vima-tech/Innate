@@ -146,10 +146,8 @@ class KnowledgeBase:
             args += ["--anti-trigger", anti_trigger_desc]
         if skill_name:
             args += ["--skill-name", skill_name]
-        result = subprocess.run(
-            [_binary()] + args, capture_output=True, text=True, check=True
-        )
-        return result.stdout.strip()
+        result = _run(*args)
+        return str(result.get("_raw", result.get("chunk_id", "")))
 
     def spark(
         self,
@@ -160,10 +158,8 @@ class KnowledgeBase:
         args = self._args() + ["spark", content]
         if trigger_desc:
             args += ["--trigger", trigger_desc]
-        result = subprocess.run(
-            [_binary()] + args, capture_output=True, text=True, check=True
-        )
-        return result.stdout.strip()
+        result = _run(*args)
+        return str(result.get("_raw", result.get("chunk_id", "")))
 
     def evolve(self, trigger: str = "manual") -> dict[str, Any]:
         return _run(*self._args(), "evolve", "--trigger", trigger)

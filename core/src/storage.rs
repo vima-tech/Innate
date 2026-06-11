@@ -3,6 +3,8 @@
 //! Replaces sqlite-vec virtual tables with ordinary BLOB columns + pure-Rust
 //! cosine similarity, keeping the schema otherwise identical to v4.5.1.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, Row};
@@ -21,6 +23,9 @@ pub struct Storage {
     conn: Connection,
     pub content_dim: usize,
     pub trigger_dim: usize,
+    /// Pre-parsed in-memory caches for vector search; None = cold (not loaded or invalidated).
+    vec_content_cache: RefCell<Option<Vec<(String, Vec<f32>)>>>,
+    vec_trigger_cache: RefCell<Option<Vec<(String, Vec<f32>)>>>,
 }
 
 impl Storage {
@@ -36,6 +41,8 @@ impl Storage {
             conn,
             content_dim,
             trigger_dim,
+            vec_content_cache: RefCell::new(None),
+            vec_trigger_cache: RefCell::new(None),
         };
         s.init_schema()?;
         Ok(s)
@@ -54,6 +61,8 @@ impl Storage {
             conn,
             content_dim: 1024,
             trigger_dim: 256,
+            vec_content_cache: RefCell::new(None),
+            vec_trigger_cache: RefCell::new(None),
         };
         Ok(s)
     }
@@ -219,6 +228,7 @@ impl Storage {
             "INSERT OR REPLACE INTO vec_content(chunk_id, embedding) VALUES (?,?)",
             params![chunk_id, emb],
         )?;
+        *self.vec_content_cache.borrow_mut() = None;
         Ok(())
     }
 
@@ -227,6 +237,7 @@ impl Storage {
             "INSERT OR REPLACE INTO vec_trigger(chunk_id, embedding) VALUES (?,?)",
             params![chunk_id, emb],
         )?;
+        *self.vec_trigger_cache.borrow_mut() = None;
         Ok(())
     }
 
@@ -295,32 +306,73 @@ impl Storage {
     // ------------------------------------------------------------------
 
     pub fn search_vec_content(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
-        self.search_vec("vec_content", query, limit)
+        self.search_vec(&self.vec_content_cache, "vec_content", query, limit)
     }
 
     pub fn search_vec_trigger(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
-        self.search_vec("vec_trigger", query, limit)
+        self.search_vec(&self.vec_trigger_cache, "vec_trigger", query, limit)
     }
 
-    fn search_vec(&self, table: &str, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
-        let sql = format!("SELECT chunk_id, embedding FROM {table}");
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut results: Vec<(String, f32)> = stmt
-            .query_map([], |r| {
-                let id: String = r.get(0)?;
-                let blob: Vec<u8> = r.get(1)?;
-                Ok((id, blob))
-            })?
-            .filter_map(|r| r.ok())
-            .map(|(id, blob)| {
-                let v = unpack_embedding(&blob);
-                let sim = cosine_similarity(query, &v);
-                (id, sim)
-            })
+    fn search_vec(
+        &self,
+        cache_cell: &RefCell<Option<Vec<(String, Vec<f32>)>>>,
+        table: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>> {
+        // Populate cache on first access after open or invalidation.
+        if cache_cell.borrow().is_none() {
+            let sql = format!("SELECT chunk_id, embedding FROM {table}");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let entries: Vec<(String, Vec<f32>)> = stmt
+                .query_map([], |r| {
+                    let id: String = r.get(0)?;
+                    let blob: Vec<u8> = r.get(1)?;
+                    Ok((id, blob))
+                })?
+                .filter_map(|r| r.ok())
+                .map(|(id, blob)| (id, unpack_embedding(&blob)))
+                .collect();
+            *cache_cell.borrow_mut() = Some(entries);
+        }
+
+        let cache = cache_cell.borrow();
+        let entries = cache.as_ref().unwrap();
+
+        // Compute similarities, then partial-sort to bring top-limit to the front (O(N log K)).
+        let mut results: Vec<(String, f32)> = entries
+            .iter()
+            .map(|(id, v)| (id.clone(), cosine_similarity(query, v)))
             .collect();
+        if results.len() > limit {
+            results.select_nth_unstable_by(limit - 1, |a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(limit);
+        }
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
         Ok(results)
+    }
+
+    /// Fetch multiple chunks by id in one query; returns a map of id → chunk JSON.
+    pub fn get_chunks_by_ids(&self, ids: &[&str]) -> Result<HashMap<String, Value>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT * FROM chunks WHERE id IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            row_to_json_with_names(r, &names)
+        })?;
+        let mut map = HashMap::with_capacity(ids.len());
+        for row in rows.filter_map(|r| r.ok()) {
+            if let Some(id) = row.get("id").and_then(Value::as_str) {
+                map.insert(id.to_string(), row);
+            }
+        }
+        Ok(map)
     }
 
     // ------------------------------------------------------------------
@@ -735,7 +787,10 @@ fn configure_pragmas(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA foreign_keys=ON;
-         PRAGMA synchronous=NORMAL;",
+         PRAGMA synchronous=NORMAL;
+         PRAGMA cache_size=-65536;
+         PRAGMA mmap_size=268435456;
+         PRAGMA temp_store=memory;",
     )?;
     // Validate WAL mode was accepted (some VFS/filesystems silently downgrade).
     let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
