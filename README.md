@@ -273,7 +273,7 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 
 ```
 Innate System
-├── Rust 核心 (innate/)
+├── Rust 核心 (core/)
 │   ├── KnowledgeBase (lib)     8 类 Public API, SQLite + 纯 Rust 余弦相似度
 │   ├── CLI (innate <cmd>)      clap 薄封装, 参数解析 → KnowledgeBase 调用
 │   └── MCP Server (innate mcp) JSON-RPC 2.0 over stdio, 13 个 MCP 工具
