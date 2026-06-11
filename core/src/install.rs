@@ -292,15 +292,24 @@ fn detect_agents(global: bool) -> Vec<Agent> {
     ]
 }
 
+fn binary_name() -> &'static str {
+    if cfg!(windows) { "innate.exe" } else { "innate" }
+}
+
+fn path_sep() -> char {
+    if cfg!(windows) { ';' } else { ':' }
+}
+
 fn which_binary(name: &str) -> Option<PathBuf> {
+    let exe = if cfg!(windows) && !name.ends_with(".exe") {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
     std::env::var("PATH").ok().and_then(|path| {
-        path.split(':').find_map(|dir| {
-            let p = PathBuf::from(dir).join(name);
-            if p.exists() {
-                Some(p)
-            } else {
-                None
-            }
+        path.split(path_sep()).find_map(|dir| {
+            let p = PathBuf::from(dir).join(&exe);
+            if p.exists() { Some(p) } else { None }
         })
     })
 }
@@ -715,9 +724,9 @@ fn remove_skill() -> ConfigStatus {
 }
 
 fn remove_binary_from_path() -> ConfigStatus {
-    let dest = home_dir().join(".local").join("bin").join("innate");
+    let dest = home_dir().join(".local").join("bin").join(binary_name());
     if !dest.exists() && !dest.is_symlink() {
-        return ConfigStatus::Skipped("~/.local/bin/innate not found".into());
+        return ConfigStatus::Skipped(format!("~/.local/bin/{} not found", binary_name()));
     }
     match std::fs::remove_file(&dest) {
         Ok(()) => ConfigStatus::Updated(dest),
@@ -867,9 +876,8 @@ fn check_on_path() -> Option<PathBuf> {
 fn install_to_path(current_exe: &Path) -> anyhow::Result<PathBuf> {
     let local_bin = home_dir().join(".local").join("bin");
     std::fs::create_dir_all(&local_bin)?;
-    let dest = local_bin.join("innate");
+    let dest = local_bin.join(binary_name());
 
-    // Symlink preferred; fall back to copy.
     if dest.exists() || dest.is_symlink() {
         std::fs::remove_file(&dest)?;
     }
@@ -884,7 +892,7 @@ fn install_to_path(current_exe: &Path) -> anyhow::Result<PathBuf> {
 
 fn path_has_local_bin() -> bool {
     std::env::var("PATH")
-        .map(|p| p.split(':').any(|d| d.contains(".local/bin")))
+        .map(|p| p.split(path_sep()).any(|d| d.contains(".local/bin")))
         .unwrap_or(false)
 }
 
@@ -941,6 +949,12 @@ pub fn run_install() -> anyhow::Result<()> {
                         bold(&dest.display().to_string())
                     ));
                     if !path_has_local_bin() {
+                        #[cfg(windows)]
+                        warn_line(&yellow(
+                            "Add ~/.local/bin to PATH:\
+                            \n│    [Environment]::SetEnvironmentVariable('PATH', $env:USERPROFILE + '\\.local\\bin;' + $env:PATH, 'User')",
+                        ));
+                        #[cfg(not(windows))]
                         warn_line(&yellow(
                             "Add ~/.local/bin to PATH in your shell profile:\
                             \n│    export PATH=\"$HOME/.local/bin:$PATH\"",
