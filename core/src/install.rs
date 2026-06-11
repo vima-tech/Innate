@@ -6,6 +6,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use serde_json::{json, Value};
 
 const SKILL_MD: &str = include_str!("../../skills/innate-memory/SKILL.md");
@@ -473,27 +474,116 @@ fn configure_opencode(agent: &Agent, binary: &Path, _auto_allow: bool) -> Config
     }
 }
 
-fn install_claude_skill() -> ConfigStatus {
-    let dest_dir = home_dir()
-        .join(".claude")
-        .join("skills")
-        .join("innate-memory");
-    let dest = dest_dir.join("SKILL.md");
+fn skill_content_hash() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    SKILL_MD.hash(&mut h);
+    let v = h.finish();
+    format!("{v:016x}{:016x}{:08x}", !v, 0u32)
+}
 
-    if let Ok(existing) = std::fs::read_to_string(&dest) {
-        if existing == SKILL_MD {
-            return ConfigStatus::Unchanged(dest);
+fn update_skill_lock(installing: bool) {
+    let lock_path = home_dir().join(".agents").join(".skill-lock.json");
+    let mut lock: Value =
+        read_json(&lock_path).unwrap_or_else(|| json!({"version": 3, "skills": {}}));
+
+    if installing {
+        let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let installed_at = lock
+            .pointer("/skills/innate-memory/installedAt")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| now.clone());
+
+        lock.as_object_mut()
+            .unwrap()
+            .entry("skills")
+            .or_insert(json!({}))
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "innate-memory".to_string(),
+                json!({
+                    "source": "local",
+                    "sourceType": "local",
+                    "sourceUrl": null,
+                    "skillPath": "skills/innate-memory/SKILL.md",
+                    "skillFolderHash": skill_content_hash(),
+                    "installedAt": installed_at,
+                    "updatedAt": now,
+                }),
+            );
+    } else if let Some(skills) = lock.pointer_mut("/skills") {
+        if let Some(obj) = skills.as_object_mut() {
+            obj.remove("innate-memory");
         }
     }
 
-    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+    let _ = write_json(&lock_path, &lock);
+}
+
+fn install_skill() -> ConfigStatus {
+    let agents_dir = home_dir()
+        .join(".agents")
+        .join("skills")
+        .join("innate-memory");
+    let skill_file = agents_dir.join("SKILL.md");
+    let claude_link = home_dir()
+        .join(".claude")
+        .join("skills")
+        .join("innate-memory");
+
+    // Already current?
+    let up_to_date = std::fs::read_to_string(&skill_file)
+        .map(|s| s == SKILL_MD)
+        .unwrap_or(false)
+        && (claude_link.is_symlink() || claude_link.exists());
+    if up_to_date {
+        return ConfigStatus::Unchanged(skill_file);
+    }
+
+    // Write SKILL.md into ~/.agents/skills/innate-memory/
+    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
+        return ConfigStatus::Error(e.to_string());
+    }
+    if let Err(e) = std::fs::write(&skill_file, SKILL_MD) {
         return ConfigStatus::Error(e.to_string());
     }
 
-    match std::fs::write(&dest, SKILL_MD) {
-        Ok(()) => ConfigStatus::Updated(dest),
-        Err(e) => ConfigStatus::Error(e.to_string()),
+    // Ensure ~/.claude/skills/ exists
+    let claude_skills = home_dir().join(".claude").join("skills");
+    if let Err(e) = std::fs::create_dir_all(&claude_skills) {
+        return ConfigStatus::Error(e.to_string());
     }
+
+    // Remove existing link/dir at ~/.claude/skills/innate-memory
+    if claude_link.is_symlink() || claude_link.exists() {
+        let _ = std::fs::remove_file(&claude_link);
+        let _ = std::fs::remove_dir_all(&claude_link);
+    }
+
+    // Symlink ~/.claude/skills/innate-memory -> ../../.agents/skills/innate-memory
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if let Err(e) = symlink("../../.agents/skills/innate-memory", &claude_link) {
+            return ConfigStatus::Error(format!("symlink: {e}"));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows fallback: copy directly
+        let dest = claude_link.join("SKILL.md");
+        if let Err(e) = std::fs::create_dir_all(&claude_link)
+            .and_then(|_| std::fs::write(&dest, SKILL_MD))
+        {
+            return ConfigStatus::Error(e.to_string());
+        }
+    }
+
+    update_skill_lock(true);
+    ConfigStatus::Updated(skill_file)
 }
 
 // ── Uninstall helpers ────────────────────────────────────────────────────────
@@ -588,18 +678,40 @@ fn remove_opencode_config() -> ConfigStatus {
     }
 }
 
-fn remove_claude_skill_dir() -> ConfigStatus {
-    let skill_dir = home_dir()
+fn remove_skill() -> ConfigStatus {
+    let agents_dir = home_dir()
+        .join(".agents")
+        .join("skills")
+        .join("innate-memory");
+    let claude_link = home_dir()
         .join(".claude")
         .join("skills")
         .join("innate-memory");
-    if !skill_dir.exists() {
+
+    let mut removed = false;
+
+    if agents_dir.exists() {
+        match std::fs::remove_dir_all(&agents_dir) {
+            Ok(()) => removed = true,
+            Err(e) => return ConfigStatus::Error(e.to_string()),
+        }
+    }
+
+    if claude_link.is_symlink() || claude_link.exists() {
+        if claude_link.is_symlink() {
+            let _ = std::fs::remove_file(&claude_link);
+        } else {
+            let _ = std::fs::remove_dir_all(&claude_link);
+        }
+        removed = true;
+    }
+
+    if !removed {
         return ConfigStatus::Skipped("skill not installed".into());
     }
-    match std::fs::remove_dir_all(&skill_dir) {
-        Ok(()) => ConfigStatus::Updated(skill_dir),
-        Err(e) => ConfigStatus::Error(e.to_string()),
-    }
+
+    update_skill_lock(false);
+    ConfigStatus::Updated(agents_dir)
 }
 
 fn remove_binary_from_path() -> ConfigStatus {
@@ -698,7 +810,7 @@ pub fn run_uninstall(yes: bool, purge_data: bool) -> anyhow::Result<()> {
     }
 
     // ── 4. Remove skill ────────────────────────────────────────────────────
-    match remove_claude_skill_dir() {
+    match remove_skill() {
         ConfigStatus::Updated(p) => {
             result_line(&format!(
                 "{}: Removed skill {}",
@@ -892,7 +1004,7 @@ pub fn run_install() -> anyhow::Result<()> {
         }
 
         if agent.id == "claude" {
-            match install_claude_skill() {
+            match install_skill() {
                 ConfigStatus::Updated(p) => {
                     result_line(&format!(
                         "{}: Installed skill {}",
