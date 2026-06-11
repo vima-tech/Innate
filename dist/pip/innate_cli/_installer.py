@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ._platform import get_target, get_binary_name, get_exe_suffix
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 _REPO = "vima-tech/Innate"
 
 

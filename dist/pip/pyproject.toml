@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "innate-ai"
-version = "0.1.2"
+version = "0.1.3"
 description = "Self-growing procedural knowledge layer for AI agents"
 readme = "README.md"
 license = { text = "MIT" }
