@@ -8,10 +8,10 @@ use serde_json::{json, Value};
 
 use crate::embedding::{EmbeddingProvider, DummyEmbeddingProvider};
 use crate::errors::{InnateError, Result};
-use crate::refine::{Distiller, HeuristicDistiller, NullRefiner, Refiner};
+use crate::refine::{DefaultSanitizer, Distiller, HeuristicDistiller, NullRefiner, Refiner, Sanitizer};
 use crate::storage::{ChunkRow, EpisodicLogRow, Storage};
 use crate::utils::{
-    content_hash, sanitize, SanitizeAction, estimate_tokens, gen_uuid, pack_embedding, utc_now_iso,
+    content_hash, SanitizeAction, estimate_tokens, gen_uuid, pack_embedding, utc_now_iso,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,8 +99,7 @@ pub struct KnowledgeBase {
     refiner: Arc<dyn Refiner>,
     distiller: Arc<dyn Distiller>,
     curator: Arc<dyn Curator>,
-    /// None = sanitize disabled (KnowledgeBase::open_with can set to false).
-    sanitize: Option<bool>,
+    sanitizer: Arc<dyn Sanitizer>,
 
     // Tuning params (loaded from meta at init)
     w_content: f64,
@@ -125,7 +124,7 @@ pub struct KnowledgeBase {
 
 impl KnowledgeBase {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_with(db_path, None, None, None, None)
+        Self::open_with(db_path, None, None, None, None, None)
     }
 
     pub fn open_with(
@@ -134,12 +133,14 @@ impl KnowledgeBase {
         refiner: Option<Arc<dyn Refiner>>,
         distiller: Option<Arc<dyn Distiller>>,
         curator: Option<Arc<dyn Curator>>,
+        sanitizer: Option<Arc<dyn Sanitizer>>,
     ) -> Result<Self> {
         let embedding = embedding
             .unwrap_or_else(|| Arc::new(DummyEmbeddingProvider::default()));
         let refiner = refiner.unwrap_or_else(|| Arc::new(NullRefiner));
         let distiller = distiller.unwrap_or_else(|| Arc::new(HeuristicDistiller));
         let curator = curator.unwrap_or_else(|| Arc::new(BuiltinCurator));
+        let sanitizer = sanitizer.unwrap_or_else(|| Arc::new(DefaultSanitizer));
 
         let storage = Storage::open(
             db_path,
@@ -153,7 +154,7 @@ impl KnowledgeBase {
             refiner,
             distiller,
             curator,
-            sanitize: Some(true),
+            sanitizer,
             w_content: W_CONTENT,
             w_trigger: W_TRIGGER,
             w_confidence: W_CONFIDENCE,
@@ -207,6 +208,7 @@ impl KnowledgeBase {
             ("curate.promote_confidence_min", "0.65"),
             ("evolve.threshold_new_count", "5"),
             ("evolve.distill_batch_size", "20"),
+            ("curate.soft_mature_threshold", "5"),
         ];
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
@@ -904,7 +906,7 @@ impl KnowledgeBase {
             let gap_days = chunk.get("last_used_at").and_then(Value::as_str)
                 .map(|t| iso_days_diff(now, t) as f64)
                 .unwrap_or(0.0);
-            1.0 + KAPPA * (-(gap_days / W_DAYS) * std::f64::consts::LN_2).exp()
+            (1.0 + KAPPA * (-(gap_days / W_DAYS) * std::f64::consts::LN_2).exp()).min(1.5)
         } else {
             1.0
         };
@@ -939,6 +941,15 @@ impl KnowledgeBase {
         let (content, action) = self.sanitize_content(content);
         if action == SanitizeAction::Discard { return Ok(String::new()); }
 
+        let trigger_clean = trigger_desc.and_then(|t| {
+            let (cleaned, act) = self.sanitizer.sanitize(t);
+            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+        });
+        let anti_trigger_clean = anti_trigger_desc.and_then(|t| {
+            let (cleaned, act) = self.sanitizer.sanitize(t);
+            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+        });
+
         let h = content_hash(&content);
         if self.storage.is_hash_invalidated(&h)? {
             return Err(InnateError::InvalidState("content hash is invalidated".into()));
@@ -959,7 +970,7 @@ impl KnowledgeBase {
         let chunk_id = gen_uuid();
         let redacted = action == SanitizeAction::Redact;
 
-        let (origin, state, conf, prot, state_reason) = if source == "agent" {
+        let (origin, state, conf, prot, init_state_reason) = if source == "agent" {
             ("captured", "pending", if redacted { 0.4 } else { 0.60 }, 0, "init:captured_agent")
         } else if kind == "skill" {
             ("installed", "active", if redacted { 0.4 } else { 0.85 }, 1, "init:installed")
@@ -967,37 +978,44 @@ impl KnowledgeBase {
             ("captured", "active", if redacted { 0.4 } else { 0.60 }, 0, "init:captured")
         };
 
+        // Embedding — fall back to embedding_pending on failure.
+        let trigger_str = trigger_clean.as_deref().unwrap_or(&content);
+        let (cvec, tvec, embed_ver, final_state_reason) =
+            match (self.embedding.embed_content(&content), self.embedding.embed_trigger(trigger_str)) {
+                (Ok(cv), Ok(tv)) => (cv, tv, 1i64, init_state_reason.to_string()),
+                _ => (vec![], vec![], 0i64, format!("embedding_pending:target={state}")),
+            };
+
         let tokens = estimate_tokens(&content) as i64;
         let row = ChunkRow {
             id: chunk_id.clone(),
             skill_name: skill_name.map(str::to_string),
             content: content.clone(),
-            trigger_desc: trigger_desc.map(str::to_string),
-            anti_trigger_desc: anti_trigger_desc.map(str::to_string),
+            trigger_desc: trigger_clean.clone(),
+            anti_trigger_desc: anti_trigger_clean.clone(),
             content_hash: h,
             token_count: Some(tokens),
             origin: origin.to_string(),
             source: Some(source.to_string()),
             protected: prot,
             state: state.to_string(),
-            state_reason: Some(state_reason.to_string()),
+            state_reason: Some(final_state_reason),
             confidence: conf,
             confidence_reason: Some(format!("init:{origin}")),
             version: 1,
-            embed_version: 1,
+            embed_version: embed_ver,
             created_at: now.clone(),
             updated_at: now.clone(),
             ..Default::default()
         };
 
-        let cvec = self.embedding.embed_content(&content)?;
-        let tvec = self.embedding.embed_trigger(trigger_desc.unwrap_or(&content))?;
-
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
-            self.storage.insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-            self.storage.insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+            if embed_ver > 0 {
+                self.storage.insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
+                self.storage.insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+            }
             self.storage.commit()
         })();
         if result.is_err() { let _ = self.storage.rollback(); }
@@ -1018,6 +1036,15 @@ impl KnowledgeBase {
         let (content, action) = self.sanitize_content(content);
         if action == SanitizeAction::Discard { return Ok(String::new()); }
 
+        let trigger_clean = trigger_desc.and_then(|t| {
+            let (cleaned, act) = self.sanitizer.sanitize(t);
+            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+        });
+        let anti_trigger_clean = anti_trigger_desc.and_then(|t| {
+            let (cleaned, act) = self.sanitizer.sanitize(t);
+            if act == SanitizeAction::Discard { None } else { Some(cleaned) }
+        });
+
         let h = content_hash(&content);
         if self.storage.is_hash_invalidated(&h)? {
             return Err(InnateError::InvalidState("content hash is invalidated".into()));
@@ -1031,33 +1058,41 @@ impl KnowledgeBase {
         let now = utc_now_iso();
         let chunk_id = gen_uuid();
         let tokens = estimate_tokens(&content) as i64;
+
+        let trigger_str = trigger_clean.as_deref().unwrap_or(&content);
+        let (cvec, tvec, embed_ver, state_reason) =
+            match (self.embedding.embed_content(&content), self.embedding.embed_trigger(trigger_str)) {
+                (Ok(cv), Ok(tv)) => (cv, tv, 1i64, "init:spark".to_string()),
+                _ => (vec![], vec![], 0i64, "embedding_pending:target=active".to_string()),
+            };
+
         let row = ChunkRow {
             id: chunk_id.clone(),
             content: content.clone(),
-            trigger_desc: trigger_desc.map(str::to_string),
-            anti_trigger_desc: anti_trigger_desc.map(str::to_string),
+            trigger_desc: trigger_clean.clone(),
+            anti_trigger_desc: anti_trigger_clean.clone(),
             content_hash: h,
             token_count: Some(tokens),
             origin: "spark".to_string(),
             maturity: Some("seed".to_string()),
             related_ids: if related.is_empty() { None } else { Some(related.join(",")) },
             state: "active".to_string(),
+            state_reason: Some(state_reason),
             confidence: 0.5,
             version: 1,
-            embed_version: 1,
+            embed_version: embed_ver,
             created_at: now.clone(),
             updated_at: now.clone(),
             ..Default::default()
         };
 
-        let cvec = self.embedding.embed_content(&content)?;
-        let tvec = self.embedding.embed_trigger(trigger_desc.unwrap_or(&content))?;
-
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
-            self.storage.insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-            self.storage.insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+            if embed_ver > 0 {
+                self.storage.insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
+                self.storage.insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+            }
             self.storage.commit()
         })();
         if result.is_err() { let _ = self.storage.rollback(); }
@@ -1783,6 +1818,23 @@ impl KnowledgeBase {
                 .chars().take(80).collect::<String>(),
         })).collect();
 
+        let mut suggestions: Vec<Value> = Vec::new();
+        if embed_rebuild > 0 {
+            suggestions.push(json!({"action": "innate evolve --rebuild-embeddings", "reason": format!("{embed_rebuild} chunk(s) missing embeddings")}));
+        }
+        if new_logs > 0 {
+            suggestions.push(json!({"action": "innate evolve --trigger manual", "reason": format!("{new_logs} episodic log(s) ready to distill")}));
+        }
+        if pending > 0 {
+            suggestions.push(json!({"action": "innate approve <id>  # or innate archive <id>", "reason": format!("{pending} pending chunk(s) awaiting review")}));
+        }
+        if !recurring_spark_ids.is_empty() {
+            suggestions.push(json!({"action": "innate promote-spark <id> --to note", "reason": format!("{} spark(s) recalled ≥{spark_threshold}× — consider promoting", recurring_spark_ids.len())}));
+        }
+        if stale_screening > 0 {
+            suggestions.push(json!({"action": "innate evolve --trigger manual", "reason": format!("{stale_screening} episodic log(s) stuck in screening")}));
+        }
+
         Ok(json!({
             "schema_version": schema_version,
             "lib_id": lib_id,
@@ -1808,7 +1860,8 @@ impl KnowledgeBase {
                 "curate.promote_confidence_min": self.promote_confidence_min,
                 "curate.screening_timeout_minutes": self.screening_timeout_minutes,
                 "curate.open_ttl_days": self.open_ttl_days,
-            }
+            },
+            "suggestions": suggestions
         }))
     }
 
@@ -1913,15 +1966,7 @@ impl KnowledgeBase {
     // ------------------------------------------------------------------
 
     fn sanitize_content(&self, content: &str) -> (String, SanitizeAction) {
-        if self.sanitize.is_none() {
-            return (content.to_string(), SanitizeAction::Allow);
-        }
-        let (cleaned, action) = sanitize(content);
-        if action == SanitizeAction::Discard {
-            (String::new(), SanitizeAction::Discard)
-        } else {
-            (cleaned, action)
-        }
+        self.sanitizer.sanitize(content)
     }
 }
 

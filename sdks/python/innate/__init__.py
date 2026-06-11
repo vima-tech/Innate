@@ -20,5 +20,6 @@ Usage::
 """
 
 from .client import KnowledgeBase, RecallResult
+from .errors import OutcomeConflictError
 
-__all__ = ["KnowledgeBase", "RecallResult"]
+__all__ = ["KnowledgeBase", "OutcomeConflictError", "RecallResult"]

@@ -303,7 +303,26 @@ fn process_log_file(
         ).unwrap_or(0);
         if already > 0 { continue; }
 
-        // Look up trace for this watch path.
+        // Handle "start": recall to open a trace and store it.
+        if event_type == "start" {
+            match call_cli_recall(db_path, &line) {
+                Ok(tid) => {
+                    let ts = crate::utils::utc_now_iso();
+                    let _ = state_db.execute(
+                        "INSERT OR REPLACE INTO trace_context(watch_path, trace_id, updated_at) VALUES (?,?,?)",
+                        rusqlite::params![path_str.as_ref(), &tid, &ts],
+                    );
+                    let _ = state_db.execute(
+                        "INSERT OR IGNORE INTO processed_events(event_id, watch_path, trace_id, event_type, ts) VALUES (?,?,?,?,?)",
+                        rusqlite::params![event_id, path_str.as_ref(), &tid, event_type, &ts],
+                    );
+                }
+                Err(e) => { let _ = writeln!(log, "[innate-daemon] recall for start event failed: {e}"); }
+            }
+            continue;
+        }
+
+        // Look up trace for this watch path (ok/fail events).
         let trace_id: Option<String> = state_db.query_row(
             "SELECT trace_id FROM trace_context WHERE watch_path=?",
             rusqlite::params![path_str.as_ref()],
@@ -339,10 +358,14 @@ fn process_log_file(
 }
 
 fn classify_log_line(line: &str) -> Option<&'static str> {
-    // §九 event mapping: success patterns → "ok", failure patterns → "fail".
+    // §九 event mapping: start patterns → "start", success → "ok", failure → "fail".
+    let start_patterns   = ["Starting ", "Running ", "Executing ", "BEGIN ", "Task started"];
     let success_patterns = ["Build successful", "Tests passed", "✓ ", " passed"];
     let fail_patterns    = ["SyntaxError", "Error:", "FAILED", "test result: FAILED"];
 
+    for p in &start_patterns {
+        if line.contains(p) { return Some("start"); }
+    }
     for p in &success_patterns {
         if line.contains(p) { return Some("ok"); }
     }
@@ -378,6 +401,22 @@ fn call_cli_record(
         }
         Err(e) => anyhow::bail!("record exec failed: {e}"),
     }
+}
+
+fn call_cli_recall(db_path: &str, query: &str) -> anyhow::Result<String> {
+    let self_exe = std::env::current_exe()?;
+    let output = std::process::Command::new(&self_exe)
+        .args(["--db", db_path, "recall", query, "--format", "json", "--source", "daemon"])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("recall exited non-zero: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| anyhow::anyhow!("recall json parse error: {e}"))?;
+    parsed.get("trace_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no trace_id in recall output"))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
