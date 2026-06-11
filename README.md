@@ -25,7 +25,7 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 
 ```bash
 # 从源码编译
-cd innate && cargo build --release
+cd core && cargo build --release
 cp target/release/innate ~/.local/bin/   # 加入 PATH
 
 # 验证
@@ -72,7 +72,7 @@ npm install @innate/sdk  # 或 npm install ./sdks/typescript/
 1. 编译并安装 Rust 二进制:
 
 ```bash
-cd innate && cargo build --release
+cd core && cargo build --release
 cp target/release/innate ~/.local/bin/
 ```
 
@@ -329,13 +329,13 @@ Innate System
 
 ```bash
 # 编译
-cd innate && cargo build --release
+cd core && cargo build --release
 
 # 运行全量测试
-cd innate && cargo test
+cd core && cargo test
 
 # 运行单个测试
-cd innate && cargo test test_add_and_recall
+cd core && cargo test test_add_and_recall
 
 # 检视默认知识库
 innate inspect

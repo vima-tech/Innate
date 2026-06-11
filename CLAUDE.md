@@ -6,11 +6,11 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ```bash
 # Build the binary
-cd innate && cargo build --release
-# Binary: innate/target/release/innate
+cd core && cargo build --release
+# Binary: core/target/release/innate
 
 # Run tests
-cd innate && cargo test
+cd core && cargo test
 
 # Run the CLI (after adding to PATH or using full path)
 innate recall "query" --format json
@@ -29,7 +29,7 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 {
   "mcpServers": {
     "innate": {
-      "command": "/path/to/innate/target/release/innate",
+      "command": "/path/to/core/target/release/innate",
       "args": ["mcp"]
     }
   }
@@ -50,7 +50,7 @@ innate mcp                ← MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
 KnowledgeBase (lib)       ← core: all 8 Public APIs, SQLite + pure-Rust vector search
 ```
 
-### Crate layout (`innate/crates/innate-core/src/`)
+### Crate layout (`core/src/`)
 
 | File | Role |
 |---|---|
