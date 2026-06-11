@@ -1,10 +1,9 @@
 ---
 name: innate-memory
 description: >
-  Self-growing procedural knowledge layer for agents.
-  ACTIVATE TO READ when starting complex tasks, debugging recurring issues, referencing past patterns, or avoiding repeated mistakes.
-  ACTIVATE TO WRITE when the user says "remember this", "save this insight", "follow this rule from now on", "log this lesson", or after successfully solving a hard problem worth distilling.
-  Activate even when "memory" is not explicitly mentioned — any situation involving experience reuse or knowledge capture qualifies.
+  Procedural knowledge layer: call innate_recall before any task, innate_record after any task.
+  Activate when: starting a coding/debugging/analysis task; user says "remember", "save", "log",
+  or "follow this rule"; a hard problem is solved and the lesson is worth keeping.
 license: MIT
 metadata:
   author: vima-tech
