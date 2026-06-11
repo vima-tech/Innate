@@ -125,7 +125,13 @@ jobs:
         working-directory: core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if curl -fsS "https://crates.io/api/v1/crates/innate/$VERSION" >/dev/null; then
+            echo "innate $VERSION is already published"
+          else
+            cargo publish --allow-dirty
+          fi
 
   publish-npm:
     name: Publish to npm
@@ -141,13 +147,19 @@ jobs:
         working-directory: dist/npm
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
       - name: Publish
         working-directory: dist/npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           INNATE_SKIP_DOWNLOAD: "1"
-        run: npm publish --access public
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@vima_tech/innate@$VERSION" version >/dev/null 2>&1; then
+            echo "@vima_tech/innate $VERSION is already published"
+          else
+            npm publish --access public
+          fi
 
   publish-pypi:
     name: Publish to PyPI
@@ -177,4 +189,10 @@ jobs:
         env:
           HATCH_INDEX_USER: __token__
           HATCH_INDEX_AUTH: ${{ secrets.PYPI_TOKEN }}
-        run: hatch publish --no-prompt
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if curl -fsS "https://pypi.org/pypi/innate-ai/$VERSION/json" >/dev/null; then
+            echo "innate-ai $VERSION is already published"
+          else
+            hatch publish --no-prompt
+          fi
