@@ -70,9 +70,13 @@ jobs:
           Copy-Item core\target\${{ matrix.target }}\release\innate.exe `
                     innate-${{ matrix.target }}.exe
 
-      - name: Compute SHA-256 (unix)
-        if: matrix.os != 'windows-latest'
+      - name: Compute SHA-256 (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: sha256sum innate-${{ matrix.target }} > innate-${{ matrix.target }}.sha256
+
+      - name: Compute SHA-256 (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        run: shasum -a 256 innate-${{ matrix.target }} > innate-${{ matrix.target }}.sha256
 
       - name: Compute SHA-256 (windows)
         if: matrix.os == 'windows-latest'
