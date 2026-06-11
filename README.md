@@ -24,7 +24,10 @@ Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**�
 ### Rust 核心 (唯一运行时)
 
 ```bash
-# 从源码编译
+# 推荐：从 crates.io 直接安装
+cargo install innate
+
+# 或从源码编译
 cd core && cargo build --release
 cp target/release/innate ~/.local/bin/   # 加入 PATH
 
@@ -35,13 +38,21 @@ innate inspect
 ### Python SDK
 
 ```bash
-pip install innate-py   # 或 pip install -e sdks/python/
+# CLI 二进制安装器（推荐，自动下载对应平台二进制）
+pip install innate-ai
+
+# Python SDK（程序化调用）
+pip install innate-py
 ```
 
 ### TypeScript SDK
 
 ```bash
-npm install @innate/sdk  # 或 npm install ./sdks/typescript/
+# CLI 二进制安装器（推荐，自动下载对应平台二进制）
+npm install -g @vima_tech/innate
+
+# TypeScript SDK（程序化调用）
+npm install @innate/sdk
 ```
 
 ### MCP 服务 (Claude Code / Claude Desktop)
