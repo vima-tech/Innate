@@ -208,7 +208,7 @@ pub fn run() -> anyhow::Result<()> {
     if let Commands::Migrate = &cli.command {
         let applied = crate::migrate::run_migrations(&db_path)?;
         if applied.is_empty() {
-            println!("already at 4.5.1 — nothing to do");
+            println!("already at 4.5.2 — nothing to do");
         } else {
             for step in &applied {
                 println!("  applied: {step}");

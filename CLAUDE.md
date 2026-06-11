@@ -84,7 +84,7 @@ MCP and CLI call `KnowledgeBase` directly (in-process). SDKs and Daemon never op
 | `mcp.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
 | `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
 | `daemon.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
-| `schema.sql` | Embedded schema (v4.5.1); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v4.5.2); `include_str!` at compile time |
 
 ### The 8 Public APIs (on `KnowledgeBase`)
 

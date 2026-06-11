@@ -55,7 +55,11 @@ impl Refiner for NullRefiner {
     }
 }
 
-/// Distiller — episodic log → new pending chunks.
+/// Distiller — episodic logs → at most one pending chunk per input log.
+///
+/// `KnowledgeBase` currently invokes this interface with one log at a time and
+/// rejects adapters that return more than one chunk for that log. This preserves
+/// the `chunks.distilled_from` uniqueness invariant used for idempotency.
 pub trait Distiller: Send + Sync {
     fn distill(&self, log_entries: &[Value]) -> Result<Vec<DistilledChunk>>;
 }

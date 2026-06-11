@@ -730,7 +730,7 @@ fn process_alive(_pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{init_state_db, parse_log_event};
+    use super::{event_id_for_line, init_state_db, parse_log_event};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -789,5 +789,12 @@ mod tests {
         assert_eq!(event.feedback.as_deref(), Some("up"));
         assert_eq!(event.nomination.as_deref(), Some("keep this approach"));
         assert_eq!(event.priority, 7);
+    }
+
+    #[test]
+    fn generated_event_id_changes_after_log_rotation() {
+        let before = event_id_for_line("/tmp/agent.log", "inode-1", 42, "Tests passed");
+        let after = event_id_for_line("/tmp/agent.log", "inode-2", 42, "Tests passed");
+        assert_ne!(before, after);
     }
 }

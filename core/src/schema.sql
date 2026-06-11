@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.5.1 (Rust edition)
+-- Innate knowledge layer schema v4.5.2 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.5.1');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.5.2');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -133,7 +133,8 @@ CREATE TABLE IF NOT EXISTS episodic_log (
     distill_run_id    TEXT,
     distill_locked_at TEXT,
     distill_prompt_tokens     INTEGER,
-    distill_completion_tokens INTEGER
+    distill_completion_tokens INTEGER,
+    distill_accounted_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_log_dstate ON episodic_log(distill_state);
 CREATE INDEX IF NOT EXISTS idx_log_prio   ON episodic_log(priority);
@@ -142,6 +143,9 @@ CREATE INDEX IF NOT EXISTS idx_log_distill_run ON episodic_log(distill_run_id);
 CREATE INDEX IF NOT EXISTS idx_log_screening_locked
   ON episodic_log(distill_state, distill_locked_at)
   WHERE distill_state = 'screening';
+CREATE INDEX IF NOT EXISTS idx_log_distill_accounted
+  ON episodic_log(distill_accounted_at)
+  WHERE distill_accounted_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS chunk_success_traces (
     chunk_id  TEXT NOT NULL,

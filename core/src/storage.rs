@@ -1,9 +1,9 @@
 //! SQLite storage layer.
 //!
 //! Replaces sqlite-vec virtual tables with ordinary BLOB columns + pure-Rust
-//! cosine similarity, keeping the schema otherwise identical to v4.5.1.
+//! cosine similarity, keeping the schema otherwise aligned with v4.5.x.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -13,10 +13,13 @@ use serde_json::Value;
 use crate::errors::{InnateError, Result};
 use crate::utils::{cosine_similarity, unpack_embedding};
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.5.1";
+const EXPECTED_SCHEMA_VERSION: &str = "4.5.2";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("schema.sql");
+
+type VectorEntries = Vec<(String, Vec<f32>)>;
+type VectorCache = RefCell<Option<VectorEntries>>;
 
 pub struct Storage {
     pub db_path: PathBuf,
@@ -24,8 +27,10 @@ pub struct Storage {
     pub content_dim: usize,
     pub trigger_dim: usize,
     /// Pre-parsed in-memory caches for vector search; None = cold (not loaded or invalidated).
-    vec_content_cache: RefCell<Option<Vec<(String, Vec<f32>)>>>,
-    vec_trigger_cache: RefCell<Option<Vec<(String, Vec<f32>)>>>,
+    vec_content_cache: VectorCache,
+    vec_trigger_cache: VectorCache,
+    /// Last observed vector revision. Only vector writes advance this value.
+    vector_cache_revision: Cell<Option<i64>>,
 }
 
 impl Storage {
@@ -43,6 +48,7 @@ impl Storage {
             trigger_dim,
             vec_content_cache: RefCell::new(None),
             vec_trigger_cache: RefCell::new(None),
+            vector_cache_revision: Cell::new(None),
         };
         s.init_schema()?;
         Ok(s)
@@ -63,6 +69,7 @@ impl Storage {
             trigger_dim: 256,
             vec_content_cache: RefCell::new(None),
             vec_trigger_cache: RefCell::new(None),
+            vector_cache_revision: Cell::new(None),
         };
         Ok(s)
     }
@@ -237,6 +244,11 @@ impl Storage {
             "INSERT OR REPLACE INTO vec_trigger(chunk_id, embedding) VALUES (?,?)",
             params![chunk_id, emb],
         )?;
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('vector_revision', '1')
+             ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
+            [],
+        )?;
         *self.vec_trigger_cache.borrow_mut() = None;
         Ok(())
     }
@@ -315,11 +327,16 @@ impl Storage {
 
     fn search_vec(
         &self,
-        cache_cell: &RefCell<Option<Vec<(String, Vec<f32>)>>>,
+        cache_cell: &VectorCache,
         table: &str,
         query: &[f32],
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.refresh_vector_caches_if_changed()?;
+
         // Populate cache on first access after open or invalidation.
         if cache_cell.borrow().is_none() {
             let sql = format!("SELECT chunk_id, embedding FROM {table}");
@@ -352,6 +369,19 @@ impl Storage {
         }
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(results)
+    }
+
+    fn refresh_vector_caches_if_changed(&self) -> Result<()> {
+        let current = self
+            .get_meta("vector_revision")?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        let previous = self.vector_cache_revision.replace(Some(current));
+        if previous.is_some_and(|revision| revision != current) {
+            *self.vec_content_cache.borrow_mut() = None;
+            *self.vec_trigger_cache.borrow_mut() = None;
+        }
+        Ok(())
     }
 
     /// Fetch multiple chunks by id in one query; returns a map of id → chunk JSON.
@@ -566,17 +596,31 @@ impl Storage {
         Ok(())
     }
 
-    pub fn update_episodic_log_tokens(
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_distill_log(
         &self,
         id: &str,
+        state: &str,
+        note: Option<&str>,
         prompt_tokens: i64,
         completion_tokens: i64,
+        accounted_at: &str,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE episodic_log
-             SET distill_prompt_tokens=?, distill_completion_tokens=?
+             SET distill_state=?, distill_note=?,
+                 distill_prompt_tokens=?, distill_completion_tokens=?,
+                 distill_accounted_at=?,
+                 distill_run_id=NULL, distill_locked_at=NULL
              WHERE id=?",
-            params![prompt_tokens, completion_tokens, id],
+            params![
+                state,
+                note,
+                prompt_tokens,
+                completion_tokens,
+                accounted_at,
+                id
+            ],
         )?;
         Ok(())
     }

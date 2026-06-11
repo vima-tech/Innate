@@ -208,11 +208,12 @@ impl KnowledgeBase {
         let defaults: &[(&str, &str)] = &[
             ("lib_id", &lib_id),
             ("lib_role", "personal"),
-            ("schema_version", "4.5.1"),
+            ("schema_version", "4.5.2"),
             ("content_dim", &content_dim),
             ("trigger_dim", &trigger_dim),
             ("embed_model", embed_model),
             ("embed_version", "1"),
+            ("vector_revision", "0"),
             ("last_agg_ts", "1970-01-01T00:00:00.000Z"),
             ("recall.w_content", "0.65"),
             ("recall.w_trigger", "0.25"),
@@ -277,7 +278,8 @@ impl KnowledgeBase {
         self.w_content = f("recall.w_content", W_CONTENT);
         self.w_trigger = f("recall.w_trigger", W_TRIGGER);
         self.w_confidence = f("recall.w_confidence", W_CONFIDENCE);
-        self.top_k_candidates = i("recall.top_k_candidates", TOP_K_CANDIDATES as i64) as usize;
+        self.top_k_candidates =
+            i("recall.top_k_candidates", TOP_K_CANDIDATES as i64).max(1) as usize;
         self.anti_trigger_penalty = f("recall.anti_trigger_penalty", ANTI_TRIGGER_PENALTY);
         self.density_refill = b("recall.density_refill", DENSITY_REFILL);
         self.low_conf_threshold = f("curate.low_conf_threshold", LOW_CONF_THRESHOLD);
@@ -415,7 +417,9 @@ impl KnowledgeBase {
         // Collect unique ids and batch-fetch all chunks in two queries instead of N individual ones.
         let all_ids: Vec<&str> = {
             let mut seen = HashSet::new();
-            content_res.iter().chain(trigger_res.iter())
+            content_res
+                .iter()
+                .chain(trigger_res.iter())
                 .map(|(id, _)| id.as_str())
                 .filter(|id| seen.insert(*id))
                 .collect()
@@ -1831,18 +1835,12 @@ impl KnowledgeBase {
             {
                 // Use a rolling time window so the limit can't cause a permanent lockout.
                 // Window length is configurable via evolve.distill_token_window_hours (default 24h).
-                let window_hours = self
-                    .storage
-                    .get_meta("evolve.distill_token_window_hours")?
-                    .and_then(|v| v.parse::<i64>().ok())
-                    .unwrap_or(24)
-                    .max(1);
-                let period_start = hours_ago(&utc_now_iso(), window_hours);
+                let period_start = self.distill_token_period_start(&utc_now_iso())?;
                 let rows = self.storage.query_chunks_params(
                     "SELECT COALESCE(SUM(distill_prompt_tokens),0)
                             + COALESCE(SUM(distill_completion_tokens),0) AS used
                      FROM episodic_log
-                     WHERE ts >= ?",
+                     WHERE distill_accounted_at >= ?",
                     rusqlite::params![period_start],
                 )?;
                 let used = rows
@@ -1904,18 +1902,11 @@ impl KnowledgeBase {
         for log in &logs {
             let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
             let prompt_tokens = estimate_distill_prompt_tokens(log);
-            self.storage
-                .update_episodic_log_tokens(log_id, prompt_tokens, 0)?;
             let chunks = match self.distiller.distill(std::slice::from_ref(log)) {
                 Ok(chunks) => chunks,
                 Err(error) => {
                     let note = format!("distill_failed:{error}");
-                    self.storage.update_episodic_log_state_by_id(
-                        log_id,
-                        "failed",
-                        Some(&note),
-                        None,
-                    )?;
+                    self.finish_distill_log(log_id, "failed", Some(&note), prompt_tokens, 0)?;
                     continue;
                 }
             };
@@ -1923,119 +1914,180 @@ impl KnowledgeBase {
                 .iter()
                 .map(estimate_distilled_chunk_tokens)
                 .sum::<i64>();
-            self.storage
-                .update_episodic_log_tokens(log_id, prompt_tokens, completion_tokens)?;
             if chunks.is_empty() {
-                let _ = self.storage.update_episodic_log_state_by_id(
+                self.finish_distill_log(
                     log_id,
                     "discarded",
                     Some("insufficient_material"),
-                    None,
-                );
+                    prompt_tokens,
+                    completion_tokens,
+                )?;
+                continue;
+            }
+            if chunks.len() != 1 {
+                let note = format!("distill_failed:expected_one_chunk_got_{}", chunks.len());
+                self.finish_distill_log(
+                    log_id,
+                    "failed",
+                    Some(&note),
+                    prompt_tokens,
+                    completion_tokens,
+                )?;
                 continue;
             }
 
-            // Prepare all chunk rows + embeddings outside the write transaction
-            // so that slow embedding calls don't hold an exclusive lock.
-            let mut prepared: Vec<(ChunkRow, Vec<u8>, Vec<u8>)> = Vec::new();
-            for dc in chunks {
-                let (content, action) = self.sanitize_content(&dc.content);
-                if action == SanitizeAction::Discard {
-                    let _ = self.storage.update_episodic_log_state_by_id(
-                        log_id,
-                        "discarded",
-                        Some("sanitize_discard"),
-                        None,
-                    );
-                    continue;
-                }
-                let h = content_hash(&content);
-                if self.storage.is_hash_invalidated(&h)? {
-                    let _ = self.storage.update_episodic_log_state_by_id(
-                        log_id,
-                        "discarded",
-                        Some("invalidated_hash"),
-                        None,
-                    );
-                    continue;
-                }
-                let redacted = action == SanitizeAction::Redact;
-                let conf = if redacted { 0.4 } else { 0.45 };
-                let now2 = utc_now_iso();
-                let chunk_id = gen_uuid();
-                let tokens = estimate_tokens(&content) as i64;
-                let row = ChunkRow {
-                    id: chunk_id.clone(),
-                    content: content.clone(),
-                    trigger_desc: dc.trigger_desc,
-                    anti_trigger_desc: dc.anti_trigger_desc,
-                    content_hash: h,
-                    token_count: Some(tokens),
-                    origin: "distilled".to_string(),
-                    distilled_from: Some(dc.source_log_id),
-                    state: "pending".to_string(),
-                    state_reason: Some("init:distilled".to_string()),
-                    confidence: conf,
-                    confidence_reason: Some("init:distilled".to_string()),
-                    version: 1,
-                    embed_version: 1,
-                    created_at: now2.clone(),
-                    updated_at: now2.clone(),
-                    ..Default::default()
-                };
-                let cvec = match self.embedding.embed_content(&content) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        let _ = self.storage.update_episodic_log_state_by_id(
-                            log_id,
-                            "failed",
-                            Some("embedding_failed"),
-                            None,
-                        );
-                        continue;
-                    }
-                };
-                let tvec = match self
-                    .embedding
-                    .embed_trigger(row.trigger_desc.as_deref().unwrap_or(&content))
-                {
-                    Ok(v) => v,
-                    Err(_) => {
-                        let _ = self.storage.update_episodic_log_state_by_id(
-                            log_id,
-                            "failed",
-                            Some("embedding_failed"),
-                            None,
-                        );
-                        continue;
-                    }
-                };
-                prepared.push((row, pack_embedding(&cvec), pack_embedding(&tvec)));
+            // Prepare the chunk + embeddings outside the write transaction so
+            // slow embedding calls do not hold an exclusive SQLite lock.
+            let dc = chunks.into_iter().next().expect("length checked above");
+            let (content, action) = self.sanitize_content(&dc.content);
+            if action == SanitizeAction::Discard {
+                self.finish_distill_log(
+                    log_id,
+                    "discarded",
+                    Some("sanitize_discard"),
+                    prompt_tokens,
+                    completion_tokens,
+                )?;
+                continue;
             }
-
-            // Write all prepared chunks + mark log distilled in one atomic transaction.
-            // This prevents a crash window where chunks exist but log stays 'screening'.
-            if !prepared.is_empty() {
-                self.storage.begin_immediate()?;
-                let r = (|| -> Result<()> {
-                    for (row, cvec_bytes, tvec_bytes) in &prepared {
-                        self.storage.insert_chunk(row)?;
-                        self.storage.insert_vec_content(&row.id, cvec_bytes)?;
-                        self.storage.insert_vec_trigger(&row.id, tvec_bytes)?;
-                    }
-                    self.storage.update_episodic_log_state_by_id(
-                        log_id, "distilled", None, None,
+            let h = content_hash(&content);
+            if self.storage.is_hash_invalidated(&h)? {
+                self.finish_distill_log(
+                    log_id,
+                    "discarded",
+                    Some("invalidated_hash"),
+                    prompt_tokens,
+                    completion_tokens,
+                )?;
+                continue;
+            }
+            let redacted = action == SanitizeAction::Redact;
+            let conf = if redacted { 0.4 } else { 0.45 };
+            let now2 = utc_now_iso();
+            let chunk_id = gen_uuid();
+            let tokens = estimate_tokens(&content) as i64;
+            let row = ChunkRow {
+                id: chunk_id.clone(),
+                content: content.clone(),
+                trigger_desc: dc.trigger_desc,
+                anti_trigger_desc: dc.anti_trigger_desc,
+                content_hash: h,
+                token_count: Some(tokens),
+                origin: "distilled".to_string(),
+                distilled_from: Some(dc.source_log_id),
+                state: "pending".to_string(),
+                state_reason: Some("init:distilled".to_string()),
+                confidence: conf,
+                confidence_reason: Some("init:distilled".to_string()),
+                version: 1,
+                embed_version: 1,
+                created_at: now2.clone(),
+                updated_at: now2,
+                ..Default::default()
+            };
+            let cvec = match self.embedding.embed_content(&content) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.finish_distill_log(
+                        log_id,
+                        "failed",
+                        Some("embedding_failed"),
+                        prompt_tokens,
+                        completion_tokens,
                     )?;
-                    self.storage.commit()
-                })();
-                if r.is_err() {
-                    let _ = self.storage.rollback();
-                    r?;
+                    continue;
                 }
-                count += prepared.len();
+            };
+            let tvec = match self
+                .embedding
+                .embed_trigger(row.trigger_desc.as_deref().unwrap_or(&content))
+            {
+                Ok(v) => v,
+                Err(_) => {
+                    self.finish_distill_log(
+                        log_id,
+                        "failed",
+                        Some("embedding_failed"),
+                        prompt_tokens,
+                        completion_tokens,
+                    )?;
+                    continue;
+                }
+            };
+            let cvec_bytes = pack_embedding(&cvec);
+            let tvec_bytes = pack_embedding(&tvec);
+            let accounted_at = utc_now_iso();
+
+            // Write the chunk, vectors, token accounting, and terminal log state
+            // in one transaction.
+            // This prevents a crash window where chunks exist but log stays 'screening'.
+            self.storage.begin_immediate()?;
+            let result = (|| -> Result<()> {
+                self.storage.insert_chunk(&row)?;
+                self.storage.insert_vec_content(&row.id, &cvec_bytes)?;
+                self.storage.insert_vec_trigger(&row.id, &tvec_bytes)?;
+                self.storage.finish_distill_log(
+                    log_id,
+                    "distilled",
+                    None,
+                    prompt_tokens,
+                    completion_tokens,
+                    &accounted_at,
+                )?;
+                self.storage.commit()
+            })();
+            if let Err(error) = result {
+                let _ = self.storage.rollback();
+                let note = format!("distill_write_failed:{error}");
+                self.finish_distill_log(
+                    log_id,
+                    "failed",
+                    Some(&note),
+                    prompt_tokens,
+                    completion_tokens,
+                )?;
+                continue;
             }
+            count += 1;
         }
         Ok(count)
+    }
+
+    fn finish_distill_log(
+        &self,
+        log_id: &str,
+        state: &str,
+        note: Option<&str>,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+    ) -> Result<()> {
+        let accounted_at = utc_now_iso();
+        self.storage.begin_immediate()?;
+        let result = (|| -> Result<()> {
+            self.storage.finish_distill_log(
+                log_id,
+                state,
+                note,
+                prompt_tokens,
+                completion_tokens,
+                &accounted_at,
+            )?;
+            self.storage.commit()
+        })();
+        if result.is_err() {
+            let _ = self.storage.rollback();
+        }
+        result
+    }
+
+    fn distill_token_period_start(&self, now: &str) -> Result<String> {
+        let window_hours = self
+            .storage
+            .get_meta("evolve.distill_token_window_hours")?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(24)
+            .max(1);
+        Ok(hours_ago(now, window_hours))
     }
 
     pub(crate) fn builtin_curate_impl(&self, scope: &CurateScope) -> Result<CurateReport> {
@@ -2491,11 +2543,14 @@ impl KnowledgeBase {
             rusqlite::params![screening_cutoff],
         )?;
 
-        // Health signal 4: distill cost estimate from retained logs.
-        let distill_cost = self.storage.query_chunks(
+        // Health signal 4: actual Distill cost within the configured rolling window.
+        let distill_period_start = self.distill_token_period_start(&utc_now_iso())?;
+        let distill_cost = self.storage.query_chunks_params(
             "SELECT COALESCE(SUM(distill_prompt_tokens),0) AS pt,
                     COALESCE(SUM(distill_completion_tokens),0) AS ct
-             FROM episodic_log",
+             FROM episodic_log
+             WHERE distill_accounted_at >= ?",
+            rusqlite::params![distill_period_start],
         )?;
         let prompt_tokens = distill_cost
             .first()
