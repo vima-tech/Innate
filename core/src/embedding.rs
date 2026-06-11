@@ -3,6 +3,9 @@ use crate::utils::{content_hash, pack_embedding};
 
 /// Embedding provider trait — swap for real models at construction time.
 pub trait EmbeddingProvider: Send + Sync {
+    fn model_name(&self) -> &'static str {
+        "custom"
+    }
     fn content_dim(&self) -> usize;
     fn trigger_dim(&self) -> usize;
     fn embed_content(&self, text: &str) -> Result<Vec<f32>>;
@@ -31,6 +34,10 @@ impl Default for DummyEmbeddingProvider {
 }
 
 impl EmbeddingProvider for DummyEmbeddingProvider {
+    fn model_name(&self) -> &'static str {
+        "DummyEmbeddingProvider"
+    }
+
     fn content_dim(&self) -> usize {
         self.content_dim
     }

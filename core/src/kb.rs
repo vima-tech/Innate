@@ -16,7 +16,8 @@ use serde_json::{json, Value};
 use crate::embedding::{DummyEmbeddingProvider, EmbeddingProvider};
 use crate::errors::{InnateError, Result};
 use crate::refine::{
-    DefaultSanitizer, Distiller, HeuristicDistiller, NullRefiner, Refiner, Sanitizer,
+    DefaultSanitizer, DistilledChunk, Distiller, HeuristicDistiller, NullRefiner, Refiner,
+    Sanitizer,
 };
 use crate::storage::{ChunkRow, EpisodicLogRow, Storage};
 use crate::utils::{
@@ -186,13 +187,31 @@ impl KnowledgeBase {
         let lib_id = gen_uuid();
         let content_dim = self.embedding.content_dim().to_string();
         let trigger_dim = self.embedding.trigger_dim().to_string();
+        let embed_model = self.embedding.model_name();
+
+        for (key, expected) in [
+            ("content_dim", self.embedding.content_dim()),
+            ("trigger_dim", self.embedding.trigger_dim()),
+        ] {
+            if let Some(stored) = self.storage.get_meta(key)? {
+                let actual = stored.parse::<usize>().map_err(|_| {
+                    InnateError::Other(format!("invalid {key} metadata value: {stored}"))
+                })?;
+                if actual != expected {
+                    return Err(InnateError::Other(format!(
+                        "{key} mismatch: database uses {actual}, embedding provider uses {expected}"
+                    )));
+                }
+            }
+        }
+
         let defaults: &[(&str, &str)] = &[
             ("lib_id", &lib_id),
             ("lib_role", "personal"),
             ("schema_version", "4.5.1"),
             ("content_dim", &content_dim),
             ("trigger_dim", &trigger_dim),
-            ("embed_model", "DummyEmbeddingProvider"),
+            ("embed_model", embed_model),
             ("embed_version", "1"),
             ("last_agg_ts", "1970-01-01T00:00:00.000Z"),
             ("recall.w_content", "0.65"),
@@ -332,11 +351,14 @@ impl KnowledgeBase {
             selected = self.density_refill(selected, &skipped, budget);
         }
 
-        let limited = limit_knowledge(selected.clone(), top);
-        let visible = self
-            .refiner
-            .refine(limited, Some(budget))
-            .unwrap_or_else(|_| limit_knowledge(selected, top));
+        let limited = limit_knowledge(selected, top);
+        let visible = if refine_mode == "adapt" {
+            self.refiner
+                .refine(limited.clone(), Some(budget))
+                .unwrap_or(limited)
+        } else {
+            limited
+        };
 
         // Sparks
         let sparks = if include_sparks {
@@ -1789,6 +1811,33 @@ impl KnowledgeBase {
             if cnt < self.evolve_threshold {
                 return Ok(json!({"distilled": 0, "curate": null}));
             }
+
+            if let Some(limit) = self
+                .storage
+                .get_meta("max_distill_tokens_per_period")?
+                .and_then(|value| value.parse::<i64>().ok())
+                .filter(|value| *value > 0)
+            {
+                let rows = self.storage.query_chunks(
+                    "SELECT COALESCE(SUM(distill_prompt_tokens),0)
+                            + COALESCE(SUM(distill_completion_tokens),0) AS used
+                     FROM episodic_log",
+                )?;
+                let used = rows
+                    .first()
+                    .and_then(|row| row.get("used"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                if used >= limit {
+                    return Ok(json!({
+                        "distilled": 0,
+                        "curate": null,
+                        "skipped": "distill_token_limit",
+                        "distill_tokens_used": used,
+                        "distill_token_limit": limit,
+                    }));
+                }
+            }
         }
 
         let distilled = self.distill_batch()?;
@@ -1831,7 +1880,28 @@ impl KnowledgeBase {
         let mut count = 0;
         for log in &logs {
             let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
-            let chunks = self.distiller.distill(std::slice::from_ref(log))?;
+            let prompt_tokens = estimate_distill_prompt_tokens(log);
+            self.storage
+                .update_episodic_log_tokens(log_id, prompt_tokens, 0)?;
+            let chunks = match self.distiller.distill(std::slice::from_ref(log)) {
+                Ok(chunks) => chunks,
+                Err(error) => {
+                    let note = format!("distill_failed:{error}");
+                    self.storage.update_episodic_log_state_by_id(
+                        log_id,
+                        "failed",
+                        Some(&note),
+                        None,
+                    )?;
+                    continue;
+                }
+            };
+            let completion_tokens = chunks
+                .iter()
+                .map(estimate_distilled_chunk_tokens)
+                .sum::<i64>();
+            self.storage
+                .update_episodic_log_tokens(log_id, prompt_tokens, completion_tokens)?;
             if chunks.is_empty() {
                 // Mark log discarded — use id not trace_id for the update query
                 let _ = self.storage.update_episodic_log_state_by_id(
@@ -2043,6 +2113,7 @@ impl KnowledgeBase {
                      WHERE id=?",
                     rusqlite::params![note, id],
                 )?;
+                report.recovered.push(id.to_string());
                 report
                     .warnings
                     .push(format!("stale screening recovered as failed: {id}"));
@@ -2161,37 +2232,39 @@ impl KnowledgeBase {
             }
 
             // ── 4. Dedupe: same content_hash — keep protected or highest confidence ──
-            let dupes = self.storage.query_chunks(
+            let dupes = self.storage.query_chunks_params(
                 "SELECT content_hash FROM chunks
                  WHERE origin!='spark' AND state IN ('active','pending')
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)
                  GROUP BY content_hash HAVING COUNT(*) > 1",
+                rusqlite::params![scope_origin, scope_origin, scope_skill, scope_skill],
             )?;
             for d in &dupes {
                 if let Some(h) = d.get("content_hash").and_then(Value::as_str) {
                     let group = self.storage.query_chunks_params(
                         "SELECT id, confidence, protected FROM chunks
                          WHERE content_hash=? AND origin!='spark' AND state IN ('active','pending')
+                           AND (? IS NULL OR origin=?)
+                           AND (? IS NULL OR skill_name=?)
                          ORDER BY protected DESC, confidence DESC",
-                        rusqlite::params![h],
+                        rusqlite::params![h, scope_origin, scope_origin, scope_skill, scope_skill],
                     )?;
-                    let mut kept = false;
-                    for row in &group {
+                    let canonical_id = group
+                        .first()
+                        .and_then(|row| row.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    for row in group.iter().skip(1) {
                         let id = row.get("id").and_then(Value::as_str).unwrap_or("");
-                        if !kept {
-                            kept = true; // keep the best
-                        } else {
-                            let reason = format!(
-                                "duplicate:{}",
-                                group[0].get("id").and_then(Value::as_str).unwrap_or("")
-                            );
-                            self.storage.update_chunk_state(
-                                id,
-                                "archived",
-                                Some(&reason),
-                                &now_iso,
-                            )?;
-                            report.deduped.push(id.to_string());
-                        }
+                        let reason = format!("duplicate:{canonical_id}");
+                        self.storage
+                            .update_chunk_state(id, "archived", Some(&reason), &now_iso)?;
+                        self.storage.conn_execute(
+                            "UPDATE chunks SET parent_id=?, updated_at=? WHERE id=?",
+                            rusqlite::params![canonical_id, now_iso, id],
+                        )?;
+                        report.deduped.push(id.to_string());
                     }
                 }
             }
@@ -2259,12 +2332,37 @@ impl KnowledgeBase {
                 }
             }
 
-            // ── 7. Cycle detection (report only, no auto-fix) ──
+            // ── 7. Cycle/orphan detection (report only, no auto-fix) ──
             let all_deps = self
                 .storage
                 .query_chunks("SELECT src, dst FROM deps WHERE kind='hard'")?;
             let cycles = detect_cycles(&all_deps);
             report.cycles = cycles;
+            let orphan_rows = self.storage.query_chunks_params(
+                "SELECT d.src, d.dst, s.id AS src_exists, t.id AS dst_exists
+                 FROM deps d
+                 LEFT JOIN chunks s ON s.id=d.src
+                 LEFT JOIN chunks t ON t.id=d.dst
+                 WHERE d.kind='hard'
+                   AND (? IS NULL OR s.origin=?)
+                   AND (? IS NULL OR s.skill_name=?)",
+                rusqlite::params![scope_origin, scope_origin, scope_skill, scope_skill],
+            )?;
+            let mut orphans = HashSet::new();
+            for row in orphan_rows {
+                if row.get("src_exists").is_none_or(Value::is_null) {
+                    if let Some(id) = row.get("src").and_then(Value::as_str) {
+                        orphans.insert(id.to_string());
+                    }
+                }
+                if row.get("dst_exists").is_none_or(Value::is_null) {
+                    if let Some(id) = row.get("dst").and_then(Value::as_str) {
+                        orphans.insert(id.to_string());
+                    }
+                }
+            }
+            report.orphans = orphans.into_iter().collect();
+            report.orphans.sort();
 
             self.storage.commit()
         })();
@@ -2354,12 +2452,11 @@ impl KnowledgeBase {
             rusqlite::params![screening_cutoff],
         )?;
 
-        // Health signal 4: distill cost estimate from pending logs
+        // Health signal 4: distill cost estimate from retained logs.
         let distill_cost = self.storage.query_chunks(
             "SELECT COALESCE(SUM(distill_prompt_tokens),0) AS pt,
                     COALESCE(SUM(distill_completion_tokens),0) AS ct
-             FROM episodic_log
-             WHERE distill_state IN ('distilled','new')",
+             FROM episodic_log",
         )?;
         let prompt_tokens = distill_cost
             .first()
@@ -2595,6 +2692,34 @@ fn chunk_is_valid_for_recall(chunk: &Value, embed_version: i64) -> bool {
             .and_then(Value::as_i64)
             .unwrap_or(1)
             >= embed_version
+}
+
+fn estimate_distill_prompt_tokens(log: &Value) -> i64 {
+    [
+        "query",
+        "recall_snapshot",
+        "output",
+        "output_summary",
+        "nomination",
+    ]
+    .iter()
+    .filter_map(|key| log.get(*key).and_then(Value::as_str))
+    .map(|text| estimate_tokens(text) as i64)
+    .sum()
+}
+
+fn estimate_distilled_chunk_tokens(chunk: &DistilledChunk) -> i64 {
+    estimate_tokens(&chunk.content) as i64
+        + chunk
+            .trigger_desc
+            .as_deref()
+            .map(estimate_tokens)
+            .unwrap_or(0) as i64
+        + chunk
+            .anti_trigger_desc
+            .as_deref()
+            .map(estimate_tokens)
+            .unwrap_or(0) as i64
 }
 
 fn anti_trigger_hit(query: &str, anti: &str) -> bool {

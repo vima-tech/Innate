@@ -11,6 +11,7 @@ pub mod storage;
 pub mod upgrade;
 pub mod utils;
 
+#[cfg(test)]
 mod tests;
 
 pub use errors::{InnateError, Result};

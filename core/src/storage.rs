@@ -514,6 +514,21 @@ impl Storage {
         Ok(())
     }
 
+    pub fn update_episodic_log_tokens(
+        &self,
+        id: &str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE episodic_log
+             SET distill_prompt_tokens=?, distill_completion_tokens=?
+             WHERE id=?",
+            params![prompt_tokens, completion_tokens, id],
+        )?;
+        Ok(())
+    }
+
     /// Claim a batch of 'new' logs for distillation: mark them 'screening' atomically.
     /// Returns the claimed rows (with distill_run_id set to run_id).
     pub fn claim_distill_batch(

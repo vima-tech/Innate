@@ -175,6 +175,8 @@ pub enum DaemonCommands {
     Status {
         #[arg(long, value_name = "PATH")]
         state_db: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        pid_file: Option<std::path::PathBuf>,
     },
 }
 
@@ -453,8 +455,9 @@ fn run_daemon(action: &DaemonCommands, db_path: &std::path::Path) -> anyhow::Res
         DaemonCommands::Stop { pid_file } => {
             crate::daemon::stop(pid_file.as_deref().unwrap_or(&default_pid_file()))
         }
-        DaemonCommands::Status { state_db } => {
-            crate::daemon::status(state_db.as_deref().unwrap_or(&default_state_db()))
-        }
+        DaemonCommands::Status { state_db, pid_file } => crate::daemon::status(
+            state_db.as_deref().unwrap_or(&default_state_db()),
+            pid_file.as_deref().unwrap_or(&default_pid_file()),
+        ),
     }
 }

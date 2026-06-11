@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS trace_context (
     trace_id   TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS daemon_errors (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    watch_path TEXT,
+    operation  TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    ts         TEXT NOT NULL
+);
 "#;
 
 // ── Public entry points ──────────────────────────────────────────────────────
@@ -179,7 +187,19 @@ pub fn stop(pid_file: &Path) -> anyhow::Result<()> {
     }
 }
 
-pub fn status(state_db: &Path) -> anyhow::Result<()> {
+pub fn status(state_db: &Path, pid_file: &Path) -> anyhow::Result<()> {
+    let pid = read_pid(pid_file);
+    let running = pid.is_some_and(process_alive);
+    println!(
+        "status               : {}",
+        if running { "running" } else { "stopped" }
+    );
+    println!(
+        "pid                  : {}",
+        pid.map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+
     if !state_db.exists() {
         println!(
             "daemon_state.sqlite not found at {}; daemon has never run.",
@@ -194,8 +214,12 @@ pub fn status(state_db: &Path) -> anyhow::Result<()> {
     let processed: i64 = conn
         .query_row("SELECT count(*) FROM processed_events", [], |r| r.get(0))
         .unwrap_or(0);
+    let errors: i64 = conn
+        .query_row("SELECT count(*) FROM daemon_errors", [], |r| r.get(0))
+        .unwrap_or(0);
     println!("watch_state entries  : {count}");
     println!("processed events     : {processed}");
+    println!("errors               : {errors}");
     // List watch paths.
     let mut stmt =
         conn.prepare("SELECT watch_path, last_processed_offset, updated_at FROM watch_state")?;
@@ -332,22 +356,16 @@ fn process_log_file(
         };
         new_offset += line.len() as i64 + 1; // +1 for newline
 
-        // Event classification per §九 mapping table.
-        let event_type = classify_log_line(&line);
-        if event_type.is_none() {
+        let Some(event) = parse_log_event(&line) else {
             continue;
-        }
-        let event_type = event_type.unwrap();
+        };
+        let event_type = event.kind;
 
         // Compute event_id for idempotency.
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(path_str.as_bytes());
-        h.update(b":");
-        h.update(new_offset.to_string().as_bytes());
-        h.update(b":");
-        h.update(line.as_bytes());
-        let event_id = format!("{:x}", h.finalize());
+        let event_id = event
+            .event_id
+            .clone()
+            .unwrap_or_else(|| event_id_for_line(path_str.as_ref(), new_offset, &line));
 
         // Skip if already processed.
         let already: i64 = state_db
@@ -363,7 +381,8 @@ fn process_log_file(
 
         // Handle "start": recall to open a trace and store it.
         if event_type == "start" {
-            match call_cli_recall(db_path, &line) {
+            let query = event.query.as_deref().unwrap_or(&line);
+            match call_cli_recall(db_path, query) {
                 Ok(tid) => {
                     let ts = crate::utils::utc_now_iso();
                     let _ = state_db.execute(
@@ -377,35 +396,71 @@ fn process_log_file(
                 }
                 Err(e) => {
                     let _ = writeln!(log, "[innate-daemon] recall for start event failed: {e}");
+                    record_daemon_error(state_db, path_str.as_ref(), "recall", &e.to_string());
                 }
             }
             continue;
         }
 
-        // Look up trace for this watch path (ok/fail events).
-        let trace_id: Option<String> = state_db
+        // Look up trace for this watch path (ok/fail/end events).
+        let context_trace_id: Option<String> = state_db
             .query_row(
                 "SELECT trace_id FROM trace_context WHERE watch_path=?",
                 rusqlite::params![path_str.as_ref()],
                 |r| r.get(0),
             )
             .ok();
+        let trace_id = event.trace_id.clone().or(context_trace_id);
 
-        if let Some(tid) = &trace_id {
-            let outcome = match event_type {
-                "ok" => "ok",
-                "fail" => "fail",
-                _ => continue,
-            };
-            let result = call_cli_record(db_path, tid, outcome);
+        if event_type == "end" {
+            let result = call_cli_evolve(db_path);
             let ts = crate::utils::utc_now_iso();
-            let _ = state_db.execute(
-                "INSERT OR IGNORE INTO processed_events(event_id, watch_path, trace_id, event_type, ts)
-                 VALUES (?,?,?,?,?)",
-                rusqlite::params![event_id, path_str.as_ref(), tid, event_type, ts],
-            );
-            if let Err(e) = result {
-                let _ = writeln!(log, "[innate-daemon] record failed for trace {tid}: {e}");
+            match result {
+                Ok(()) => {
+                    let _ = state_db.execute(
+                        "DELETE FROM trace_context WHERE watch_path=?",
+                        rusqlite::params![path_str.as_ref()],
+                    );
+                    let _ = state_db.execute(
+                        "INSERT OR IGNORE INTO processed_events
+                         (event_id, watch_path, trace_id, event_type, ts)
+                         VALUES (?,?,?,?,?)",
+                        rusqlite::params![event_id, path_str.as_ref(), trace_id, event_type, ts],
+                    );
+                }
+                Err(e) => {
+                    let _ = writeln!(log, "[innate-daemon] evolve at session end failed: {e}");
+                    record_daemon_error(state_db, path_str.as_ref(), "evolve", &e.to_string());
+                }
+            }
+            continue;
+        }
+
+        if matches!(event_type, "ok" | "fail" | "feedback") {
+            let Some(tid) = &trace_id else {
+                record_daemon_error(
+                    state_db,
+                    path_str.as_ref(),
+                    "record",
+                    "event has no trace_id and no active trace context",
+                );
+                continue;
+            };
+            let result = call_cli_record(db_path, tid, &event);
+            let ts = crate::utils::utc_now_iso();
+            match result {
+                Ok(()) => {
+                    let _ = state_db.execute(
+                        "INSERT OR IGNORE INTO processed_events
+                         (event_id, watch_path, trace_id, event_type, ts)
+                         VALUES (?,?,?,?,?)",
+                        rusqlite::params![event_id, path_str.as_ref(), tid, event_type, ts],
+                    );
+                }
+                Err(e) => {
+                    let _ = writeln!(log, "[innate-daemon] record failed for trace {tid}: {e}");
+                    record_daemon_error(state_db, path_str.as_ref(), "record", &e.to_string());
+                }
             }
         }
     }
@@ -419,8 +474,70 @@ fn process_log_file(
     );
 }
 
-fn classify_log_line(line: &str) -> Option<&'static str> {
-    // §九 event mapping: start patterns → "start", success → "ok", failure → "fail".
+#[derive(Debug, Default)]
+struct DaemonEvent {
+    kind: &'static str,
+    event_id: Option<String>,
+    trace_id: Option<String>,
+    query: Option<String>,
+    output_summary: Option<String>,
+    outcome: Option<String>,
+    used: Vec<String>,
+    feedback: Option<String>,
+    nomination: Option<String>,
+    priority: i64,
+}
+
+fn parse_log_event(line: &str) -> Option<DaemonEvent> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        let event_type = value.get("event_type").and_then(ValueExt::string)?;
+        let (kind, default_outcome) = match event_type {
+            "session_start" => ("start", None),
+            "tool_success" => ("ok", Some("ok")),
+            "tool_error" => ("fail", Some("fail")),
+            "session_end" => ("end", None),
+            "user_feedback" => ("feedback", None),
+            _ => return None,
+        };
+        return Some(DaemonEvent {
+            kind,
+            event_id: value.get("event_id").and_then(ValueExt::owned_string),
+            trace_id: value.get("trace_id").and_then(ValueExt::owned_string),
+            query: value.get("query").and_then(ValueExt::owned_string),
+            output_summary: value.get("output_summary").and_then(ValueExt::owned_string),
+            outcome: value
+                .get("outcome")
+                .and_then(ValueExt::owned_string)
+                .or_else(|| default_outcome.map(str::to_string)),
+            used: value
+                .get("used")
+                .and_then(|used| used.as_array())
+                .map(|used| {
+                    used.iter()
+                        .filter_map(ValueExt::owned_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            feedback: value.get("feedback").and_then(ValueExt::owned_string),
+            nomination: value.get("nomination").and_then(ValueExt::owned_string),
+            priority: value.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
+        });
+    }
+
+    let kind = classify_text_line(line)?;
+    Some(DaemonEvent {
+        kind,
+        query: (kind == "start").then(|| line.to_string()),
+        outcome: match kind {
+            "ok" => Some("ok".to_string()),
+            "fail" => Some("fail".to_string()),
+            _ => None,
+        },
+        ..DaemonEvent::default()
+    })
+}
+
+fn classify_text_line(line: &str) -> Option<&'static str> {
     let start_patterns = [
         "Starting ",
         "Running ",
@@ -430,7 +547,18 @@ fn classify_log_line(line: &str) -> Option<&'static str> {
     ];
     let success_patterns = ["Build successful", "Tests passed", "✓ ", " passed"];
     let fail_patterns = ["SyntaxError", "Error:", "FAILED", "test result: FAILED"];
+    let end_patterns = [
+        "Session ended",
+        "Session End",
+        "Conversation closed",
+        "IDE exited",
+    ];
 
+    for p in &end_patterns {
+        if line.contains(p) {
+            return Some("end");
+        }
+    }
     for p in &start_patterns {
         if line.contains(p) {
             return Some("start");
@@ -449,45 +577,85 @@ fn classify_log_line(line: &str) -> Option<&'static str> {
     None
 }
 
-fn call_cli_record(db_path: &str, trace_id: &str, outcome: &str) -> anyhow::Result<()> {
-    let self_exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(&self_exe);
-    cmd.args([
-        "--db",
-        db_path,
-        "record",
-        trace_id,
-        "--outcome",
-        outcome,
-        "--source",
-        "daemon",
-    ]);
+trait ValueExt {
+    fn string(&self) -> Option<&str>;
+    fn owned_string(&self) -> Option<String>;
+}
 
-    let status = cmd.status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => {
-            // One retry with 200 ms backoff.
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let status2 = std::process::Command::new(&self_exe)
-                .args([
-                    "--db",
-                    db_path,
-                    "record",
-                    trace_id,
-                    "--outcome",
-                    outcome,
-                    "--source",
-                    "daemon",
-                ])
-                .status()?;
-            if status2.success() {
-                Ok(())
-            } else {
-                anyhow::bail!("record exited {:?} after retry", s.code())
-            }
+impl ValueExt for serde_json::Value {
+    fn string(&self) -> Option<&str> {
+        self.as_str().filter(|value| !value.is_empty())
+    }
+
+    fn owned_string(&self) -> Option<String> {
+        self.string().map(str::to_string)
+    }
+}
+
+fn event_id_for_line(watch_path: &str, offset: i64, line: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hash = Sha256::new();
+    hash.update(watch_path.as_bytes());
+    hash.update(b":");
+    hash.update(offset.to_string().as_bytes());
+    hash.update(b":");
+    hash.update(line.as_bytes());
+    format!("{:x}", hash.finalize())
+}
+
+fn record_daemon_error(
+    state_db: &rusqlite::Connection,
+    watch_path: &str,
+    operation: &str,
+    message: &str,
+) {
+    let _ = state_db.execute(
+        "INSERT INTO daemon_errors(watch_path, operation, message, ts)
+         VALUES (?,?,?,?)",
+        rusqlite::params![watch_path, operation, message, crate::utils::utc_now_iso()],
+    );
+}
+
+fn call_cli_record(db_path: &str, trace_id: &str, event: &DaemonEvent) -> anyhow::Result<()> {
+    let self_exe = std::env::current_exe()?;
+    let run = || {
+        let mut command = std::process::Command::new(&self_exe);
+        command.args(["--db", db_path, "record", trace_id]);
+        if let Some(query) = &event.query {
+            command.args(["--query", query]);
         }
-        Err(e) => anyhow::bail!("record exec failed: {e}"),
+        if let Some(outcome) = &event.outcome {
+            command.args(["--outcome", outcome]);
+        }
+        if !event.used.is_empty() {
+            command.args(["--used", &event.used.join(",")]);
+        }
+        if let Some(summary) = &event.output_summary {
+            command.args(["--output-summary", summary]);
+        }
+        if let Some(feedback) = &event.feedback {
+            command.args(["--feedback", feedback]);
+        }
+        if let Some(nomination) = &event.nomination {
+            command.args(["--nomination", nomination]);
+        }
+        command.args(["--priority", &event.priority.to_string()]);
+        command.args(["--source", "daemon"]);
+        command.status()
+    };
+
+    let first = run()?;
+    if first.success() {
+        return Ok(());
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let second = run()?;
+    if second.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("record exited {:?} after retry", second.code())
     }
 }
 
@@ -513,6 +681,27 @@ fn call_cli_recall(db_path: &str, query: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no trace_id in recall output"))
 }
 
+fn call_cli_evolve(db_path: &str) -> anyhow::Result<()> {
+    let self_exe = std::env::current_exe()?;
+    let run = || {
+        std::process::Command::new(&self_exe)
+            .args(["--db", db_path, "evolve", "--trigger", "manual"])
+            .status()
+    };
+    let first = run()?;
+    if first.success() {
+        return Ok(());
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let second = run()?;
+    if second.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("evolve exited {:?} after retry", second.code())
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn init_state_db(path: &Path) -> Result<()> {
@@ -533,4 +722,68 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn process_alive(_pid: u32) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{init_state_db, parse_log_event};
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn classifies_session_end_events() {
+        assert_eq!(
+            parse_log_event("Session ended").map(|event| event.kind),
+            Some("end")
+        );
+        assert_eq!(
+            parse_log_event(r#"{"event_type":"session_end"}"#).map(|event| event.kind),
+            Some("end")
+        );
+    }
+
+    #[test]
+    fn daemon_state_schema_tracks_errors() {
+        let file = NamedTempFile::new().unwrap();
+        init_state_db(file.path()).unwrap();
+        let conn = rusqlite::Connection::open(file.path()).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='daemon_errors'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn parses_structured_hook_payload() {
+        let event = parse_log_event(
+            r#"{
+                "event_id":"evt-1",
+                "event_type":"user_feedback",
+                "trace_id":"trace-1",
+                "query":"retry task",
+                "output_summary":"bounded retry worked",
+                "used":["chunk-1","chunk-2"],
+                "feedback":"up",
+                "nomination":"keep this approach",
+                "priority":7
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(event.kind, "feedback");
+        assert_eq!(event.event_id.as_deref(), Some("evt-1"));
+        assert_eq!(event.trace_id.as_deref(), Some("trace-1"));
+        assert_eq!(
+            event.output_summary.as_deref(),
+            Some("bounded retry worked")
+        );
+        assert_eq!(event.used, vec!["chunk-1", "chunk-2"]);
+        assert_eq!(event.feedback.as_deref(), Some("up"));
+        assert_eq!(event.nomination.as_deref(), Some("keep this approach"));
+        assert_eq!(event.priority, 7);
+    }
 }
