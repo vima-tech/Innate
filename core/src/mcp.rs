@@ -15,12 +15,12 @@ use crate::kb::KnowledgeBase;
 
 // Tool names
 const TOOLS: &[(&str, &str)] = &[
-    ("innate_recall",         "Search the knowledge base. Returns relevant chunks and a trace_id."),
-    ("innate_record",         "Close a trace with task outcome and optional feedback."),
+    ("innate_recall",         "Call FIRST at the start of any task — retrieve relevant knowledge from the knowledge base and get a trace_id for subsequent recording."),
+    ("innate_record",         "Call LAST after completing any task — close the trace_id from recall with outcome ok/fail/unknown and optional feedback."),
     ("innate_add",            "Capture a confirmed insight as a knowledge chunk (always starts as pending for agent source)."),
     ("innate_spark",          "Save a quick idea / hypothesis for later incubation."),
     ("innate_inspect",        "Show knowledge base health: chunk counts, debt ratio, embed rebuild queue."),
-    ("innate_evolve",         "Distil episodic logs → pending chunks + run curate (archive / decay / promote)."),
+    ("innate_evolve",         "Call at session end — distil episodic logs into pending chunks and run curate cycle (archive / decay / promote). Pass rebuild_embeddings=true to also rebuild the embedding index."),
     ("innate_approve",        "Approve a pending chunk, making it active."),
     ("innate_archive",        "Archive a knowledge chunk."),
     ("innate_invalidate",     "Invalidate a chunk and blacklist its content hash."),
@@ -117,7 +117,7 @@ fn handle_tool_call(kb: &Mutex<KnowledgeBase>, id: &Value, params: &Value) -> Va
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
     let result = {
-        let kb = kb.lock().unwrap();
+        let kb = kb.lock().unwrap_or_else(|e| e.into_inner());
         dispatch(&kb, name, &args)
     };
 
@@ -169,7 +169,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let top = args.get("top").and_then(Value::as_u64).map(|v| v as usize);
             let include_sparks = b("include_sparks", false);
             let source = if s("source").is_empty() {
-                "sdk".to_string()
+                "mcp".to_string()
             } else {
                 s("source")
             };
@@ -216,7 +216,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 Some(&fb_down)
             };
             let source = if s("source").is_empty() {
-                "sdk".to_string()
+                "mcp".to_string()
             } else {
                 s("source")
             };
@@ -330,7 +330,7 @@ fn tool_schema(name: &str) -> Value {
                 "budget": {"type": "integer", "description": "Token budget (default 6000)"},
                 "top": {"type": "integer", "description": "Max results"},
                 "include_sparks": {"type": "boolean"},
-                "source": {"type": "string", "enum": ["sdk","cli","hook","daemon","augmented"]}
+                "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]}
             },
             "required": ["query"]
         }),
@@ -338,6 +338,8 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "trace_id": {"type": "string"},
+                "query": {"type": "string", "description": "Original query from the corresponding recall"},
+                "output": {"type": "string", "description": "Raw task output (optional, for distillation)"},
                 "outcome": {"type": "string", "enum": ["ok","fail","unknown"]},
                 "used": {"type": "array", "items": {"type": "string"}},
                 "feedback_up": {"type": "array", "items": {"type": "string"}},
@@ -374,7 +376,8 @@ fn tool_schema(name: &str) -> Value {
         "innate_evolve" => json!({
             "type": "object",
             "properties": {
-                "trigger": {"type": "string", "enum": ["manual","scheduled","threshold"]}
+                "trigger": {"type": "string", "enum": ["manual","scheduled","threshold"]},
+                "rebuild_embeddings": {"type": "boolean", "description": "Also rebuild the embedding index before evolving"}
             }
         }),
         "innate_approve" | "innate_archive" | "innate_invalidate" | "innate_restore" => json!({
