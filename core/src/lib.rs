@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod daemon;
+pub mod install;
 pub mod embedding;
 pub mod errors;
 pub mod kb;

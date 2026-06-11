@@ -119,6 +119,8 @@ pub enum Commands {
         #[arg(long, default_value = "")]
         reason: String,
     },
+    /// Interactive setup wizard — configure agents to use Innate MCP server
+    Install,
     /// Upgrade database schema to current version
     Migrate,
     /// Daemon control (Linux only)
@@ -161,6 +163,10 @@ pub fn run() -> anyhow::Result<()> {
 
     if let Commands::Mcp = &cli.command {
         return crate::mcp::run_server(db_path);
+    }
+
+    if let Commands::Install = &cli.command {
+        return crate::install::run_install();
     }
 
     if let Commands::Migrate = &cli.command {
@@ -291,7 +297,7 @@ pub fn run() -> anyhow::Result<()> {
             kb.drop_spark(&spark_id, &reason)?;
             println!("dropped");
         }
-        Commands::Mcp | Commands::Migrate | Commands::Daemon { .. } => unreachable!(),
+        Commands::Mcp | Commands::Install | Commands::Migrate | Commands::Daemon { .. } => unreachable!(),
     }
     Ok(())
 }
