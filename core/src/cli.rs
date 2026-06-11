@@ -51,6 +51,11 @@ pub enum Commands {
         nomination: Option<String>,
         #[arg(long, default_value = "cli")]
         source: String,
+        /// Explicit feedback: up or down (applied to --used chunks if provided)
+        #[arg(long)]
+        feedback: Option<String>,
+        #[arg(long, default_value = "0")]
+        priority: i64,
     },
     /// Add a knowledge chunk
     Add {
@@ -76,9 +81,14 @@ pub enum Commands {
     Evolve {
         #[arg(long, default_value = "manual")]
         trigger: String,
+        /// Rebuild embeddings for chunks with embed_version=0 or < meta.embed_version
+        #[arg(long)]
+        rebuild_embeddings: bool,
     },
-    /// Health check
-    Inspect,
+    /// Health check — no arg = library summary; chunk_id or trace_id = detail view
+    Inspect {
+        id: Option<String>,
+    },
     /// Approve a pending chunk
     Approve { chunk_id: String },
     /// Archive a chunk
@@ -135,6 +145,10 @@ pub fn run() -> anyhow::Result<()> {
                 }))?),
                 "prompt" => {
                     println!("<!-- innate_trace_id: {} -->", result.trace_id);
+                    println!("<!-- innate_selected: {} -->",
+                        result.knowledge.iter()
+                            .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
+                            .collect::<Vec<_>>().join(","));
                     for chunk in &result.knowledge {
                         let content = chunk.get("content").and_then(|v| v.as_str()).unwrap_or("");
                         println!("{content}\n---");
@@ -152,14 +166,24 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Record { trace_id, outcome, used, output_summary, nomination, source } => {
+        Commands::Record { trace_id, outcome, used, output_summary, nomination, source, feedback, priority } => {
             let used_ref: Option<&[String]> = if used.is_empty() { None } else { Some(&used) };
+            // Per §二·五B: trace-level "up" applies only to explicitly used chunks.
+            let (fb_up, fb_down): (Option<Vec<String>>, Option<Vec<String>>) = match feedback.as_deref() {
+                Some("up")   if !used.is_empty() => (Some(used.clone()), None),
+                Some("down") if !used.is_empty() => (None, Some(used.clone())),
+                Some("up")   => (None, None), // no used chunks — ignore per design
+                Some("down") => (None, None),
+                _ => (None, None),
+            };
+            let fb_up_ref   = fb_up.as_deref();
+            let fb_down_ref = fb_down.as_deref();
             kb.record(
                 &trace_id, None, None,
                 output_summary.as_deref(),
                 outcome.as_deref(),
-                used_ref, None, None,
-                nomination.as_deref(), 0, &source,
+                used_ref, fb_up_ref, fb_down_ref,
+                nomination.as_deref(), priority, &source,
             )?;
             println!("recorded");
         }
@@ -171,13 +195,26 @@ pub fn run() -> anyhow::Result<()> {
             let id = kb.spark(&content, trigger.as_deref(), None)?;
             println!("{id}");
         }
-        Commands::Evolve { trigger } => {
-            let report = kb.evolve(&trigger)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+        Commands::Evolve { trigger, rebuild_embeddings } => {
+            if rebuild_embeddings {
+                let rebuilt = kb.rebuild_embeddings()?;
+                println!("rebuilt {rebuilt} embeddings");
+            } else {
+                let report = kb.evolve(&trigger)?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
         }
-        Commands::Inspect => {
-            let info = kb.inspect()?;
-            println!("{}", serde_json::to_string_pretty(&info)?);
+        Commands::Inspect { id } => {
+            match id.as_deref() {
+                None => {
+                    let info = kb.inspect()?;
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                }
+                Some(id) => {
+                    let detail = kb.inspect_id(id)?;
+                    println!("{}", serde_json::to_string_pretty(&detail)?);
+                }
+            }
         }
         Commands::Approve { chunk_id } => {
             kb.approve(&chunk_id)?;
