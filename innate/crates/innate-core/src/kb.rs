@@ -921,12 +921,13 @@ impl KnowledgeBase {
             return Err(InnateError::InvalidState(format!("invalid spark maturity transition: {current} -> {to}")));
         }
         let now = utc_now_iso();
-        self.storage.query_chunks_params(
+        self.storage.begin_immediate()?;
+        let result = self.storage.query_chunks_params(
             "UPDATE chunks SET maturity=?, updated_at=? WHERE id=?",
             rusqlite::params![to, now, spark_id],
-        )?;
-        self.storage.commit()?;
-        Ok(())
+        ).and_then(|_| self.storage.commit());
+        if result.is_err() { let _ = self.storage.rollback(); }
+        result.map(|_| ())
     }
 
     pub fn promote_spark(&self, spark_id: &str, to: &str) -> Result<String> {
@@ -1038,12 +1039,13 @@ impl KnowledgeBase {
         if maturity == "dropped" { return Ok(()); }
         let now = utc_now_iso();
         let reason_str = if reason.is_empty() { "dropped".to_string() } else { format!("dropped:{reason}") };
-        self.storage.query_chunks_params(
+        self.storage.begin_immediate()?;
+        let result = self.storage.query_chunks_params(
             "UPDATE chunks SET maturity='dropped', state_reason=?, updated_at=? WHERE id=?",
             rusqlite::params![reason_str, now, spark_id],
-        )?;
-        self.storage.commit()?;
-        Ok(())
+        ).and_then(|_| self.storage.commit());
+        if result.is_err() { let _ = self.storage.rollback(); }
+        result.map(|_| ())
     }
 
     // ------------------------------------------------------------------
@@ -1081,9 +1083,11 @@ impl KnowledgeBase {
             return Err(InnateError::InvalidState("spark lifecycle uses drop_spark() or invalidate()".into()));
         }
         let now = utc_now_iso();
-        self.storage.update_chunk_state(chunk_id, "archived", Some(reason), &now)?;
-        self.storage.commit()?;
-        Ok(())
+        self.storage.begin_immediate()?;
+        let result = self.storage.update_chunk_state(chunk_id, "archived", Some(reason), &now)
+            .and_then(|_| self.storage.commit());
+        if result.is_err() { let _ = self.storage.rollback(); }
+        result
     }
 
     pub fn invalidate(&self, chunk_id: &str, reason: &str) -> Result<()> {

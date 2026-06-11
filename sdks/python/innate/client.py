@@ -31,7 +31,7 @@ def _run(*args: str, check: bool = True) -> dict[str, Any]:
     except FileNotFoundError:
         raise RuntimeError(
             "innate binary not found. Install with: "
-            "cargo install --path <repo>/innate-rs"
+            "cargo install --path <repo>/innate"
         ) from None
     if result.returncode != 0:
         raise RuntimeError(f"innate error: {result.stderr.strip()}")

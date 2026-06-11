@@ -3,7 +3,7 @@
 ## Build
 
 ```bash
-cd innate-rs
+cd innate
 cargo build --release
 # Binary: target/release/innate
 ```

@@ -1,7 +1,7 @@
 """Innate Python SDK — thin subprocess wrapper over the `innate` binary.
 
 The Rust binary (`innate`) must be in PATH or passed as INNATE_BIN env var.
-Install the binary: `cargo install --path <repo>/innate-rs`
+Install the binary: `cargo install --path <repo>/innate`
 
 Usage::
 
