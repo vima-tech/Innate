@@ -232,6 +232,7 @@ impl KnowledgeBase {
             ("evolve.threshold_new_count", "5"),
             ("evolve.distill_batch_size", "20"),
             ("curate.soft_mature_threshold", "5"),
+            ("evolve.distill_token_window_hours", "24"),
         ];
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
@@ -1828,10 +1829,21 @@ impl KnowledgeBase {
                 .and_then(|value| value.parse::<i64>().ok())
                 .filter(|value| *value > 0)
             {
-                let rows = self.storage.query_chunks(
+                // Use a rolling time window so the limit can't cause a permanent lockout.
+                // Window length is configurable via evolve.distill_token_window_hours (default 24h).
+                let window_hours = self
+                    .storage
+                    .get_meta("evolve.distill_token_window_hours")?
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(24)
+                    .max(1);
+                let period_start = hours_ago(&utc_now_iso(), window_hours);
+                let rows = self.storage.query_chunks_params(
                     "SELECT COALESCE(SUM(distill_prompt_tokens),0)
                             + COALESCE(SUM(distill_completion_tokens),0) AS used
-                     FROM episodic_log",
+                     FROM episodic_log
+                     WHERE ts >= ?",
+                    rusqlite::params![period_start],
                 )?;
                 let used = rows
                     .first()
@@ -1845,6 +1857,7 @@ impl KnowledgeBase {
                         "skipped": "distill_token_limit",
                         "distill_tokens_used": used,
                         "distill_token_limit": limit,
+                        "period_start": period_start,
                     }));
                 }
             }
@@ -2000,7 +2013,8 @@ impl KnowledgeBase {
                 prepared.push((row, pack_embedding(&cvec), pack_embedding(&tvec)));
             }
 
-            // Write all prepared chunks for this log in a single transaction.
+            // Write all prepared chunks + mark log distilled in one atomic transaction.
+            // This prevents a crash window where chunks exist but log stays 'screening'.
             if !prepared.is_empty() {
                 self.storage.begin_immediate()?;
                 let r = (|| -> Result<()> {
@@ -2009,6 +2023,9 @@ impl KnowledgeBase {
                         self.storage.insert_vec_content(&row.id, cvec_bytes)?;
                         self.storage.insert_vec_trigger(&row.id, tvec_bytes)?;
                     }
+                    self.storage.update_episodic_log_state_by_id(
+                        log_id, "distilled", None, None,
+                    )?;
                     self.storage.commit()
                 })();
                 if r.is_err() {
@@ -2016,9 +2033,6 @@ impl KnowledgeBase {
                     r?;
                 }
                 count += prepared.len();
-                let _ = self.storage.update_episodic_log_state_by_id(
-                    log_id, "distilled", None, None,
-                );
             }
         }
         Ok(count)
@@ -2452,12 +2466,17 @@ impl KnowledgeBase {
 
         // Health signal 1: knowledge debt ratio
         // Zombie = active, confidence in [0.4, 0.6], created > 7d ago, non-spark
-        let zombie: i64 = count_query(
+        // Use Rust-computed cutoff to match the fixed YYYY-MM-DDTHH:MM:SS.mmmZ format;
+        // datetime('now') returns YYYY-MM-DD HH:MM:SS (space, no Z) which compares
+        // incorrectly at same-day boundaries against our ISO 8601 timestamps.
+        let zombie_cutoff = days_ago(&utc_now_iso(), 7);
+        let zombie: i64 = count_query_params(
             &self.storage,
             "SELECT COUNT(*) FROM chunks
              WHERE origin!='spark' AND state='active'
                AND confidence >= 0.4 AND confidence <= 0.6
-               AND created_at < datetime('now','-7 days')",
+               AND created_at < ?",
+            rusqlite::params![zombie_cutoff],
         )?;
         let debt_numerator = pending + zombie;
         let debt_denominator = active.max(1);
@@ -2814,6 +2833,15 @@ fn minutes_ago(now_iso: &str, minutes: i64) -> String {
     use chrono::{DateTime, Duration, Utc};
     if let Ok(t) = now_iso.parse::<DateTime<Utc>>() {
         let cutoff = t - Duration::minutes(minutes);
+        return cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    }
+    now_iso.to_string()
+}
+
+fn hours_ago(now_iso: &str, hours: i64) -> String {
+    use chrono::{DateTime, Duration, Utc};
+    if let Ok(t) = now_iso.parse::<DateTime<Utc>>() {
+        let cutoff = t - Duration::hours(hours);
         return cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     }
     now_iso.to_string()

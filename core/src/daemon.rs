@@ -362,10 +362,12 @@ fn process_log_file(
         let event_type = event.kind;
 
         // Compute event_id for idempotency.
+        // Include inode so that a rotated file at the same path with the same
+        // offset + content is not mistakenly treated as a duplicate event.
         let event_id = event
             .event_id
             .clone()
-            .unwrap_or_else(|| event_id_for_line(path_str.as_ref(), new_offset, &line));
+            .unwrap_or_else(|| event_id_for_line(path_str.as_ref(), &inode, new_offset, &line));
 
         // Skip if already processed.
         let already: i64 = state_db
@@ -592,11 +594,13 @@ impl ValueExt for serde_json::Value {
     }
 }
 
-fn event_id_for_line(watch_path: &str, offset: i64, line: &str) -> String {
+fn event_id_for_line(watch_path: &str, inode: &str, offset: i64, line: &str) -> String {
     use sha2::{Digest, Sha256};
 
     let mut hash = Sha256::new();
     hash.update(watch_path.as_bytes());
+    hash.update(b":");
+    hash.update(inode.as_bytes());
     hash.update(b":");
     hash.update(offset.to_string().as_bytes());
     hash.update(b":");

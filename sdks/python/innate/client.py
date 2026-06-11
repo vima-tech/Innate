@@ -29,9 +29,9 @@ def _run(*args: str, check: bool = True) -> dict[str, Any]:
     """Run the innate binary and parse JSON stdout."""
     cmd = [_binary()] + list(args)
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, check=check
-        )
+        # Never pass check=True to subprocess.run — CalledProcessError fires before
+        # we can inspect stderr for OutcomeConflict. Always check returncode ourselves.
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         raise RuntimeError(
             "innate binary not found. Install with: "
@@ -41,7 +41,8 @@ def _run(*args: str, check: bool = True) -> dict[str, Any]:
         stderr = result.stderr.strip()
         if "outcome_conflict" in stderr or "OutcomeConflict" in stderr:
             raise OutcomeConflictError(stderr)
-        raise RuntimeError(f"innate error: {stderr}")
+        if check:
+            raise RuntimeError(f"innate error: {stderr}")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError:
