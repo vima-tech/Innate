@@ -437,6 +437,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs-next",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

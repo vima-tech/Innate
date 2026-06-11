@@ -4,7 +4,14 @@ version     = "0.1.0"
 edition     = "2021"
 license     = "MIT"
 authors     = ["vima-tech"]
-description = "Innate — self-growing procedural knowledge layer"
+description = "Innate — self-growing procedural knowledge layer for AI agents"
+repository  = "https://github.com/innate-rs/innate"
+homepage    = "https://github.com/innate-rs/innate"
+documentation = "https://github.com/innate-rs/innate#readme"
+keywords    = ["mcp", "ai", "knowledge", "agent", "memory"]
+categories  = ["command-line-utilities", "database"]
+readme      = "../README.md"
+exclude     = ["../docs/", "../sdks/", "../dist/", "../skills/"]
 default-run = "innate"
 
 [[bin]]
