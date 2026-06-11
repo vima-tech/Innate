@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        working-directory: core
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        working-directory: core
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary (unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cp core/target/${{ matrix.target }}/release/innate \
+             innate-${{ matrix.target }}
+
+      - name: Rename binary (windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          Copy-Item core\target\${{ matrix.target }}\release\innate.exe `
+                    innate-${{ matrix.target }}.exe
+
+      - name: Compute SHA-256 (unix)
+        if: matrix.os != 'windows-latest'
+        run: sha256sum innate-${{ matrix.target }} > innate-${{ matrix.target }}.sha256
+
+      - name: Compute SHA-256 (windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          $hash = (Get-FileHash innate-${{ matrix.target }}.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  innate-${{ matrix.target }}.exe" | Out-File innate-${{ matrix.target }}.exe.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: innate-${{ matrix.target }}
+          path: innate-${{ matrix.target }}*
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/innate-*
+          generate_release_notes: true
+          draft: false
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish
+        working-directory: core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty
+
+  publish-npm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Sync version from tag
+        working-directory: dist/npm
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version
+      - name: Publish
+        working-directory: dist/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          INNATE_SKIP_DOWNLOAD: "1"
+        run: npm publish --access public
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build tools
+        run: pip install hatch
+      - name: Sync version from tag
+        working-directory: dist/pip
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+          sed -i "s/^__version__ = .*/__version__ = \"$VERSION\"/" innate_cli/__init__.py
+          sed -i "s/^__version__ = .*/__version__ = \"$VERSION\"/" innate_cli/_installer.py
+      - name: Build sdist + wheel
+        working-directory: dist/pip
+        env:
+          INNATE_SKIP_DOWNLOAD: "1"
+        run: hatch build
+      - name: Publish
+        working-directory: dist/pip
+        env:
+          HATCH_INDEX_AUTH: ${{ secrets.PYPI_TOKEN }}
+        run: hatch publish

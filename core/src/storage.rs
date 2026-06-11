@@ -345,8 +345,12 @@ impl Storage {
     }
 
     pub fn purge_usage_trace(&self, before_ts: &str) -> Result<usize> {
+        // Preserve spark 'retrieved' traces — they power soft-incubation counts (§二·七).
         let n = self.conn.execute(
-            "DELETE FROM usage_trace WHERE ts < ?",
+            "DELETE FROM usage_trace
+             WHERE ts < ?
+             AND NOT (event = 'retrieved'
+                      AND chunk_id IN (SELECT id FROM chunks WHERE origin='spark'))",
             [before_ts],
         )?;
         Ok(n)
@@ -394,16 +398,59 @@ impl Storage {
         outcome: Option<&str>,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE episodic_log SET distill_state=?, distill_note=?, outcome=COALESCE(?,outcome)
+            "UPDATE episodic_log
+             SET distill_state=?, distill_note=COALESCE(?,distill_note),
+                 outcome=COALESCE(?,outcome),
+                 distill_run_id=NULL, distill_locked_at=NULL
              WHERE trace_id=?",
             params![state, note, outcome, trace_id],
         )?;
         Ok(())
     }
 
+    /// Update by primary-key id (used after distill where we have the row id, not trace_id).
+    pub fn update_episodic_log_state_by_id(
+        &self,
+        id: &str,
+        state: &str,
+        note: Option<&str>,
+        outcome: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE episodic_log
+             SET distill_state=?, distill_note=COALESCE(?,distill_note),
+                 outcome=COALESCE(?,outcome),
+                 distill_run_id=NULL, distill_locked_at=NULL
+             WHERE id=?",
+            params![state, note, outcome, id],
+        )?;
+        Ok(())
+    }
+
+    /// Claim a batch of 'new' logs for distillation: mark them 'screening' atomically.
+    /// Returns the claimed rows (with distill_run_id set to run_id).
+    pub fn claim_distill_batch(&self, run_id: &str, limit: usize, locked_at: &str) -> Result<Vec<Value>> {
+        // BEGIN IMMEDIATE must be held by caller; this is called inside a transaction.
+        self.conn.execute(
+            "UPDATE episodic_log
+             SET distill_state='screening', distill_run_id=?, distill_locked_at=?
+             WHERE id IN (
+               SELECT id FROM episodic_log
+               WHERE distill_state='new'
+               ORDER BY priority DESC, ts ASC
+               LIMIT ?
+             )",
+            params![run_id, locked_at, limit as i64],
+        )?;
+        self.query_json(
+            "SELECT * FROM episodic_log WHERE distill_run_id=? AND distill_state='screening'",
+            params![run_id],
+        )
+    }
+
     pub fn query_episodic_logs_open(&self, limit: usize) -> Result<Vec<Value>> {
         self.query_json(
-            "SELECT * FROM episodic_log WHERE distill_state='open' ORDER BY priority DESC, ts ASC LIMIT ?",
+            "SELECT * FROM episodic_log WHERE distill_state='new' ORDER BY priority DESC, ts ASC LIMIT ?",
             params![limit as i64],
         )
     }
@@ -494,13 +541,19 @@ impl Storage {
         self.conn.execute_batch(sql)?;
         Ok(())
     }
+
+    /// Execute a parameterised statement (not batch); returns rows-affected count.
+    pub fn conn_execute<P: rusqlite::Params>(&self, sql: &str, p: P) -> Result<()> {
+        self.conn.execute(sql, p)?;
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------------
 // Row types
 // ------------------------------------------------------------------
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ChunkRow {
     pub id: String,
     pub skill_name: Option<String>,

@@ -51,6 +51,11 @@ pub enum Commands {
         nomination: Option<String>,
         #[arg(long, default_value = "cli")]
         source: String,
+        /// Explicit feedback: up or down (applied to --used chunks if provided)
+        #[arg(long)]
+        feedback: Option<String>,
+        #[arg(long, default_value = "0")]
+        priority: i64,
     },
     /// Add a knowledge chunk
     Add {
@@ -76,9 +81,14 @@ pub enum Commands {
     Evolve {
         #[arg(long, default_value = "manual")]
         trigger: String,
+        /// Rebuild embeddings for chunks with embed_version=0 or < meta.embed_version
+        #[arg(long)]
+        rebuild_embeddings: bool,
     },
-    /// Health check
-    Inspect,
+    /// Health check — no arg = library summary; chunk_id or trace_id = detail view
+    Inspect {
+        id: Option<String>,
+    },
     /// Approve a pending chunk
     Approve { chunk_id: String },
     /// Archive a chunk
@@ -109,8 +119,42 @@ pub enum Commands {
         #[arg(long, default_value = "")]
         reason: String,
     },
+    /// Interactive setup wizard — configure agents to use Innate MCP server
+    Install,
+    /// Upgrade database schema to current version
+    Migrate,
+    /// Daemon control (Linux only)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCommands,
+    },
     /// Start MCP stdio server
     Mcp,
+}
+
+#[derive(Subcommand)]
+pub enum DaemonCommands {
+    /// Start the background log-watcher daemon
+    Start {
+        #[arg(long = "watch", value_name = "LOG_DIR")]
+        watch: Vec<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        pid_file: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        state_db: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        log_file: Option<std::path::PathBuf>,
+    },
+    /// Stop a running daemon
+    Stop {
+        #[arg(long, value_name = "PATH")]
+        pid_file: Option<std::path::PathBuf>,
+    },
+    /// Show daemon status
+    Status {
+        #[arg(long, value_name = "PATH")]
+        state_db: Option<std::path::PathBuf>,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -119,6 +163,25 @@ pub fn run() -> anyhow::Result<()> {
 
     if let Commands::Mcp = &cli.command {
         return crate::mcp::run_server(db_path);
+    }
+
+    if let Commands::Install = &cli.command {
+        return crate::install::run_install();
+    }
+
+    if let Commands::Migrate = &cli.command {
+        let applied = crate::migrate::run_migrations(&db_path)?;
+        if applied.is_empty() {
+            println!("already at 4.5.1 — nothing to do");
+        } else {
+            for step in &applied { println!("  applied: {step}"); }
+            println!("migration complete");
+        }
+        return Ok(());
+    }
+
+    if let Commands::Daemon { action } = &cli.command {
+        return run_daemon(action, &db_path);
     }
 
     let kb = KnowledgeBase::open(&db_path)?;
@@ -135,6 +198,10 @@ pub fn run() -> anyhow::Result<()> {
                 }))?),
                 "prompt" => {
                     println!("<!-- innate_trace_id: {} -->", result.trace_id);
+                    println!("<!-- innate_selected: {} -->",
+                        result.knowledge.iter()
+                            .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
+                            .collect::<Vec<_>>().join(","));
                     for chunk in &result.knowledge {
                         let content = chunk.get("content").and_then(|v| v.as_str()).unwrap_or("");
                         println!("{content}\n---");
@@ -152,14 +219,24 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Record { trace_id, outcome, used, output_summary, nomination, source } => {
+        Commands::Record { trace_id, outcome, used, output_summary, nomination, source, feedback, priority } => {
             let used_ref: Option<&[String]> = if used.is_empty() { None } else { Some(&used) };
+            // Per §二·五B: trace-level "up" applies only to explicitly used chunks.
+            let (fb_up, fb_down): (Option<Vec<String>>, Option<Vec<String>>) = match feedback.as_deref() {
+                Some("up")   if !used.is_empty() => (Some(used.clone()), None),
+                Some("down") if !used.is_empty() => (None, Some(used.clone())),
+                Some("up")   => (None, None), // no used chunks — ignore per design
+                Some("down") => (None, None),
+                _ => (None, None),
+            };
+            let fb_up_ref   = fb_up.as_deref();
+            let fb_down_ref = fb_down.as_deref();
             kb.record(
                 &trace_id, None, None,
                 output_summary.as_deref(),
                 outcome.as_deref(),
-                used_ref, None, None,
-                nomination.as_deref(), 0, &source,
+                used_ref, fb_up_ref, fb_down_ref,
+                nomination.as_deref(), priority, &source,
             )?;
             println!("recorded");
         }
@@ -171,13 +248,26 @@ pub fn run() -> anyhow::Result<()> {
             let id = kb.spark(&content, trigger.as_deref(), None)?;
             println!("{id}");
         }
-        Commands::Evolve { trigger } => {
-            let report = kb.evolve(&trigger)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+        Commands::Evolve { trigger, rebuild_embeddings } => {
+            if rebuild_embeddings {
+                let rebuilt = kb.rebuild_embeddings()?;
+                println!("rebuilt {rebuilt} embeddings");
+            } else {
+                let report = kb.evolve(&trigger)?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
         }
-        Commands::Inspect => {
-            let info = kb.inspect()?;
-            println!("{}", serde_json::to_string_pretty(&info)?);
+        Commands::Inspect { id } => {
+            match id.as_deref() {
+                None => {
+                    let info = kb.inspect()?;
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                }
+                Some(id) => {
+                    let detail = kb.inspect_id(id)?;
+                    println!("{}", serde_json::to_string_pretty(&detail)?);
+                }
+            }
         }
         Commands::Approve { chunk_id } => {
             kb.approve(&chunk_id)?;
@@ -207,7 +297,52 @@ pub fn run() -> anyhow::Result<()> {
             kb.drop_spark(&spark_id, &reason)?;
             println!("dropped");
         }
-        Commands::Mcp => unreachable!(),
+        Commands::Mcp | Commands::Install | Commands::Migrate | Commands::Daemon { .. } => unreachable!(),
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Daemon implementation
+// ---------------------------------------------------------------------------
+
+fn default_pid_file() -> std::path::PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".innate")
+        .join("daemon.pid")
+}
+
+fn default_state_db() -> std::path::PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".innate")
+        .join("daemon_state.sqlite")
+}
+
+fn default_log_file() -> std::path::PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".innate")
+        .join("daemon.log")
+}
+
+fn run_daemon(action: &DaemonCommands, db_path: &std::path::Path) -> anyhow::Result<()> {
+    match action {
+        DaemonCommands::Start { watch, pid_file, state_db, log_file } => {
+            crate::daemon::start(
+                watch,
+                db_path,
+                pid_file.as_deref().unwrap_or(&default_pid_file()),
+                state_db.as_deref().unwrap_or(&default_state_db()),
+                log_file.as_deref().unwrap_or(&default_log_file()),
+            )
+        }
+        DaemonCommands::Stop { pid_file } => {
+            crate::daemon::stop(pid_file.as_deref().unwrap_or(&default_pid_file()))
+        }
+        DaemonCommands::Status { state_db } => {
+            crate::daemon::status(state_db.as_deref().unwrap_or(&default_state_db()))
+        }
+    }
 }

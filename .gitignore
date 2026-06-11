@@ -1,13 +1,10 @@
-# Python
+# Python build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-dist/
 build/
 .eggs/
-
-# Testing
 .pytest_cache/
 .coverage
 htmlcov/
@@ -22,9 +19,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Node (if any)
+# Node
 node_modules/
-package*.json
+package-lock.json
 
 # Innate runtime
 *.db

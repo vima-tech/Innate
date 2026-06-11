@@ -1,8 +1,11 @@
 pub mod cli;
+pub mod daemon;
+pub mod install;
 pub mod embedding;
 pub mod errors;
 pub mod kb;
 pub mod mcp;
+pub mod migrate;
 pub mod refine;
 pub mod storage;
 pub mod utils;

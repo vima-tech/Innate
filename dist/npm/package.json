@@ -1,0 +1,20 @@
+{
+  "name": "@innate/cli",
+  "version": "0.1.0",
+  "description": "Self-growing procedural knowledge layer for AI agents — CLI",
+  "keywords": ["innate", "mcp", "ai", "knowledge", "agent", "memory"],
+  "homepage": "https://github.com/innate-rs/innate",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/innate-rs/innate.git",
+    "directory": "dist/npm"
+  },
+  "license": "MIT",
+  "engines": { "node": ">=16" },
+  "bin": { "innate": "./bin/innate" },
+  "scripts": {
+    "postinstall": "node src/install.js"
+  },
+  "files": ["bin", "src", "README.md"],
+  "dependencies": {}
+}
