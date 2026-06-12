@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://innate.mengkai.ren/ | sh
-#   curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.2.0 sh
+#   curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.1.6 sh
 #
 # Environment variables:
 #   INNATE_VERSION   — version to install (default: latest release)

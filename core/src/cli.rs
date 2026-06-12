@@ -5,8 +5,6 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
-use crate::kb::KnowledgeBase;
-
 fn default_db() -> PathBuf {
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -62,6 +60,9 @@ pub enum Commands {
         used: Option<String>,
         #[arg(long, default_value = "explicit")]
         used_attribution: String,
+        /// Treat --used as partial attribution; omitted selected chunks are not penalized.
+        #[arg(long)]
+        used_partial: bool,
         #[arg(long)]
         output: Option<String>,
         #[arg(long)]
@@ -221,7 +222,7 @@ pub fn run() -> anyhow::Result<()> {
     if let Commands::Migrate = &cli.command {
         let applied = crate::migrate::run_migrations(&db_path)?;
         if applied.is_empty() {
-            println!("already at 4.6 — nothing to do");
+            println!("already at 4.13 — nothing to do");
         } else {
             for step in &applied {
                 println!("  applied: {step}");
@@ -239,7 +240,7 @@ pub fn run() -> anyhow::Result<()> {
         return crate::upgrade::run_upgrade(version.as_deref(), &db_path, *check);
     }
 
-    let kb = KnowledgeBase::open(&db_path)?;
+    let kb = crate::open_kb(&db_path)?;
 
     match cli.command {
         Commands::Recall {
@@ -313,6 +314,7 @@ pub fn run() -> anyhow::Result<()> {
             outcome,
             used,
             used_attribution,
+            used_partial,
             output,
             output_summary,
             nomination,
@@ -355,6 +357,7 @@ pub fn run() -> anyhow::Result<()> {
                 outcome.as_deref(),
                 used_ref,
                 &used_attribution,
+                !used_partial,
                 fb_up_ref,
                 fb_down_ref,
                 &feedback_kind,
@@ -408,7 +411,14 @@ pub fn run() -> anyhow::Result<()> {
         } => {
             if rebuild_embeddings {
                 let rebuilt = kb.rebuild_embeddings()?;
-                println!("rebuilt {rebuilt} embeddings");
+                let report = kb.evolve(&trigger)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "rebuilt_embeddings": rebuilt,
+                        "evolve": report
+                    }))?
+                );
             } else {
                 let report = kb.evolve(&trigger)?;
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -494,13 +504,25 @@ fn run_daemon(action: &DaemonCommands, db_path: &std::path::Path) -> anyhow::Res
             pid_file,
             state_db,
             log_file,
-        } => crate::daemon::start(
-            watch,
-            db_path,
-            pid_file.as_deref().unwrap_or(&default_pid_file()),
-            state_db.as_deref().unwrap_or(&default_state_db()),
-            log_file.as_deref().unwrap_or(&default_log_file()),
-        ),
+        } => {
+            // Merge CLI --watch dirs with settings watch_dirs when CLI provides none.
+            let effective_watch: Vec<std::path::PathBuf> = if !watch.is_empty() {
+                watch.clone()
+            } else {
+                let s = crate::settings::load();
+                crate::settings::resolved_watch_dirs(&s)
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect()
+            };
+            crate::daemon::start(
+                &effective_watch,
+                db_path,
+                pid_file.as_deref().unwrap_or(&default_pid_file()),
+                state_db.as_deref().unwrap_or(&default_state_db()),
+                log_file.as_deref().unwrap_or(&default_log_file()),
+            )
+        }
         DaemonCommands::Stop { pid_file } => {
             crate::daemon::stop(pid_file.as_deref().unwrap_or(&default_pid_file()))
         }

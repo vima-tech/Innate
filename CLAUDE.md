@@ -43,7 +43,7 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 ## Authoritative Design Reference
 
-`docs/Innate-设计文档-v4.5.1.md` is the **编码基线**. Every design decision references a section (§一–§九). When behavior is ambiguous, consult the doc first.
+`docs/Innate-设计文档-v0.1.6.md` is the **编码基线**. Every design decision references a section. When behavior is ambiguous, consult the doc first.
 
 ## Architecture
 
@@ -84,7 +84,7 @@ MCP and CLI call `KnowledgeBase` directly (in-process). SDKs and Daemon never op
 | `mcp.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
 | `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
 | `daemon.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
-| `schema.sql` | Embedded schema (v4.5.2); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v4.13); `include_str!` at compile time |
 
 ### The 8 Public APIs (on `KnowledgeBase`)
 

@@ -276,6 +276,8 @@ pub fn run_watch_loop(
     }
 
     // Main poll loop: 500 ms tick.
+    let mut last_evolve_poll = std::time::Instant::now();
+    const EVOLVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     loop {
         for dir in watch_dirs {
             let dir_path = std::path::Path::new(dir);
@@ -291,6 +293,19 @@ pub fn run_watch_loop(
                     }
                 }
             }
+        }
+        // Periodically consume pending evolve_requests so knowledge grows even without session_end.
+        if last_evolve_poll.elapsed() >= EVOLVE_POLL_INTERVAL {
+            if let Err(error) = call_cli_evolve(db_path, "scheduled") {
+                let _ = writeln!(logger, "[innate-daemon] scheduled evolve failed: {error}");
+                record_daemon_error(
+                    &state_db,
+                    "<scheduler>",
+                    "scheduled_evolve",
+                    &error.to_string(),
+                );
+            }
+            last_evolve_poll = std::time::Instant::now();
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
@@ -716,6 +731,11 @@ fn init_state_db(path: &Path) -> Result<()> {
 
 fn read_pid(pid_file: &Path) -> Option<u32> {
     std::fs::read_to_string(pid_file).ok()?.trim().parse().ok()
+}
+
+/// Returns `true` if a daemon process recorded in `pid_file` is currently alive.
+pub fn is_running(pid_file: &Path) -> bool {
+    read_pid(pid_file).is_some_and(process_alive)
 }
 
 #[cfg(target_os = "linux")]

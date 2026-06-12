@@ -108,6 +108,7 @@ class KnowledgeBase:
         outcome: str | None = None,
         used: list[str] | None = None,
         used_attribution: str = "explicit",
+        used_complete: bool = True,
         output: str | None = None,
         output_summary: str | None = None,
         nomination: str | None = None,
@@ -126,6 +127,8 @@ class KnowledgeBase:
             args += ["--outcome", outcome]
         if used is not None:
             args += ["--used", ",".join(used), "--used-attribution", used_attribution]
+            if not used_complete:
+                args += ["--used-partial"]
         if output:
             args += ["--output", output]
         if output_summary:
@@ -291,6 +294,7 @@ class KnowledgeBase:
                         outcome=outcome,
                         used=used_ids,
                         used_attribution=result.get("used_attribution", "explicit"),
+                        used_complete=result.get("used_complete", True),
                         output_summary=summary,
                         nomination=result.get("nomination"),
                         source=source,

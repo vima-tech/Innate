@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 
 use crate::kb::KnowledgeBase;
 
+#[cfg(target_os = "linux")]
+use libc;
+
 // Tool names
 const TOOLS: &[(&str, &str)] = &[
     ("innate_recall",         "Call FIRST at the start of any task — retrieve relevant knowledge from the knowledge base and get a trace_id for subsequent recording."),
@@ -31,7 +34,8 @@ const TOOLS: &[(&str, &str)] = &[
 ];
 
 pub fn run_server(db_path: PathBuf) -> anyhow::Result<()> {
-    let kb = Mutex::new(KnowledgeBase::open(&db_path)?);
+    maybe_auto_start_daemon(&db_path);
+    let kb = Mutex::new(crate::open_kb(&db_path)?);
     let stdin = io::stdin();
     let stdout = io::stdout();
 
@@ -206,7 +210,10 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let trace_id = s("trace_id");
             let outcome = so("outcome");
             let used = arr("used");
-            let used_ref: Option<&[String]> = args.get("used").map(|_| used.as_slice());
+            let used_ref: Option<&[String]> = args
+                .get("used")
+                .and_then(Value::as_array)
+                .map(|_| used.as_slice());
             let fb_up = arr("feedback_up");
             let fb_up_ref: Option<&[String]> = if fb_up.is_empty() { None } else { Some(&fb_up) };
             let fb_down = arr("feedback_down");
@@ -238,6 +245,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 outcome.as_deref(),
                 used_ref,
                 &used_attribution,
+                b("used_complete", true),
                 fb_up_ref,
                 fb_down_ref,
                 &feedback_kind,
@@ -358,6 +366,7 @@ fn tool_schema(name: &str) -> Value {
                 "outcome": {"type": "string", "enum": ["ok","fail","unknown"]},
                 "used": {"type": "array", "items": {"type": "string"}},
                 "used_attribution": {"type": "string", "enum": ["explicit","cited","inferred"]},
+                "used_complete": {"type": "boolean", "description": "Whether used exhaustively lists all selected chunks (default true)"},
                 "feedback_up": {"type": "array", "items": {"type": "string"}},
                 "feedback_down": {"type": "array", "items": {"type": "string"}},
                 "feedback_kind": {"type": "string", "enum": ["user","judge"]},
@@ -434,4 +443,64 @@ fn tool_schema(name: &str) -> Value {
         }),
         _ => json!({"type": "object", "properties": {}}),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon auto-start
+// ---------------------------------------------------------------------------
+
+fn default_pid_file() -> PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".innate")
+        .join("daemon.pid")
+}
+
+/// If `settings.daemon.auto_start` is true and watch_dirs are configured, start the
+/// daemon in the background if it is not already running. Failures are silently ignored
+/// so the MCP server always starts even when the daemon can't be spawned.
+fn maybe_auto_start_daemon(db_path: &std::path::Path) {
+    let s = crate::settings::load();
+    match &s.daemon {
+        Some(c) if c.auto_start => {}
+        _ => return,
+    };
+    let watch_dirs = crate::settings::resolved_watch_dirs(&s);
+    if watch_dirs.is_empty() {
+        return;
+    }
+
+    let pid_file = default_pid_file();
+    if crate::daemon::is_running(&pid_file) {
+        return;
+    }
+
+    // Spawn `innate --db <path> daemon start --watch ...` as a detached child process.
+    let Ok(exe) = std::env::current_exe() else { return };
+    let mut cmd = std::process::Command::new(&exe);
+    // --db is a global flag that must come before the subcommand.
+    cmd.arg("--db").arg(db_path);
+    cmd.arg("daemon").arg("start");
+    for dir in &watch_dirs {
+        cmd.arg("--watch").arg(dir);
+    }
+    // Redirect stdio away from the MCP stdio channel.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    // Use setsid on Linux so the daemon is in its own process group and won't
+    // receive signals sent to the MCP server's process group.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    let _ = cmd.spawn(); // fire-and-forget
 }

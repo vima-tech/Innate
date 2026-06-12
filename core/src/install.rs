@@ -226,6 +226,42 @@ fn read_line() -> String {
     line
 }
 
+/// Free-text input prompt. Returns the user's input, or `default` if empty.
+fn prompt_text(prompt: &str, default: &str, hint: &str) -> String {
+    if hint.is_empty() {
+        question(&format!("{prompt} {}", dim(&format!("(default: {default})"))));
+    } else {
+        question(&format!("{prompt} {}", dim(hint)));
+    }
+    print!("{}  {} ", gray("│"), dim("▶"));
+    io::stdout().flush().ok();
+    let line = read_line().trim().to_string();
+    let result = if line.is_empty() {
+        default.to_string()
+    } else {
+        line
+    };
+    info(&green(if result.is_empty() { "skipped" } else { &result }));
+    sep();
+    result
+}
+
+/// Masked API key input — same as prompt_text but prints "••••••••" in the result line.
+fn prompt_secret(prompt: &str, hint: &str) -> String {
+    question(&format!("{prompt} {}", dim(hint)));
+    print!("{}  {} ", gray("│"), dim("▶"));
+    io::stdout().flush().ok();
+    let line = read_line().trim().to_string();
+    let display = if line.is_empty() {
+        "skipped"
+    } else {
+        "••••••••"
+    };
+    info(&green(display));
+    sep();
+    line
+}
+
 // ── Agent detection ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -1183,7 +1219,13 @@ pub fn run_install() -> anyhow::Result<()> {
         true,
     );
 
-    // ── 5. Apply configs ───────────────────────────────────────────────────
+    // ── 5. LLM configuration (optional) ───────────────────────────────────
+    configure_llm_interactive();
+
+    // ── 5b. Daemon watch dirs (optional) ──────────────────────────────────
+    configure_daemon_interactive();
+
+    // ── 6. Apply configs ───────────────────────────────────────────────────
     for agent in &chosen_agents {
         let status = match agent.id {
             "claude" => configure_claude(agent, &binary_path, auto_allow),
@@ -1274,7 +1316,7 @@ pub fn run_install() -> anyhow::Result<()> {
     }
     sep();
 
-    // ── 6. Quick start ─────────────────────────────────────────────────────
+    // ── 7. Quick start ─────────────────────────────────────────────────────
     // Box: inner display width = 28.  Total row width = │  {28}│ = 32 chars.
     // Header dashes = 28 - 12 ("Quick start ") = 16.
     // Bottom dashes = 28 + 2 = 30.
@@ -1411,4 +1453,208 @@ fn strip_toml_section(toml: &str, section_prefix: &str) -> String {
         }
     }
     out
+}
+
+// ── LLM configuration step ────────────────────────────────────────────────────
+
+fn configure_llm_interactive() {
+    use crate::settings::{self, EmbeddingConfig, LlmConfig};
+
+    let want = prompt_confirm(
+        "Configure an LLM for smarter knowledge distillation? (optional)",
+        false,
+    );
+    if !want {
+        return;
+    }
+
+    // Load existing settings (preserve any already-set values).
+    let mut s = settings::load();
+
+    // ── Provider ──────────────────────────────────────────────────────────
+    let provider_idx = prompt_select(
+        "LLM API format:",
+        &["OpenAI  (ChatGPT / DeepSeek / Ollama / …)", "Anthropic  (Claude)"],
+    );
+    let provider = if provider_idx == 1 {
+        "anthropic".to_string()
+    } else {
+        "openai".to_string()
+    };
+
+    // ── Base URL (only ask when using OpenAI format, to allow custom endpoints) ──
+    let default_base_url = match provider.as_str() {
+        "anthropic" => "https://api.anthropic.com",
+        _ => "https://api.openai.com/v1",
+    };
+    let base_url_raw = prompt_text(
+        "Base URL",
+        default_base_url,
+        "(leave blank for default)",
+    );
+    let base_url = if base_url_raw == default_base_url || base_url_raw.is_empty() {
+        None
+    } else {
+        Some(base_url_raw)
+    };
+
+    // ── Model ID ──────────────────────────────────────────────────────────
+    let default_model = match provider.as_str() {
+        "anthropic" => "claude-haiku-4-5-20251001",
+        _ => "gpt-4o-mini",
+    };
+    let model_id = prompt_text("Model ID", default_model, "");
+
+    // ── API key ───────────────────────────────────────────────────────────
+    let env_hint = match provider.as_str() {
+        "anthropic" => "(stored 0600; or set ANTHROPIC_API_KEY env var to skip)",
+        _ => "(stored 0600; or set OPENAI_API_KEY env var to skip)",
+    };
+    let api_key_raw = prompt_secret("API key", env_hint);
+    let api_key = if api_key_raw.is_empty() {
+        None
+    } else {
+        Some(api_key_raw)
+    };
+
+    let llm_cfg = LlmConfig {
+        provider: provider.clone(),
+        base_url: base_url.clone(),
+        model_id: model_id.clone(),
+        api_key: api_key.clone(),
+    };
+
+    // ── Optional connection test ──────────────────────────────────────────
+    let do_test = prompt_confirm("Test LLM connection now?", true);
+    if do_test {
+        info("Testing connection…");
+        match crate::llm::test_llm(&llm_cfg) {
+            Ok(msg) => result_line(&format!("LLM OK — {msg}")),
+            Err(e) => warn_line(&format!("LLM test failed: {e}")),
+        }
+    }
+
+    s.llm = Some(llm_cfg);
+
+    // ── Embedding model (optional, defaults to same API as LLM) ──────────
+    let want_embed = prompt_confirm(
+        "Configure an embedding model too? (enables semantic recall — optional)",
+        false,
+    );
+    if want_embed {
+        let embed_default_url = base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let embed_base_url_raw = prompt_text(
+            "Embedding base URL",
+            &embed_default_url,
+            "(leave blank to reuse LLM base URL)",
+        );
+        let embed_base_url = if embed_base_url_raw == embed_default_url || embed_base_url_raw.is_empty() {
+            base_url.clone()
+        } else {
+            Some(embed_base_url_raw)
+        };
+
+        let embed_model = prompt_text(
+            "Embedding model ID",
+            "text-embedding-3-small",
+            "",
+        );
+
+        let embed_key_raw = prompt_secret(
+            "Embedding API key",
+            "(leave blank to reuse LLM API key)",
+        );
+        let embed_key = if embed_key_raw.is_empty() {
+            api_key.clone()
+        } else {
+            Some(embed_key_raw)
+        };
+
+        let embed_cfg = EmbeddingConfig {
+            provider: "openai".to_string(),
+            base_url: embed_base_url,
+            model_id: embed_model.clone(),
+            api_key: embed_key.clone(),
+            dim: 1536,
+        };
+
+        let do_test_embed = prompt_confirm("Test embedding connection now?", true);
+        if do_test_embed {
+            info("Testing embedding…");
+            match crate::llm::test_embedding(&embed_cfg) {
+                Ok(dim) => result_line(&format!("Embedding OK — dim={dim} model={embed_model}")),
+                Err(e) => warn_line(&format!("Embedding test failed: {e}")),
+            }
+        }
+
+        s.embedding = Some(embed_cfg);
+    }
+
+    // ── Save settings ─────────────────────────────────────────────────────
+    match settings::save(&s) {
+        Ok(()) => result_line(&format!(
+            "LLM config saved to {}",
+            bold(&settings::settings_path().display().to_string())
+        )),
+        Err(e) => warn_line(&format!("Could not save settings: {e}")),
+    }
+    sep();
+}
+
+// ── Daemon configuration step ─────────────────────────────────────────────────
+
+fn configure_daemon_interactive() {
+    use crate::settings::{self, DaemonConfig};
+
+    let want = prompt_confirm(
+        "Configure daemon auto-start? (auto-learns from agent conversations)",
+        false,
+    );
+    if !want {
+        return;
+    }
+
+    info("The daemon watches directories for .log files written by agents.");
+    info("Example: ~/.claude/logs   or the directory your agent writes sessions to.");
+    sep();
+
+    let mut watch_dirs: Vec<String> = Vec::new();
+    loop {
+        let dir = prompt_text(
+            "Watch directory path",
+            "",
+            "(leave blank to finish, ~ is expanded)",
+        );
+        if dir.is_empty() {
+            break;
+        }
+        watch_dirs.push(dir.clone());
+        result_line(&format!("Added: {dir}"));
+    }
+
+    if watch_dirs.is_empty() {
+        warn_line("No watch directories added — daemon will not auto-start.");
+        sep();
+        return;
+    }
+
+    let auto_start = prompt_confirm(
+        "Auto-start daemon when the MCP server launches? (recommended)",
+        true,
+    );
+
+    let mut s = settings::load();
+    s.daemon = Some(DaemonConfig {
+        watch_dirs,
+        auto_start,
+    });
+
+    match settings::save(&s) {
+        Ok(()) => result_line(&format!(
+            "Daemon config saved to {}",
+            bold(&settings::settings_path().display().to_string())
+        )),
+        Err(e) => warn_line(&format!("Could not save daemon config: {e}")),
+    }
+    sep();
 }

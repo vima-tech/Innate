@@ -140,7 +140,7 @@ fn latest_version() -> Result<String> {
     json["tag_name"]
         .as_str()
         .map(|t| t.trim_start_matches('v').to_string())
-        .context("GitHub response missing tag_name — try specifying a version: innate upgrade --version 0.2.0")
+        .context("GitHub response missing tag_name — try specifying a version: innate upgrade --version 0.1.6")
 }
 
 fn http_get_text(url: &str) -> Result<String> {

@@ -23,7 +23,7 @@ Options:
 
 ```bash
 # Pin a specific version
-curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.1.5 sh
+curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.1.6 sh
 
 # Skip agent setup (binary only)
 curl -fsSL https://innate.mengkai.ren/ | NO_INNATE_SETUP=1 sh
@@ -365,7 +365,7 @@ Innate System
 
 ## Documentation
 
-- [`docs/Innate-设计文档-v4.5.1.md`](docs/Innate-设计文档-v4.5.1.md) — Complete system design (authoritative baseline, Chinese)
+- [`docs/Innate-设计文档-v0.1.6.md`](docs/Innate-设计文档-v0.1.6.md) — Complete system design (authoritative baseline, Chinese)
 - [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent skill metadata and usage protocol
 
 ---

@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.6 (Rust edition)
+-- Innate knowledge layer schema v4.13 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.6');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.13');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -29,26 +29,35 @@ CREATE TABLE IF NOT EXISTS chunks (
     state_updated_at TEXT,
 
     confidence    REAL NOT NULL DEFAULT 0.5,
+    confidence_base REAL NOT NULL DEFAULT 0.5,
     confidence_reason TEXT,
     version       INTEGER NOT NULL DEFAULT 1,
     distilled_from TEXT,
+    distill_provider TEXT,
+    distill_model TEXT,
+    distill_prompt_version TEXT,
     parent_id     TEXT,
 
     selected_count        INTEGER NOT NULL DEFAULT 0,
+    selected_count_base   INTEGER NOT NULL DEFAULT 0,
     used_count            INTEGER NOT NULL DEFAULT 0,
+    used_count_base       INTEGER NOT NULL DEFAULT 0,
     used_success_count    INTEGER NOT NULL DEFAULT 0,
+    used_success_count_base INTEGER NOT NULL DEFAULT 0,
     success_trace_ids_count INTEGER NOT NULL DEFAULT 0,
     last_success_at       TEXT,
     last_agg_ts           TEXT,
 
     embed_version INTEGER NOT NULL DEFAULT 1,
 
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    last_used_at  TEXT
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    last_used_at     TEXT,
+    last_used_base   TEXT,
+    last_decayed_at  TEXT
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_distilled_from ON chunks(distilled_from) WHERE distilled_from IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chunks_distilled_from ON chunks(distilled_from) WHERE distilled_from IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chunks_state   ON chunks(state);
 CREATE INDEX IF NOT EXISTS idx_chunks_origin  ON chunks(origin);
 CREATE INDEX IF NOT EXISTS idx_chunks_skill   ON chunks(skill_name);
@@ -134,6 +143,7 @@ CREATE TABLE IF NOT EXISTS episodic_log (
     used_ids TEXT,
     used_attribution TEXT
         CHECK(used_attribution IS NULL OR used_attribution IN ('explicit','cited','inferred')),
+    used_complete INTEGER NOT NULL DEFAULT 1,
     context_key TEXT,
     nomination  TEXT,
     priority    INTEGER NOT NULL DEFAULT 0,
@@ -144,7 +154,9 @@ CREATE TABLE IF NOT EXISTS episodic_log (
     distill_locked_at TEXT,
     distill_prompt_tokens     INTEGER,
     distill_completion_tokens INTEGER,
-    distill_accounted_at      TEXT
+    distill_accounted_at      TEXT,
+    distill_attempts          INTEGER NOT NULL DEFAULT 0,
+    distill_last_failed_at    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_log_dstate ON episodic_log(distill_state);
 CREATE INDEX IF NOT EXISTS idx_log_prio   ON episodic_log(priority);
@@ -156,6 +168,9 @@ CREATE INDEX IF NOT EXISTS idx_log_screening_locked
 CREATE INDEX IF NOT EXISTS idx_log_distill_accounted
   ON episodic_log(distill_accounted_at)
   WHERE distill_accounted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_log_distill_last_failed
+  ON episodic_log(distill_last_failed_at)
+  WHERE distill_last_failed_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_log_task_state ON episodic_log(task_state);
 CREATE INDEX IF NOT EXISTS idx_log_context ON episodic_log(context_key);
 
@@ -182,6 +197,25 @@ CREATE TABLE IF NOT EXISTS feedback_events (
 CREATE INDEX IF NOT EXISTS idx_feedback_trace ON feedback_events(trace_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_chunk ON feedback_events(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_signal ON feedback_events(signal);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_idempotent
+  ON feedback_events(trace_id, chunk_id, signal);
+
+CREATE TABLE IF NOT EXISTS confidence_evidence (
+    id          TEXT PRIMARY KEY,
+    trace_id    TEXT,
+    chunk_id    TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    target      REAL NOT NULL,
+    alpha       REAL NOT NULL,
+    reason      TEXT NOT NULL,
+    context_key TEXT,
+    ts          TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_confidence_evidence_trace
+  ON confidence_evidence(trace_id, chunk_id, kind)
+  WHERE trace_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_confidence_evidence_chunk
+  ON confidence_evidence(chunk_id, ts, id);
 
 CREATE TABLE IF NOT EXISTS chunk_context_stats (
     chunk_id          TEXT NOT NULL,
@@ -195,12 +229,24 @@ CREATE TABLE IF NOT EXISTS chunk_context_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_context_key ON chunk_context_stats(context_key);
 
+CREATE TABLE IF NOT EXISTS chunk_context_stats_base (
+    chunk_id          TEXT NOT NULL,
+    context_key       TEXT NOT NULL,
+    success_count     INTEGER NOT NULL DEFAULT 0,
+    failure_count     INTEGER NOT NULL DEFAULT 0,
+    positive_feedback INTEGER NOT NULL DEFAULT 0,
+    negative_feedback INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chunk_id, context_key)
+);
+
 CREATE TABLE IF NOT EXISTS governance_proposals (
     id              TEXT PRIMARY KEY,
     chunk_id        TEXT NOT NULL,
     proposal_type   TEXT NOT NULL,
     reason          TEXT NOT NULL,
     evidence_count  INTEGER NOT NULL DEFAULT 1,
+    evidence_score  REAL NOT NULL DEFAULT 0,
+    actor_count     INTEGER NOT NULL DEFAULT 0,
     state           TEXT NOT NULL DEFAULT 'pending'
         CHECK(state IN ('pending','accepted','rejected')),
     created_at      TEXT NOT NULL,
@@ -218,10 +264,17 @@ CREATE TABLE IF NOT EXISTS evolve_requests (
     requested_at TEXT NOT NULL,
     leased_at    TEXT,
     completed_at TEXT,
-    note         TEXT
+    note         TEXT,
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT,
+    last_failed_at TEXT,
+    priority     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_evolve_request_state
-  ON evolve_requests(state, requested_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_evolve_single_active
-  ON evolve_requests((1))
-  WHERE state IN ('pending','running');
+  ON evolve_requests(state, priority DESC, requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_evolve_pending_reason
+  ON evolve_requests(reason)
+  WHERE state='pending';
+CREATE INDEX IF NOT EXISTS idx_evolve_last_failed
+  ON evolve_requests(last_failed_at)
+  WHERE last_failed_at IS NOT NULL;

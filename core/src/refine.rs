@@ -55,13 +55,28 @@ impl Refiner for NullRefiner {
     }
 }
 
-/// Distiller — episodic logs → at most one pending chunk per input log.
-///
-/// `KnowledgeBase` currently invokes this interface with one log at a time and
-/// rejects adapters that return more than one chunk for that log. This preserves
-/// the `chunks.distilled_from` uniqueness invariant used for idempotency.
+/// Distiller — episodic logs → zero or more pending chunks per input log.
 pub trait Distiller: Send + Sync {
     fn distill(&self, log_entries: &[Value]) -> Result<Vec<DistilledChunk>>;
+
+    fn distill_with_context(
+        &self,
+        primary: &Value,
+        _related_logs: &[Value],
+    ) -> Result<Vec<DistilledChunk>> {
+        self.distill(std::slice::from_ref(primary))
+    }
+
+    fn provenance(&self) -> DistillProvenance {
+        DistillProvenance::default()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DistillProvenance {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub prompt_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,15 +96,17 @@ impl Distiller for HeuristicDistiller {
         let mut out = Vec::new();
         for entry in log_entries {
             let id = entry["id"].as_str().unwrap_or("").to_string();
-            // Use nomination text if present, else output_summary, else skip.
-            let text = entry["nomination"]
-                .as_str()
-                .or_else(|| entry["output_summary"].as_str());
+            let nomination = entry["nomination"].as_str();
+            let text = nomination.or_else(|| entry["output_summary"].as_str());
             if let Some(t) = text {
                 let t = t.trim();
                 if !t.is_empty() {
-                    // trigger_desc: prefer the recall query (it caused this log), else first
-                    // non-trivial line of content — gives the distilled chunk a useful retrieval signal.
+                    let query = entry["query"].as_str().map(str::trim).unwrap_or("");
+                    let outcome = entry["outcome"].as_str().unwrap_or("");
+
+                    // Use query as trigger_desc for embedding — it caused this log and
+                    // gives the chunk a useful retrieval signal without baking the query
+                    // into the content (which creates retrieval-overfit chunks).
                     let trigger_desc = entry["query"]
                         .as_str()
                         .map(|q| q.trim().chars().take(80).collect::<String>())
@@ -100,10 +117,28 @@ impl Distiller for HeuristicDistiller {
                                 .find(|l| l.len() > 10)
                                 .map(|l| l.chars().take(80).collect())
                         });
+
+                    // Keep content query-agnostic so the chunk is reusable across
+                    // similar but not identical queries. Nominations are preserved as-is.
+                    let content = if nomination.is_some() {
+                        t.to_string()
+                    } else if outcome == "fail" {
+                        format!("Avoid: {t}")
+                    } else {
+                        t.to_string()
+                    };
+
+                    // For failed tasks, discourage re-triggering in the same query context.
+                    let anti_trigger_desc = if outcome == "fail" && !query.is_empty() {
+                        Some(query.chars().take(60).collect::<String>())
+                    } else {
+                        None
+                    };
+
                     out.push(DistilledChunk {
-                        content: t.to_string(),
+                        content,
                         trigger_desc,
-                        anti_trigger_desc: None,
+                        anti_trigger_desc,
                         source_log_id: id,
                         nomination: entry["nomination"].as_str().map(str::to_string),
                     });
@@ -111,5 +146,13 @@ impl Distiller for HeuristicDistiller {
             }
         }
         Ok(out)
+    }
+
+    fn provenance(&self) -> DistillProvenance {
+        DistillProvenance {
+            provider: Some("heuristic".to_string()),
+            model: None,
+            prompt_version: Some("2".to_string()),
+        }
     }
 }

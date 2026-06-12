@@ -49,7 +49,10 @@ export interface InspectResult {
     feedback_events: number;
     timed_out_traces: number;
     pending_evolve_requests: number;
+    failed_evolve_requests_30d: number;
+    failed_distill_logs_30d: number;
     pending_governance_proposals: number;
+    window_days: number;
     confidence_distribution: { low: number; medium: number; high: number };
   };
   params: Record<string, number>;
@@ -60,6 +63,7 @@ export interface TracedResult<T> {
   outcome?: "ok" | "fail" | "unknown";
   used?: string[];
   usedAttribution?: "explicit" | "cited" | "inferred";
+  usedComplete?: boolean;
   outputSummary?: string;
   nomination?: string;
 }
@@ -151,6 +155,7 @@ export class KnowledgeBase {
       outcome?: "ok" | "fail" | "unknown";
       used?: string[];
       usedAttribution?: "explicit" | "cited" | "inferred";
+      usedComplete?: boolean;
       output?: string;
       outputSummary?: string;
       nomination?: string;
@@ -172,6 +177,7 @@ export class KnowledgeBase {
         "--used-attribution",
         options.usedAttribution ?? "explicit"
       );
+      if (options.usedComplete === false) args.push("--used-partial");
     }
     if (options.output) args.push("--output", options.output);
     if (options.outputSummary) args.push("--output-summary", options.outputSummary);
@@ -204,6 +210,7 @@ export class KnowledgeBase {
           outcome: traced.outcome ?? "ok",
           used: traced.used,
           usedAttribution: traced.usedAttribution,
+          usedComplete: traced.usedComplete,
           outputSummary: traced.outputSummary,
           nomination: traced.nomination,
           source,
@@ -351,7 +358,7 @@ export class McpClient {
   async initialize(): Promise<void> {
     await this.call("initialize", {
       protocolVersion: "2024-11-05",
-      clientInfo: { name: "innate-ts", version: "0.2.0" },
+      clientInfo: { name: "innate-ts", version: "0.1.6" },
     });
     this.send({ jsonrpc: "2.0", id: 0, method: "notifications/initialized" });
   }
@@ -394,6 +401,7 @@ export class McpClient {
     outcome?: string;
     used?: string[];
     used_attribution?: "explicit" | "cited" | "inferred";
+    used_complete?: boolean;
     feedback_up?: string[];
     feedback_down?: string[];
     feedback_kind?: "user" | "judge";

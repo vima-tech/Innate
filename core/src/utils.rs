@@ -30,70 +30,6 @@ pub enum SanitizeAction {
     Discard,
 }
 
-/// Default sanitizer per §二·六 design doc.
-/// Injection patterns → discard (priority over redact).
-/// Secret/credential patterns → redact ([REDACTED] substitution).
-pub fn default_sanitize(content: &str) -> (String, SanitizeAction) {
-    // Injection detection — immediate discard, checked before secret redaction.
-    let injection_patterns = [
-        "ignore all previous instructions",
-        "ignore previous instructions",
-        "ignore previous instruction",
-        "system prompt:",
-        "system prompt：",
-        "you are now a different",
-        "you are now a new",
-    ];
-    let lower = content.to_lowercase();
-    for pat in &injection_patterns {
-        if lower.contains(pat) {
-            return (content.to_string(), SanitizeAction::Discard);
-        }
-    }
-
-    // Secret redaction — replace matches with [REDACTED].
-    // Patterns from design doc §二·六.
-    let mut cleaned = content.to_string();
-    let mut redacted = false;
-
-    // sk-<20+ alphanumeric> (OpenAI/Anthropic key style)
-    cleaned = redact_pattern(&cleaned, r"sk-[A-Za-z0-9]{20,}", &mut redacted);
-    // AWS access key
-    cleaned = redact_pattern(&cleaned, r"AKIA[0-9A-Z]{16}", &mut redacted);
-    // GitHub PAT
-    cleaned = redact_pattern(&cleaned, r"ghp_[A-Za-z0-9]{36}", &mut redacted);
-    // Bearer token (case-insensitive)
-    cleaned = redact_bearer(&cleaned, &mut redacted);
-    // password: xxx (case-insensitive)
-    cleaned = redact_password(&cleaned, &mut redacted);
-
-    let action = if redacted {
-        SanitizeAction::Redact
-    } else {
-        SanitizeAction::Allow
-    };
-    (cleaned, action)
-}
-
-fn redact_pattern(s: &str, pattern: &str, flag: &mut bool) -> String {
-    // Simple manual regex-free matching for the fixed-structure patterns.
-    // We use the `regex` crate if available; otherwise fall back to a conservative
-    // prefix scan. For the patterns above the prefix is distinctive enough.
-    match regex_replace(s, pattern) {
-        Some(r) => {
-            *flag = true;
-            r
-        }
-        None => s.to_string(),
-    }
-}
-
-fn regex_replace(_s: &str, _pattern: &str) -> Option<String> {
-    // We implement pattern matching inline to avoid adding a regex dependency.
-    // Each caller uses a distinct fixed-prefix pattern, so we dispatch here.
-    None // handled by specialised functions below; this branch never reached in practice
-}
-
 fn redact_bearer(s: &str, flag: &mut bool) -> String {
     let lower = s.to_lowercase();
     let mut result = s.to_string();
@@ -247,11 +183,7 @@ fn redact_prefixed_secret(s: &str, prefix: &str, min_len: usize, flag: &mut bool
     result
 }
 
-// Rewire redact_pattern to use the prefix scanner.
-// We keep the function signature but implement it properly now.
-// The earlier stubs are replaced by the following:
-
-/// Public sanitize function used by KnowledgeBase — wraps default_sanitize.
+/// Public sanitize function used by KnowledgeBase (§二·六).
 /// Returns (cleaned_content, action).
 pub fn sanitize(content: &str) -> (String, SanitizeAction) {
     // injection first

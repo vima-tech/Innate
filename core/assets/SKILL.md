@@ -12,7 +12,7 @@ description: >
 license: MIT
 metadata:
   author: vima-tech
-  version: "0.3.0"
+  version: "0.4.0"
   architecture: mcp
 compatibility: >
   Requires `innate` binary (Rust). Install: `cargo build --release` from the innate directory.
@@ -36,15 +36,18 @@ as entirely new territory with no prior context.
 
 ### Query Formulation
 
-Use the **intent**, not the literal user message. Strip filler words.
+Use **canonical intent**, not literal user words. Keep queries consistent across sessions —
+the same class of problem should always use the same canonical form, because Innate
+accumulates context statistics per query pattern.
 
 | User says | Good query | Bad query |
 |---|---|---|
 | "why does this crash on startup?" | `startup crash sqlite init` | `why does this crash on startup` |
 | "refactor the auth flow" | `auth flow session token handling` | `refactor auth flow` |
 | "add rate limiting to the API" | `rate limiting middleware pattern` | `add rate limiting` |
+| "debug the flaky test" | `flaky test race condition timing` | `debug flaky test` |
 
-Call: `innate_recall(query=<intent>, budget=4000, source="agent")`
+Call: `innate_recall(query=<canonical_intent>, budget=4000, source="mcp")`
 
 Inject recalled chunks into your working context. Mention to the user which (if any) relevant
 prior knowledge was found — one sentence is enough.
@@ -64,60 +67,80 @@ Record **after** a task that produced a real outcome (success or failure). Skip 
 | Task failed, approach was wrong, user had to correct course | `fail` |
 | Session cut off, outcome unclear | `unknown` |
 
-### Used Chunk IDs
+### Used Chunk IDs — Be Precise
 
-Only list chunks you **actively referenced** in your response — not every candidate that was
-recalled. One to three IDs is typical. Empty is fine if no prior knowledge was relevant.
+Only list chunks you **actively referenced** in your reasoning or response. One to three IDs
+is typical. **Empty is correct** if no prior knowledge was actually used (do not include
+chunks that were merely recalled but not applied — the difference matters for confidence
+scoring and future retrieval quality).
 
-### Output Summary
+### Output Summary — Structured Format
 
-One sentence, written for a future agent reading it cold:
-> "Fixed SQLite WAL mode detection by checking PRAGMA journal_mode response rather than assuming WAL."
+Write a **self-contained sentence** that a future agent can act on cold. Use this structure:
 
-Not: "I helped the user fix a bug."
+```
+<what was done or learned> — <key constraint or method> — <when this applies>
+```
+
+Good examples:
+- `Fixed SQLite WAL mode detection by checking PRAGMA journal_mode response rather than assuming WAL — triggers on any new db connection in multi-process setups`
+- `Resolved flaky auth test by injecting a clock mock — real system time causes race in token expiry check`
+- `Rate limiting must be applied before auth middleware, not after — otherwise unauthenticated requests bypass the limiter`
+
+Bad examples (too vague to reuse):
+- `Fixed the bug`
+- `I helped the user with auth`
+- `The problem was timing`
+
+The output_summary becomes the reusable knowledge chunk. If it reads like a story, rewrite it
+as a principle. **If you cannot write a useful summary, set output="unknown" and skip recording.**
 
 Call: `innate_record(trace_id=<id>, outcome=<ok|fail|unknown>, used=[<chunk_ids>], output_summary=<sentence>)`
+
+### Explicit Feedback — Use It
+
+When a recalled chunk was **directly helpful** (saved significant time, prevented a mistake):
+```
+innate_record(..., feedback_up=[<chunk_id>])
+```
+
+When a recalled chunk was **wrong or misleading** (led you in the wrong direction):
+```
+innate_record(..., feedback_down=[<chunk_id>])
+```
+
+Feedback is the fastest signal for knowledge quality. Two down signals on the same chunk
+triggers a governance review; five triggers automatic archival. Use it.
+
+## Nomination — Rare, Explicit
+
+Use the `nomination` field only for genuinely generalizable lessons — patterns that will
+save significant time the next time this type of problem appears. Rare. Not for every task.
+
+Format for nomination (self-contained principle):
+```
+<principle> — <when it applies> — <what to avoid>
+```
+
+Example:
+```
+innate_record(..., nomination="SQLite UNIQUE index on partial WHERE clause requires exact WHERE match in ON CONFLICT — applies to all upsert patterns; bare ON CONFLICT without WHERE will silently skip the upsert")
+```
 
 ## MCP Tool Reference
 
 | Tool | Use | Notes |
 |---|---|---|
-| `innate_recall` | Task start (when relevant) | Formulate with intent, not literal wording |
-| `innate_record` | Task end (when real outcome exists) | Outcome + used IDs + 1-sentence summary |
-| `innate_add` | Capture confirmed insight | Always `source=agent`; goes to pending, awaits review |
-| `innate_spark` | Quick idea for later | No trigger needed; brief distilled form |
-| `innate_evolve` | End of session | `trigger=manual`; distils logs + curates |
+| `innate_recall` | Task start (when relevant) | Use canonical query form — consistent phrasing accumulates context stats |
+| `innate_record` | Task end (when real outcome exists) | Structured output_summary + precise used IDs |
+| `innate_add` | Capture confirmed insight | Always `source="mcp"`; goes to pending, awaits review |
+| `innate_spark` | Quick idea for later | Brief distilled form; no review needed |
+| `innate_evolve` | End of session | `trigger="manual"`; distils logs + curates knowledge base |
 | `innate_inspect` | Health check | chunk counts, debt ratio, rebuild queue |
 
 **Never call without explicit user request:** `innate_approve`, `innate_archive`,
 `innate_invalidate`, `innate_restore`, `innate_mature_spark`, `innate_promote_spark`,
 `innate_drop_spark`.
-
-## Nomination
-
-Use the `nomination` field in `innate_record` only for genuinely exceptional outcomes —
-a pattern that will likely save significant time if recalled next time. Rare. Not for every
-successful task.
-
-## CLI Fallback (if MCP not configured)
-
-```bash
-# Recall
-innate recall "<intent>" --top 5 --format json --source agent
-
-# Record
-innate record <trace_id> --outcome ok --used <id1>,<id2> --output-summary "<sentence>"
-
-# Capture insight
-innate add "<principle>" --trigger "<context>" --source agent
-
-# Quick spark
-innate spark "<distilled idea>"
-
-# End of session
-innate evolve --trigger manual
-innate inspect
-```
 
 ## Write-back Decision
 
@@ -126,21 +149,24 @@ Before ending a long session, run this checklist silently:
 1. Was a non-obvious solution found? (workaround, hidden constraint, subtle bug pattern)
 2. Was a project-specific rule established? ("always do X in this codebase")
 3. Did the user correct a wrong assumption of mine that I'd likely repeat?
-4. Was a hard-won insight reached that took multiple attempts?
+4. Was a hard-won insight reached after multiple failed attempts?
+5. Did a recalled chunk actively help? (record feedback_up)
+6. Did a recalled chunk mislead? (record feedback_down)
 
-If **any** answer is yes → propose to the user:
+If **any** of 1-4 → propose to the user:
 > "This session surfaced [one-line description]. Want me to save it to Innate?"
 
 Only call `innate_spark` or `innate_add` **after user confirms**. Never write silently.
 
 ## Anti-verbatim Rule
 
-Raw conversation text must never be stored. Always distil to the reusable form:
+Raw conversation text must never be stored. Always distil to the reusable principle form:
 > `<principle> — <trigger context> — <what to avoid>`
 
-Example:
-- ❌ "The user told me to use WAL mode and I fixed it by changing the pragma"
-- ✅ "SQLite WAL mode must be verified via PRAGMA response, not assumed — triggers on any db open"
+| ❌ Verbatim | ✅ Distilled |
+|---|---|
+| "The user told me to use WAL mode and I fixed it by changing the pragma" | "SQLite WAL mode must be verified via PRAGMA response, not assumed — triggers on any db open in write-heavy multi-process setups" |
+| "We spent 2 hours debugging auth because of clock skew" | "JWT validation must account for clock skew tolerance (≥30s) — triggers on distributed auth between services with independent system clocks" |
 
 ## Sparks vs. Notes
 
@@ -149,6 +175,31 @@ Example:
 | Quick idea, half-formed hunch | Confirmed reusable principle |
 | Not yet validated | Validated in this session |
 | User says "note this for later" | User says "remember this rule" |
+
+## CLI Fallback (if MCP not configured)
+
+```bash
+# Recall
+innate recall "<canonical_intent>" --top 5 --format json --source cli
+
+# Record with structured summary
+innate record <trace_id> --outcome ok \
+  --used <id1>,<id2> \
+  --output-summary "Fixed X by doing Y — applies when Z" \
+  --feedback up  # or down
+
+# Capture insight
+innate add "<principle> — <trigger> — <what to avoid>" \
+  --trigger "<2-5 word context>" \
+  --source agent
+
+# Quick spark
+innate spark "<distilled idea in 1-2 sentences>"
+
+# End of session
+innate evolve --trigger manual
+innate inspect
+```
 
 ## Commands
 
@@ -164,12 +215,13 @@ Run innate_recall for the current task context and inject the result into this c
 
 If the user provided a query after the command, use that as the recall query exactly.
 If no query was provided ($ARGUMENTS is empty), infer the query from the most recent user
-message or current task intent — use the **intent** (e.g. "sqlite wal mode init") not the
-literal text.
+message or current task intent — use the **canonical intent** (e.g. `sqlite wal mode init`,
+not `why does this crash`). Keep query form consistent with how you'd phrase the same
+class of problem in the future.
 
 Steps:
-1. Formulate the query string (from $ARGUMENTS or inferred intent).
-2. Call `innate_recall` with `query=<query>`, `budget=4000`, `source="agent"`.
+1. Formulate the canonical query string (from $ARGUMENTS or inferred intent).
+2. Call `innate_recall` with `query=<query>`, `budget=4000`, `source="mcp"`.
 3. If knowledge is returned: summarize in one sentence what was found, then inject the
    relevant chunks into context.
 4. If empty: say "No prior knowledge found for: <query>" — do not fabricate.
@@ -178,7 +230,7 @@ Steps:
 
 ```command
 name: innate-record
-description: Close the current innate trace with an outcome and one-sentence summary
+description: Close the current innate trace with an outcome and structured summary
 ---
 Close the current innate trace with an outcome and summary.
 
@@ -189,13 +241,17 @@ Parse $ARGUMENTS for:
 Steps:
 1. Identify the active trace_id from this session's most recent `innate_recall` call.
    If no trace_id is available, say "No active trace — run /innate-recall first."
-2. Determine which recalled chunk IDs were actually used in the final response (not
-   just candidates recalled).
-3. Write a one-sentence output_summary for a future agent reading cold:
-   - If the user provided summary text in $ARGUMENTS, use that.
-   - Otherwise synthesize from the task outcome.
-4. Call `innate_record` with `trace_id`, `outcome`, `used=[<chunk_ids>]`, `output_summary`.
-5. Confirm: "Recorded trace <trace_id> as <outcome>."
+2. Determine which recalled chunk IDs were **actually used** in the final response (not
+   just candidates recalled). Be precise — unused recalled chunks should NOT be listed.
+3. Write a structured output_summary for a future agent reading cold:
+   Format: `<what was done> — <key constraint/method> — <when this applies>`
+   If the user provided summary text in $ARGUMENTS, use that.
+4. Assess feedback:
+   - If any chunk was directly helpful → include `feedback_up=[chunk_id]`
+   - If any chunk was wrong/misleading → include `feedback_down=[chunk_id]`
+5. Call `innate_record` with `trace_id`, `outcome`, `used=[<chunk_ids>]`,
+   `output_summary`, and feedback if applicable.
+6. Confirm: "Recorded trace <trace_id> as <outcome>."
 ```
 
 ```command
@@ -209,10 +265,12 @@ you like to save?"
 
 Steps:
 1. Parse $ARGUMENTS as the insight content.
-2. Distil to reusable form: `<principle> — <trigger context> — <what to avoid/do>`.
+2. Distil to reusable principle form:
+   `<principle> — <when it applies> — <what to avoid>`
    Never store raw conversation text verbatim.
-3. Infer a trigger_desc from the distilled content (2-5 words describing when to recall it).
-4. Call `innate_add` with `content=<distilled>`, `trigger_desc=<trigger>`, `source="agent"`.
+3. Infer a trigger_desc (2-5 canonical words describing when to recall it).
+   Use the same phrasing you would use when querying innate_recall for this topic.
+4. Call `innate_add` with `content=<distilled>`, `trigger_desc=<trigger>`, `source="mcp"`.
 5. Confirm: "Saved as pending chunk <id>. Awaits your review via innate_approve."
 ```
 

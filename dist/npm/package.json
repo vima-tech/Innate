@@ -1,6 +1,6 @@
 {
   "name": "@vima_tech/innate",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Self-growing procedural knowledge layer for AI agents — CLI",
   "keywords": ["innate", "mcp", "ai", "knowledge", "agent", "memory"],
   "homepage": "https://github.com/vima-tech/Innate",

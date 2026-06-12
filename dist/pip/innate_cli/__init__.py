@@ -3,5 +3,5 @@
 import sys
 from ._runner import main, find_binary
 
-__version__ = "0.1.3"
+__version__ = "0.1.6"
 __all__ = ["main", "find_binary"]

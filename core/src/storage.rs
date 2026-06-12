@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::errors::{InnateError, Result};
 use crate::utils::{cosine_similarity, unpack_embedding};
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.6";
+const EXPECTED_SCHEMA_VERSION: &str = "4.13";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("schema.sql");
@@ -184,14 +184,15 @@ impl Storage {
                 id, skill_name, seq, content, trigger_desc, anti_trigger_desc,
                 content_hash, token_count, origin, source, maturity, related_ids,
                 protected, state, state_reason, state_updated_at,
-                confidence, confidence_reason, version, distilled_from, parent_id,
+                confidence, confidence_base, confidence_reason, version, distilled_from,
+                distill_provider, distill_model, distill_prompt_version, parent_id,
                 selected_count, used_count, used_success_count,
                 success_trace_ids_count, last_success_at, last_agg_ts,
                 embed_version, created_at, updated_at, last_used_at
             ) VALUES (
                 ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,
-                ?13,?14,?15,?16,?17,?18,?19,?20,?21,
-                ?22,?23,?24,?25,?26,?27,?28,?29,?30,?31
+                ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,
+                ?26,?27,?28,?29,?30,?31,?32,?33,?34,?35
             )",
             params![
                 c.id,
@@ -211,9 +212,13 @@ impl Storage {
                 c.state_reason,
                 c.state_updated_at,
                 c.confidence,
+                c.confidence,
                 c.confidence_reason,
                 c.version,
                 c.distilled_from,
+                c.distill_provider,
+                c.distill_model,
+                c.distill_prompt_version,
                 c.parent_id,
                 c.selected_count,
                 c.used_count,
@@ -286,8 +291,10 @@ impl Storage {
         now: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE chunks SET confidence=?, confidence_reason=?, updated_at=? WHERE id=?",
-            params![conf, reason, now, id],
+            "UPDATE chunks
+             SET confidence=?, confidence_base=?, confidence_reason=?, updated_at=?
+             WHERE id=?",
+            params![conf, conf, reason, now, id],
         )?;
         Ok(())
     }
@@ -449,12 +456,120 @@ impl Storage {
         attribution: Option<&str>,
         source: &str,
         ts: &str,
-    ) -> Result<()> {
-        self.conn.execute(
+    ) -> Result<usize> {
+        Ok(self.conn.execute(
             "INSERT OR IGNORE INTO usage_trace
              (trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts)
              VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             params![trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts],
+        )?)
+    }
+
+    pub fn replace_used_trace(
+        &self,
+        trace_id: &str,
+        used_ids: &[String],
+        strength: f64,
+        attribution: &str,
+        source: &str,
+        ts: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM usage_trace WHERE trace_id=? AND event='used'",
+            [trace_id],
+        )?;
+        for chunk_id in used_ids {
+            self.insert_usage_trace(
+                trace_id,
+                Some(chunk_id),
+                "used",
+                strength,
+                None,
+                None,
+                None,
+                None,
+                Some(attribution),
+                source,
+                ts,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn merge_used_trace(
+        &self,
+        trace_id: &str,
+        used_ids: &[String],
+        strength: f64,
+        attribution: &str,
+        source: &str,
+        ts: &str,
+    ) -> Result<()> {
+        let attribution_rank = |value: &str| match value {
+            "explicit" => 3,
+            "cited" => 2,
+            "inferred" => 1,
+            _ => 0,
+        };
+        for chunk_id in used_ids {
+            let existing = self
+                .query_chunks_params(
+                    "SELECT attribution, strength FROM usage_trace
+                     WHERE trace_id=? AND chunk_id=? AND event='used'",
+                    params![trace_id, chunk_id],
+                )?
+                .into_iter()
+                .next();
+            if let Some(row) = existing {
+                let existing_attribution = row
+                    .get("attribution")
+                    .and_then(Value::as_str)
+                    .unwrap_or("inferred");
+                if attribution_rank(attribution) > attribution_rank(existing_attribution) {
+                    self.conn.execute(
+                        "UPDATE usage_trace
+                         SET strength=?, attribution=?, source=?, ts=?
+                         WHERE trace_id=? AND chunk_id=? AND event='used'",
+                        params![
+                            strength,
+                            attribution,
+                            source,
+                            ts,
+                            trace_id,
+                            chunk_id
+                        ],
+                    )?;
+                }
+            } else {
+                self.insert_usage_trace(
+                    trace_id,
+                    Some(chunk_id),
+                    "used",
+                    strength,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(attribution),
+                    source,
+                    ts,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn refresh_chunk_last_used(&self, chunk_id: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chunks
+             SET last_used_at=COALESCE(
+                   (SELECT MAX(ts) FROM usage_trace
+                    WHERE chunk_id=? AND event='used'),
+                   last_used_base
+                 ),
+                 updated_at=?
+             WHERE id=?",
+            params![chunk_id, now, chunk_id],
         )?;
         Ok(())
     }
@@ -475,10 +590,11 @@ impl Storage {
     }
 
     pub fn purge_usage_trace(&self, before_ts: &str) -> Result<usize> {
-        // Preserve spark 'retrieved' traces — they power soft-incubation counts (§二·七).
+        // Preserve compact attribution facts. They are required to replay corrections.
         let n = self.conn.execute(
             "DELETE FROM usage_trace
              WHERE ts < ?
+             AND event IN ('retrieved','refined')
              AND NOT (event = 'retrieved'
                       AND chunk_id IN (SELECT id FROM chunks WHERE origin='spark'))",
             [before_ts],
@@ -495,9 +611,9 @@ impl Storage {
             "INSERT OR REPLACE INTO episodic_log
              (id, trace_id, lib_id, ts, query, recall_snapshot, output,
               output_summary, outcome, event_source, task_state, completed_at,
-              usage_state, used_ids, used_attribution, context_key, nomination, priority,
-              distill_state, distill_note)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+              usage_state, used_ids, used_attribution, used_complete, context_key, nomination, priority,
+              distill_state, distill_note, distill_attempts, distill_last_failed_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,0,NULL)",
             params![
                 log.id,
                 log.trace_id,
@@ -514,6 +630,7 @@ impl Storage {
                 log.usage_state,
                 log.used_ids,
                 log.used_attribution,
+                i64::from(log.used_complete),
                 log.context_key,
                 log.nomination,
                 log.priority,
@@ -585,6 +702,7 @@ impl Storage {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_trace_lifecycle(
         &self,
         trace_id: &str,
@@ -593,6 +711,7 @@ impl Storage {
         usage_state: Option<&str>,
         used_ids: Option<&str>,
         used_attribution: Option<&str>,
+        used_complete: Option<bool>,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE episodic_log
@@ -600,7 +719,8 @@ impl Storage {
                  completed_at=COALESCE(?, completed_at),
                  usage_state=COALESCE(?, usage_state),
                  used_ids=COALESCE(?, used_ids),
-                 used_attribution=COALESCE(?, used_attribution)
+                 used_attribution=COALESCE(?, used_attribution),
+                 used_complete=COALESCE(?, used_complete)
              WHERE trace_id=?",
             params![
                 task_state,
@@ -608,10 +728,79 @@ impl Storage {
                 usage_state,
                 used_ids,
                 used_attribution,
+                used_complete.map(i64::from),
                 trace_id
             ],
         )?;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_confidence_evidence(
+        &self,
+        id: &str,
+        trace_id: Option<&str>,
+        chunk_id: &str,
+        kind: &str,
+        target: f64,
+        alpha: f64,
+        reason: &str,
+        context_key: Option<&str>,
+        ts: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO confidence_evidence
+             (id, trace_id, chunk_id, kind, target, alpha, reason, context_key, ts)
+             VALUES (?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(trace_id, chunk_id, kind) WHERE trace_id IS NOT NULL
+             DO UPDATE SET target=excluded.target, alpha=excluded.alpha,
+                           reason=excluded.reason, context_key=excluded.context_key",
+            params![id, trace_id, chunk_id, kind, target, alpha, reason, context_key, ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_trace_confidence_evidence(&self, trace_id: &str, kinds: &[&str]) -> Result<()> {
+        for kind in kinds {
+            self.conn.execute(
+                "DELETE FROM confidence_evidence WHERE trace_id=? AND kind=?",
+                params![trace_id, kind],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_chunk_trace_confidence_evidence(
+        &self,
+        trace_id: &str,
+        chunk_id: &str,
+        kind: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM confidence_evidence
+             WHERE trace_id=? AND chunk_id=? AND kind=?",
+            params![trace_id, chunk_id, kind],
+        )?;
+        Ok(())
+    }
+
+    pub fn confidence_evidence_for_chunk(&self, chunk_id: &str) -> Result<Vec<Value>> {
+        self.query_json(
+            "SELECT target, alpha, reason, ts, id
+             FROM confidence_evidence WHERE chunk_id=?
+             ORDER BY ts ASC,
+                      CASE kind
+                        WHEN 'outcome_ok' THEN 1
+                        WHEN 'outcome_fail' THEN 1
+                        WHEN 'selected_unused' THEN 2
+                        WHEN 'feedback_up' THEN 3
+                        WHEN 'feedback_down' THEN 3
+                        WHEN 'decay' THEN 4
+                        ELSE 5
+                      END ASC,
+                      kind ASC, id ASC",
+            [chunk_id],
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -627,9 +816,9 @@ impl Storage {
         reason: Option<&str>,
         context_key: Option<&str>,
         ts: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO feedback_events
+    ) -> Result<usize> {
+        Ok(self.conn.execute(
+            "INSERT OR IGNORE INTO feedback_events
              (id, trace_id, chunk_id, signal, strength, source, actor, reason, context_key, ts)
              VALUES (?,?,?,?,?,?,?,?,?,?)",
             params![
@@ -644,6 +833,26 @@ impl Storage {
                 context_key,
                 ts
             ],
+        )?)
+    }
+
+    pub fn delete_feedback_event(
+        &self,
+        trace_id: &str,
+        chunk_id: &str,
+        signal: &str,
+    ) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM feedback_events
+             WHERE trace_id=? AND chunk_id=? AND signal=?",
+            params![trace_id, chunk_id, signal],
+        )?)
+    }
+
+    pub fn update_chunk_last_decayed_at(&self, id: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chunks SET last_decayed_at=?, updated_at=? WHERE id=?",
+            params![now, now, id],
         )?;
         Ok(())
     }
@@ -711,6 +920,7 @@ impl Storage {
         Ok((posterior - 0.5) * 2.0 * evidence_weight)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_governance_proposal(
         &self,
         id: &str,
@@ -718,15 +928,20 @@ impl Storage {
         proposal_type: &str,
         reason: &str,
         evidence_count: i64,
+        evidence_score: f64,
+        actor_count: i64,
         now: &str,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO governance_proposals
-             (id, chunk_id, proposal_type, reason, evidence_count, state, created_at, updated_at)
-             VALUES (?,?,?,?,?,'pending',?,?)
+             (id, chunk_id, proposal_type, reason, evidence_count,
+              evidence_score, actor_count, state, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,'pending',?,?)
              ON CONFLICT(chunk_id, proposal_type) WHERE state='pending'
              DO UPDATE SET reason=excluded.reason,
                            evidence_count=excluded.evidence_count,
+                           evidence_score=excluded.evidence_score,
+                           actor_count=excluded.actor_count,
                            updated_at=excluded.updated_at",
             params![
                 id,
@@ -734,6 +949,8 @@ impl Storage {
                 proposal_type,
                 reason,
                 evidence_count,
+                evidence_score,
+                actor_count,
                 now,
                 now
             ],
@@ -742,10 +959,19 @@ impl Storage {
     }
 
     pub fn request_evolve(&self, id: &str, reason: &str, now: &str) -> Result<()> {
+        let priority = match reason {
+            "governance_ready" => 100,
+            "governance" => 80,
+            "threshold" => 60,
+            "batch_continue" => 40,
+            _ => 20,
+        };
         self.conn.execute(
-            "INSERT OR IGNORE INTO evolve_requests(id, reason, state, requested_at)
-             VALUES (?,?,'pending',?)",
-            params![id, reason, now],
+            "INSERT INTO evolve_requests(id, reason, state, requested_at, priority)
+             VALUES (?,?,'pending',?,?)
+             ON CONFLICT(reason) WHERE state='pending'
+             DO UPDATE SET priority=MAX(priority, excluded.priority)",
+            params![id, reason, now, priority],
         )?;
         Ok(())
     }
@@ -757,14 +983,21 @@ impl Storage {
              WHERE state='running' AND leased_at < ?",
             [stale_before],
         )?;
+        self.conn.execute(
+            "UPDATE evolve_requests
+             SET state='pending', leased_at=NULL, note='retry_failed'
+             WHERE state='failed' AND attempts < 3
+               AND COALESCE(next_retry_at, completed_at) < ?",
+            [now],
+        )?;
         Ok(self
             .conn
             .query_row(
                 "UPDATE evolve_requests
-                 SET state='running', leased_at=?
+                 SET state='running', leased_at=?, attempts=attempts+1
                  WHERE id=(
                    SELECT id FROM evolve_requests
-                   WHERE state='pending' ORDER BY requested_at ASC LIMIT 1
+                   WHERE state='pending' ORDER BY priority DESC, requested_at ASC LIMIT 1
                  ) AND state='pending'
                  RETURNING id",
                 [now],
@@ -781,8 +1014,27 @@ impl Storage {
         now: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE evolve_requests SET state=?, completed_at=?, note=? WHERE id=?",
-            params![state, now, note, id],
+            "UPDATE evolve_requests
+             SET state=?, completed_at=?, note=?,
+                 last_failed_at=CASE
+                   WHEN ?='failed' THEN ?
+                   ELSE last_failed_at
+                 END,
+                 next_retry_at=CASE WHEN ?='failed'
+                   THEN strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+5 minutes')
+                   ELSE NULL END
+             WHERE id=?",
+            params![state, now, note, state, now, state, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_covered_evolve_requests(&self, requested_before: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE evolve_requests
+             SET state='completed', completed_at=?, note='covered_by_evolve', next_retry_at=NULL
+             WHERE state='pending' AND requested_at <= ?",
+            params![now, requested_before],
         )?;
         Ok(())
     }
@@ -821,6 +1073,12 @@ impl Storage {
              SET distill_state=?, distill_note=?,
                  distill_prompt_tokens=?, distill_completion_tokens=?,
                  distill_accounted_at=?,
+                 distill_attempts=distill_attempts
+                   + CASE WHEN ?='failed' THEN 1 ELSE 0 END,
+                 distill_last_failed_at=CASE
+                   WHEN ?='failed' THEN ?
+                   ELSE distill_last_failed_at
+                 END,
                  distill_run_id=NULL, distill_locked_at=NULL
              WHERE id=?",
             params![
@@ -828,6 +1086,9 @@ impl Storage {
                 note,
                 prompt_tokens,
                 completion_tokens,
+                accounted_at,
+                state,
+                state,
                 accounted_at,
                 id
             ],
@@ -1002,6 +1263,9 @@ pub struct ChunkRow {
     pub confidence_reason: Option<String>,
     pub version: i64,
     pub distilled_from: Option<String>,
+    pub distill_provider: Option<String>,
+    pub distill_model: Option<String>,
+    pub distill_prompt_version: Option<String>,
     pub parent_id: Option<String>,
     pub selected_count: i64,
     pub used_count: i64,
@@ -1032,6 +1296,7 @@ pub struct EpisodicLogRow {
     pub usage_state: String,
     pub used_ids: Option<String>,
     pub used_attribution: Option<String>,
+    pub used_complete: bool,
     pub context_key: Option<String>,
     pub nomination: Option<String>,
     pub priority: i64,

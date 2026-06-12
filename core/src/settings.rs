@@ -1,0 +1,212 @@
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Top-level Settings
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<LlmConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// LLM (generative) config — used by LlmDistiller
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// "openai" | "anthropic"
+    pub provider: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    pub model_id: String,
+
+    /// API key (env var override: INNATE_LLM_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+impl LlmConfig {
+    /// Resolved API key: settings file → env var fallback.
+    pub fn resolved_api_key(&self) -> Option<String> {
+        if let Some(ref k) = self.api_key {
+            if !k.is_empty() {
+                return Some(k.clone());
+            }
+        }
+        // Generic override
+        if let Ok(k) = std::env::var("INNATE_LLM_API_KEY") {
+            if !k.is_empty() {
+                return Some(k);
+            }
+        }
+        match self.provider.as_str() {
+            "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()),
+            _ => std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()),
+        }
+    }
+
+    pub fn resolved_base_url(&self) -> String {
+        if let Some(ref u) = self.base_url {
+            if !u.is_empty() {
+                return u.trim_end_matches('/').to_string();
+            }
+        }
+        match self.provider.as_str() {
+            "anthropic" => "https://api.anthropic.com".to_string(),
+            _ => "https://api.openai.com/v1".to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embedding config — used by LlmEmbeddingProvider
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    /// Only "openai" format is supported (Anthropic has no embedding API).
+    #[serde(default = "default_openai")]
+    pub provider: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
+    pub model_id: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Embedding output dimension (model-specific; defaults to 1536 for text-embedding-3-small).
+    #[serde(default = "default_embed_dim")]
+    pub dim: usize,
+}
+
+fn default_openai() -> String {
+    "openai".to_string()
+}
+
+fn default_embed_dim() -> usize {
+    1536
+}
+
+impl EmbeddingConfig {
+    pub fn resolved_api_key(&self) -> Option<String> {
+        if let Some(ref k) = self.api_key {
+            if !k.is_empty() {
+                return Some(k.clone());
+            }
+        }
+        if let Ok(k) = std::env::var("INNATE_LLM_API_KEY") {
+            if !k.is_empty() {
+                return Some(k);
+            }
+        }
+        std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty())
+    }
+
+    pub fn resolved_base_url(&self) -> String {
+        self.base_url
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(|u| u.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    /// Directories the daemon watches for .log files.
+    #[serde(default)]
+    pub watch_dirs: Vec<String>,
+
+    /// Automatically spawn the daemon when the MCP server starts (default: true).
+    #[serde(default = "default_true")]
+    pub auto_start: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Load / save
+// ---------------------------------------------------------------------------
+
+/// Returns `~/.innate/settings.json`.
+pub fn settings_path() -> PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".innate")
+        .join("settings.json")
+}
+
+/// Load settings from `~/.innate/settings.json`. Returns `Settings::default()` if absent.
+pub fn load() -> Settings {
+    let path = settings_path();
+    load_from(&path)
+}
+
+pub fn load_from(path: &Path) -> Settings {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Settings::default();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Write settings to `~/.innate/settings.json` with mode 0600.
+pub fn save(settings: &Settings) -> anyhow::Result<()> {
+    let path = settings_path();
+    save_to(settings, &path)
+}
+
+pub fn save_to(settings: &Settings, path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(settings)?;
+    std::fs::write(path, &json)?;
+    // 0600 on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Expand `~` at the start of a path string to the home directory.
+pub fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") || path == "~" {
+        let home = dirs_next::home_dir()
+            .map(|h| h.display().to_string())
+            .unwrap_or_default();
+        path.replacen('~', &home, 1)
+    } else {
+        path.to_string()
+    }
+}
+
+/// Return expanded watch directories from daemon config.
+pub fn resolved_watch_dirs(settings: &Settings) -> Vec<String> {
+    settings
+        .daemon
+        .as_ref()
+        .map(|d| d.watch_dirs.iter().map(|p| expand_tilde(p)).collect())
+        .unwrap_or_default()
+}

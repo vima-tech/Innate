@@ -28,10 +28,10 @@ use crate::utils::{
 // Tuning defaults
 // ---------------------------------------------------------------------------
 
-const W_CONTENT: f64 = 0.65;
+const W_CONTENT: f64 = 0.55;
 const W_TRIGGER: f64 = 0.25;
 const W_CONFIDENCE: f64 = 0.10;
-const W_CONTEXT: f64 = 0.05;
+const W_CONTEXT: f64 = 0.15;
 const TOP_K_CANDIDATES: usize = 20;
 const ANTI_TRIGGER_PENALTY: f64 = 0.6;
 const DENSITY_REFILL: bool = true;
@@ -41,12 +41,20 @@ const LOW_CONF_IDLE_DAYS: i64 = 60;
 const REPEAT_SELECT_MIN: i64 = 10;
 const REPEAT_SELECT_CONF_MAX: f64 = 0.5;
 const NEVER_USED_AGE_DAYS: i64 = 30;
-const OPEN_TTL_DAYS: i64 = 7;
+const OPEN_TTL_DAYS: i64 = 14;
 const SCREENING_TIMEOUT_MINUTES: i64 = 30;
 const PROMOTE_USED_SUCCESS_MIN: i64 = 3;
-const PROMOTE_CONFIDENCE_MIN: f64 = 0.65;
+const PROMOTE_CONFIDENCE_MIN: f64 = 0.60;
+const DECAY_FLOOR: f64 = 0.20;
 const EVOLVE_THRESHOLD: i64 = 5;
 const DISTILL_BATCH_SIZE: usize = 20;
+const PENDING_RECALL_PENALTY: f64 = 0.60;
+const GOVERNANCE_ARCHIVE_THRESHOLD: i64 = 3;
+const NEGATIVE_FEEDBACK_ARCHIVE_THRESHOLD: i64 = 5;
+const GOVERNANCE_EVOLVE_THRESHOLD: i64 = 3;
+const FAILURE_MIN_USES: i64 = 5;
+const FAILURE_MAX_SUCCESS_RATE: f64 = 0.20;
+const FAILURE_CONFIDENCE_MAX: f64 = 0.35;
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -130,9 +138,17 @@ pub struct KnowledgeBase {
     screening_timeout_minutes: i64,
     promote_used_success_min: i64,
     promote_confidence_min: f64,
+    decay_floor: f64,
     evolve_threshold: i64,
     distill_batch_size: usize,
     evolve_schedule_interval_hours: i64,
+    governance_archive_threshold: i64,
+    negative_feedback_archive_threshold: i64,
+    governance_evolve_threshold: i64,
+    governance_proposal_max_age_days: i64,
+    failure_min_uses: i64,
+    failure_max_success_rate: f64,
+    failure_confidence_max: f64,
 }
 
 impl KnowledgeBase {
@@ -179,9 +195,17 @@ impl KnowledgeBase {
             screening_timeout_minutes: SCREENING_TIMEOUT_MINUTES,
             promote_used_success_min: PROMOTE_USED_SUCCESS_MIN,
             promote_confidence_min: PROMOTE_CONFIDENCE_MIN,
+            decay_floor: DECAY_FLOOR,
             evolve_threshold: EVOLVE_THRESHOLD,
             distill_batch_size: DISTILL_BATCH_SIZE,
             evolve_schedule_interval_hours: 6,
+            governance_archive_threshold: GOVERNANCE_ARCHIVE_THRESHOLD,
+            negative_feedback_archive_threshold: NEGATIVE_FEEDBACK_ARCHIVE_THRESHOLD,
+            governance_evolve_threshold: GOVERNANCE_EVOLVE_THRESHOLD,
+            governance_proposal_max_age_days: 30,
+            failure_min_uses: FAILURE_MIN_USES,
+            failure_max_success_rate: FAILURE_MAX_SUCCESS_RATE,
+            failure_confidence_max: FAILURE_CONFIDENCE_MAX,
         };
         kb.init_meta()?;
         kb.load_params()?;
@@ -213,17 +237,17 @@ impl KnowledgeBase {
         let defaults: &[(&str, &str)] = &[
             ("lib_id", &lib_id),
             ("lib_role", "personal"),
-            ("schema_version", "4.6"),
+            ("schema_version", "4.13"),
             ("content_dim", &content_dim),
             ("trigger_dim", &trigger_dim),
             ("embed_model", embed_model),
             ("embed_version", "1"),
             ("vector_revision", "0"),
             ("last_agg_ts", "1970-01-01T00:00:00.000Z"),
-            ("recall.w_content", "0.65"),
+            ("recall.w_content", "0.55"),
             ("recall.w_trigger", "0.25"),
             ("recall.w_confidence", "0.10"),
-            ("recall.w_context", "0.05"),
+            ("recall.w_context", "0.15"),
             ("recall.top_k_candidates", "20"),
             ("recall.anti_trigger_penalty", "0.6"),
             ("recall.density_refill", "true"),
@@ -232,15 +256,23 @@ impl KnowledgeBase {
             ("curate.repeat_select_min", "10"),
             ("curate.repeat_select_conf_max", "0.5"),
             ("curate.never_used_age_days", "30"),
-            ("curate.open_ttl_days", "7"),
+            ("curate.open_ttl_days", "14"),
             ("curate.screening_timeout_minutes", "30"),
             ("curate.promote_used_success_min", "3"),
-            ("curate.promote_confidence_min", "0.65"),
+            ("curate.promote_confidence_min", "0.60"),
+            ("curate.decay_floor", "0.20"),
             ("evolve.threshold_new_count", "5"),
             ("evolve.distill_batch_size", "20"),
             ("evolve.schedule_interval_hours", "6"),
             ("curate.soft_mature_threshold", "5"),
             ("evolve.distill_token_window_hours", "24"),
+            ("curate.governance_archive_threshold", "3"),
+            ("curate.negative_feedback_archive_threshold", "5"),
+            ("evolve.governance_pending_threshold", "3"),
+            ("curate.governance_proposal_max_age_days", "30"),
+            ("curate.failure_min_uses", "5"),
+            ("curate.failure_max_success_rate", "0.20"),
+            ("curate.failure_confidence_max", "0.35"),
         ];
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
@@ -303,10 +335,30 @@ impl KnowledgeBase {
         self.promote_used_success_min =
             i("curate.promote_used_success_min", PROMOTE_USED_SUCCESS_MIN);
         self.promote_confidence_min = f("curate.promote_confidence_min", PROMOTE_CONFIDENCE_MIN);
+        self.decay_floor = f("curate.decay_floor", DECAY_FLOOR).clamp(0.0, 0.4);
         self.evolve_threshold = i("evolve.threshold_new_count", EVOLVE_THRESHOLD);
         self.distill_batch_size =
             i("evolve.distill_batch_size", DISTILL_BATCH_SIZE as i64) as usize;
         self.evolve_schedule_interval_hours = i("evolve.schedule_interval_hours", 6).max(1);
+        self.governance_archive_threshold =
+            i("curate.governance_archive_threshold", GOVERNANCE_ARCHIVE_THRESHOLD).max(1);
+        self.negative_feedback_archive_threshold = i(
+            "curate.negative_feedback_archive_threshold",
+            NEGATIVE_FEEDBACK_ARCHIVE_THRESHOLD,
+        )
+        .max(1);
+        self.governance_evolve_threshold =
+            i("evolve.governance_pending_threshold", GOVERNANCE_EVOLVE_THRESHOLD).max(1);
+        self.governance_proposal_max_age_days =
+            i("curate.governance_proposal_max_age_days", 30).max(1);
+        self.failure_min_uses = i("curate.failure_min_uses", FAILURE_MIN_USES).max(1);
+        self.failure_max_success_rate = f(
+            "curate.failure_max_success_rate",
+            FAILURE_MAX_SUCCESS_RATE,
+        )
+        .clamp(0.0, 1.0);
+        self.failure_confidence_max =
+            f("curate.failure_confidence_max", FAILURE_CONFIDENCE_MAX).clamp(0.0, 1.0);
         Ok(())
     }
 
@@ -505,7 +557,7 @@ impl KnowledgeBase {
         candidates: HashMap<String, CandidateInfo>,
         query: &str,
     ) -> Result<Vec<(f64, Value)>> {
-        let context_key = content_hash(query);
+        let context_key = content_hash(&normalize_query(query));
         let mut scored: Vec<(f64, Value)> = Vec::with_capacity(candidates.len());
         for info in candidates.into_values() {
             let conf = info
@@ -519,6 +571,9 @@ impl KnowledgeBase {
                 + self.w_trigger * info.sim_trigger as f64
                 + self.w_confidence * conf
                 + self.w_context * context_score;
+            if info.chunk.get("state").and_then(Value::as_str) == Some("pending") {
+                fused *= PENDING_RECALL_PENALTY;
+            }
             let anti = info
                 .chunk
                 .get("anti_trigger_desc")
@@ -771,9 +826,21 @@ impl KnowledgeBase {
             .storage
             .search_vec_trigger(q_trigger, self.top_k_candidates)?;
 
+        // Batch-fetch all candidate chunk IDs (mirrors the pattern in ann_candidates).
+        let all_ids: Vec<&str> = {
+            let mut seen = HashSet::new();
+            content_res
+                .iter()
+                .chain(trigger_res.iter())
+                .map(|(id, _)| id.as_str())
+                .filter(|id| seen.insert(*id))
+                .collect()
+        };
+        let chunks = self.storage.get_chunks_by_ids(&all_ids)?;
+
         let mut spark_scores: HashMap<String, (f32, Value)> = HashMap::new();
         for (cid, sim) in content_res.iter().chain(trigger_res.iter()) {
-            if let Some(chunk) = self.storage.get_chunk(cid)? {
+            if let Some(chunk) = chunks.get(cid) {
                 if chunk.get("origin").and_then(Value::as_str) != Some("spark") {
                     continue;
                 }
@@ -795,7 +862,7 @@ impl KnowledgeBase {
                     .entry(cid.clone())
                     .or_insert_with(|| (*sim, chunk.clone()));
                 if *sim > entry.0 {
-                    *entry = (*sim, chunk);
+                    *entry = (*sim, chunk.clone());
                 }
             }
         }
@@ -923,7 +990,7 @@ impl KnowledgeBase {
                 event_source: source.to_string(),
                 task_state: "recalled".to_string(),
                 usage_state: "unknown".to_string(),
-                context_key: Some(content_hash(query)),
+                context_key: Some(content_hash(&normalize_query(query))),
                 distill_state: "open".to_string(),
                 ..Default::default()
             };
@@ -963,6 +1030,7 @@ impl KnowledgeBase {
             outcome,
             used,
             "explicit",
+            true,
             feedback_up,
             feedback_down,
             "user",
@@ -985,6 +1053,7 @@ impl KnowledgeBase {
         outcome: Option<&str>,
         used: Option<&[String]>,
         used_attribution: &str,
+        used_complete: bool,
         feedback_up: Option<&[String]>,
         feedback_down: Option<&[String]>,
         feedback_kind: &str,
@@ -995,6 +1064,20 @@ impl KnowledgeBase {
         task_state: Option<&str>,
         source: &str,
     ) -> Result<()> {
+        let dedupe_ids = |ids: &[String]| {
+            let mut seen = HashSet::new();
+            ids.iter()
+                .filter(|id| seen.insert((*id).clone()))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let normalized_used = used.map(dedupe_ids);
+        let normalized_feedback_up = feedback_up.map(dedupe_ids);
+        let normalized_feedback_down = feedback_down.map(dedupe_ids);
+        let used = normalized_used.as_deref();
+        let feedback_up = normalized_feedback_up.as_deref();
+        let feedback_down = normalized_feedback_down.as_deref();
+
         if let Some(o) = outcome {
             if !matches!(o, "ok" | "fail" | "unknown") {
                 return Err(InnateError::InvalidState(format!("invalid outcome: {o}")));
@@ -1021,6 +1104,14 @@ impl KnowledgeBase {
             }
         }
         validate_source(source)?;
+        if let (Some(ups), Some(downs)) = (feedback_up, feedback_down) {
+            let down_set: HashSet<&str> = downs.iter().map(String::as_str).collect();
+            if let Some(chunk_id) = ups.iter().find(|id| down_set.contains(id.as_str())) {
+                return Err(InnateError::InvalidState(format!(
+                    "conflicting feedback for chunk {chunk_id}"
+                )));
+            }
+        }
         let effective_priority = if nomination.is_some() && priority == 0 {
             1
         } else {
@@ -1047,16 +1138,18 @@ impl KnowledgeBase {
                         output_summary: output_summary.map(str::to_string),
                         outcome: outcome.map(str::to_string),
                         event_source: source.to_string(),
-                        task_state: if outcome.is_some() {
+                        task_state: if matches!(outcome, Some("ok") | Some("fail")) {
                             "completed".to_string()
                         } else {
                             task_state.unwrap_or("running").to_string()
                         },
-                        completed_at: outcome.map(|_| now.clone()),
+                        completed_at: matches!(outcome, Some("ok") | Some("fail"))
+                            .then(|| now.clone()),
                         usage_state: usage_state(used).to_string(),
                         used_ids,
                         used_attribution: used.map(|_| used_attribution.to_string()),
-                        context_key: query.map(content_hash),
+                        used_complete,
+                        context_key: query.map(|q| content_hash(&normalize_query(q))),
                         nomination: nomination.map(str::to_string),
                         priority: effective_priority,
                         distill_state: "open".to_string(),
@@ -1067,6 +1160,9 @@ impl KnowledgeBase {
                     self.storage.get_episodic_log(trace_id)?.unwrap()
                 }
             };
+            self.validate_trace_attribution(trace_id, used, "used")?;
+            self.validate_trace_attribution(trace_id, feedback_up, "feedback_up")?;
+            self.validate_trace_attribution(trace_id, feedback_down, "feedback_down")?;
 
             let existing_outcome = log
                 .get("outcome")
@@ -1074,7 +1170,7 @@ impl KnowledgeBase {
                 .map(str::to_string);
             if let Some(new_outcome) = outcome {
                 if let Some(ref ex) = existing_outcome {
-                    if ex != new_outcome {
+                    if ex != "unknown" && ex != new_outcome {
                         return Err(InnateError::OutcomeConflict {
                             trace_id: trace_id.to_string(),
                             existing: ex.clone(),
@@ -1085,28 +1181,72 @@ impl KnowledgeBase {
             }
 
             // usage_trace: used
-            let used_strength = match used_attribution {
+            let effective_used_attribution = if used.is_some() {
+                used_attribution
+            } else {
+                log.get("used_attribution")
+                    .and_then(Value::as_str)
+                    .unwrap_or(used_attribution)
+            };
+            let used_strength = match effective_used_attribution {
                 "explicit" => 0.3,
                 "cited" => 0.25,
                 "inferred" => 0.15,
                 _ => unreachable!(),
             };
-            if let Some(used_ids) = used {
-                for cid in used_ids {
-                    self.storage.insert_usage_trace(
+            let existing_used_ids: Vec<String> = log
+                .get("used_ids")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default();
+            let existing_used_complete = log
+                .get("used_complete")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                != 0;
+            let effective_used_complete = used_complete || existing_used_complete;
+            let effective_used_ids = used.map(|reported| {
+                if used_complete {
+                    reported.to_vec()
+                } else {
+                    let mut merged = existing_used_ids.clone();
+                    let mut seen: HashSet<String> = merged.iter().cloned().collect();
+                    merged.extend(
+                        reported
+                            .iter()
+                            .filter(|id| seen.insert((*id).clone()))
+                            .cloned(),
+                    );
+                    merged
+                }
+            });
+            if let Some(used_ids) = effective_used_ids.as_deref() {
+                let previously_used: HashSet<String> = existing_used_ids.iter().cloned().collect();
+                if used_complete {
+                    self.storage.replace_used_trace(
                         trace_id,
-                        Some(cid),
-                        "used",
+                        used_ids,
                         used_strength,
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(used_attribution),
+                        used_attribution,
                         source,
                         &now,
                     )?;
-                    self.storage.update_chunk_last_used(cid, &now)?;
+                } else if let Some(reported) = used {
+                    self.storage.merge_used_trace(
+                        trace_id,
+                        reported,
+                        used_strength,
+                        used_attribution,
+                        source,
+                        &now,
+                    )?;
+                }
+                let affected: HashSet<String> = previously_used
+                    .into_iter()
+                    .chain(used_ids.iter().cloned())
+                    .collect();
+                for cid in affected {
+                    self.storage.refresh_chunk_last_used(&cid, &now)?;
                 }
             }
 
@@ -1121,110 +1261,163 @@ impl KnowledgeBase {
                 }
             }
 
-            // confidence implicit update
-            if let Some(o @ ("ok" | "fail")) = outcome {
-                if is_fresh_insert || existing_outcome.is_none() {
-                    self.apply_outcome_implicit(
+            // Rebuild trace-derived evidence whenever either side of the pair arrives.
+            // This makes `outcome → used` and `used → outcome` equivalent and lets a
+            // later complete usage declaration replace an earlier one safely.
+            let effective_outcome = outcome
+                .filter(|value| *value != "unknown")
+                .or(existing_outcome.as_deref().filter(|value| *value != "unknown"));
+            if let Some(o @ ("ok" | "fail")) = effective_outcome {
+                if used.is_some()
+                    || (outcome.is_some_and(|value| value != "unknown")
+                        && existing_outcome.as_deref() != outcome)
+                {
+                    let fallback_ids: Vec<String>;
+                    let effective_used: Option<&[String]> = if effective_used_ids.is_some() {
+                        effective_used_ids.as_deref()
+                    } else {
+                        fallback_ids = log
+                            .get("used_ids")
+                            .and_then(Value::as_str)
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or_default();
+                        if fallback_ids.is_empty() {
+                            None
+                        } else {
+                            Some(&fallback_ids)
+                        }
+                    };
+                    let effective_complete = if used.is_some() {
+                        effective_used_complete
+                    } else {
+                        log.get("usage_state").and_then(Value::as_str) != Some("unknown")
+                            && log
+                                .get("used_complete")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(1)
+                            != 0
+                    };
+                    self.replace_outcome_evidence(
                         trace_id,
                         o,
-                        used,
-                        used_strength,
-                        used_attribution,
+                        effective_used,
+                        effective_complete,
                         &now,
                     )?;
                 }
+            } else if used.is_some() && effective_used_complete {
+                self.replace_selected_unused_evidence(
+                    trace_id,
+                    effective_used_ids.as_deref().unwrap_or_default(),
+                    &now,
+                )?;
             }
 
             let context_key = log
                 .get("context_key")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| query.map(content_hash));
+                .or_else(|| query.map(|q| content_hash(&normalize_query(q))));
             let feedback_strength = if feedback_kind == "judge" { 0.6 } else { 1.0 };
-            let feedback_actor = feedback_actor.unwrap_or(source);
 
             // Persist feedback facts before reducing them into confidence.
+            // INSERT OR IGNORE: skip all derived updates for duplicate (trace_id, chunk_id, signal).
+            // Track affected chunks so we only rebuild their context_stats (not the full table).
+            let mut context_affected: HashSet<String> = HashSet::new();
+            if let Some(used_ids) = effective_used_ids.as_deref() {
+                for cid in used_ids {
+                    context_affected.insert(cid.clone());
+                }
+            }
             if let Some(ups) = feedback_up {
                 for cid in ups {
-                    self.storage.insert_feedback_event(
+                    let corrected = self.storage
+                        .delete_feedback_event(trace_id, cid, "down")?;
+                    self.storage
+                        .delete_chunk_trace_confidence_evidence(trace_id, cid, "feedback_down")?;
+                    let inserted = self.storage.insert_feedback_event(
                         &gen_uuid(),
                         trace_id,
                         cid,
                         "up",
                         feedback_strength,
                         source,
-                        Some(feedback_actor),
+                        feedback_actor,
                         feedback_reason,
                         context_key.as_deref(),
                         &now,
                     )?;
-                    self.update_confidence(
-                        cid,
-                        1.0,
-                        feedback_strength,
-                        if feedback_kind == "judge" {
-                            "judge_up"
-                        } else {
-                            "user_up"
-                        },
-                        &now,
-                        true,
-                    )?;
-                    self.storage.update_chunk_last_used(cid, &now)?;
-                    if let Some(ref key) = context_key {
-                        self.storage
-                            .update_context_stat(cid, key, 0, 0, 1, 0, &now)?;
+                    if inserted > 0 {
+                        self.upsert_trace_confidence_evidence(
+                            trace_id,
+                            cid,
+                            "feedback_up",
+                            1.0,
+                            feedback_strength,
+                            if feedback_kind == "judge" {
+                                "judge_up"
+                            } else {
+                                "user_up"
+                            },
+                            context_key.as_deref(),
+                            &now,
+                            true,
+                        )?;
+                        self.storage.update_chunk_last_used(cid, &now)?;
+                        self.refresh_governance_evidence(cid, &now)?;
+                        context_affected.insert(cid.clone());
+                    } else if corrected > 0 {
+                        self.recompute_chunk_confidence(cid, &now)?;
+                        self.refresh_governance_evidence(cid, &now)?;
+                        context_affected.insert(cid.clone());
                     }
                 }
             }
             if let Some(downs) = feedback_down {
                 for cid in downs {
-                    self.storage.insert_feedback_event(
+                    let corrected = self.storage
+                        .delete_feedback_event(trace_id, cid, "up")?;
+                    self.storage
+                        .delete_chunk_trace_confidence_evidence(trace_id, cid, "feedback_up")?;
+                    let inserted = self.storage.insert_feedback_event(
                         &gen_uuid(),
                         trace_id,
                         cid,
                         "down",
                         feedback_strength,
                         source,
-                        Some(feedback_actor),
+                        feedback_actor,
                         feedback_reason,
                         context_key.as_deref(),
                         &now,
                     )?;
-                    self.update_confidence(
-                        cid,
-                        0.0,
-                        feedback_strength,
-                        if feedback_kind == "judge" {
-                            "judge_down"
-                        } else {
-                            "user_down"
-                        },
-                        &now,
-                        true,
-                    )?;
-                    if let Some(ref key) = context_key {
-                        self.storage
-                            .update_context_stat(cid, key, 0, 0, 0, 1, &now)?;
-                    }
-                    let negative_count = count_query_params(
-                        &self.storage,
-                        "SELECT COUNT(*) FROM feedback_events
-                         WHERE chunk_id=? AND signal='down'",
-                        rusqlite::params![cid],
-                    )?;
-                    if negative_count >= 2 {
-                        self.storage.upsert_governance_proposal(
-                            &gen_uuid(),
+                    if inserted > 0 {
+                        self.upsert_trace_confidence_evidence(
+                            trace_id,
                             cid,
-                            "review_applicability",
-                            "Repeated negative feedback: review content, trigger_desc, anti_trigger_desc, or archive",
-                            negative_count,
+                            "feedback_down",
+                            0.0,
+                            feedback_strength,
+                            if feedback_kind == "judge" {
+                                "judge_down"
+                            } else {
+                                "user_down"
+                            },
+                            context_key.as_deref(),
                             &now,
+                            true,
                         )?;
+                        self.refresh_governance_evidence(cid, &now)?;
+                        context_affected.insert(cid.clone());
+                    } else if corrected > 0 {
+                        self.recompute_chunk_confidence(cid, &now)?;
+                        self.refresh_governance_evidence(cid, &now)?;
+                        context_affected.insert(cid.clone());
                     }
                 }
             }
+            // Targeted rebuild — only update context_stats for chunks touched in this call.
+            self.rebuild_context_stats_for(&context_affected, &now)?;
 
             // Fill in content fields (補写: output_summary, nomination, output, query) on existing log.
             if !is_fresh_insert {
@@ -1238,7 +1431,7 @@ impl KnowledgeBase {
                 )?;
             }
 
-            let lifecycle_state = if outcome.is_some() || existing_outcome.is_some() {
+            let lifecycle_state = if effective_outcome.is_some() {
                 "completed"
             } else {
                 task_state.unwrap_or_else(|| {
@@ -1247,14 +1440,20 @@ impl KnowledgeBase {
                         .unwrap_or("running")
                 })
             };
-            let used_ids_json = used.map(serde_json::to_string).transpose()?;
+            let used_ids_json = effective_used_ids
+                .as_deref()
+                .map(serde_json::to_string)
+                .transpose()?;
             self.storage.update_trace_lifecycle(
                 trace_id,
                 lifecycle_state,
                 (lifecycle_state == "completed").then_some(now.as_str()),
-                used.map(|ids| usage_state(Some(ids))),
+                effective_used_ids
+                    .as_deref()
+                    .map(|ids| usage_state(Some(ids))),
                 used_ids_json.as_deref(),
                 used.map(|_| used_attribution),
+                used.map(|_| effective_used_complete),
             )?;
 
             // Update episodic log
@@ -1262,20 +1461,18 @@ impl KnowledgeBase {
                 .get("distill_state")
                 .and_then(Value::as_str)
                 .unwrap_or("open");
-            let outcome_completed = outcome.is_some() || existing_outcome.is_some();
+            let lifecycle_completed = lifecycle_state == "completed";
             let new_state = if current_state == "open"
                 && matches!(lifecycle_state, "abandoned" | "timed_out")
             {
                 Some("discarded")
-            } else if current_state == "open" && outcome_completed {
+            } else if current_state == "open" && lifecycle_completed {
                 let has_material = output_summary.is_some()
                     || nomination.is_some()
                     || output.is_some()
                     || log.get("output_summary").and_then(Value::as_str).is_some()
                     || log.get("nomination").and_then(Value::as_str).is_some()
-                    || log.get("output").and_then(Value::as_str).is_some()
-                    || (used.map(|u| !u.is_empty()).unwrap_or(false)
-                        && outcome.map(|o| o != "unknown").unwrap_or(false));
+                    || log.get("output").and_then(Value::as_str).is_some();
                 if has_material {
                     Some("new")
                 } else {
@@ -1317,61 +1514,482 @@ impl KnowledgeBase {
             let _ = self.storage.rollback();
         }
         result?;
-        self.enqueue_evolve_if_needed(&now)
+        self.enqueue_evolve_if_needed(&now)?;
+        Ok(())
     }
 
-    fn apply_outcome_implicit(
+    fn validate_trace_attribution(
+        &self,
+        trace_id: &str,
+        chunk_ids: Option<&[String]>,
+        field: &str,
+    ) -> Result<()> {
+        let Some(chunk_ids) = chunk_ids else {
+            return Ok(());
+        };
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+
+        let log = self.storage.get_episodic_log(trace_id)?.ok_or_else(|| {
+            InnateError::InvalidState(format!(
+                "{field} requires a trace created by recall: {trace_id}"
+            ))
+        })?;
+        let mut attributable = HashSet::new();
+        if let Some(raw) = log.get("recall_snapshot").and_then(Value::as_str) {
+            if let Ok(snapshot) = serde_json::from_str::<Value>(raw) {
+                if let Some(ids) = snapshot.get("selected").and_then(Value::as_array) {
+                    attributable.extend(ids.iter().filter_map(Value::as_str).map(str::to_string));
+                }
+            }
+        }
+        let rows = self.storage.query_chunks_params(
+            "SELECT DISTINCT chunk_id FROM usage_trace
+             WHERE trace_id=? AND chunk_id IS NOT NULL
+               AND event='selected'",
+            rusqlite::params![trace_id],
+        )?;
+        attributable.extend(rows.iter().filter_map(|row| {
+            row.get("chunk_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }));
+
+        for chunk_id in chunk_ids {
+            if self.storage.get_chunk(chunk_id)?.is_none() || !attributable.contains(chunk_id) {
+                return Err(InnateError::InvalidState(format!(
+                    "{field} chunk {chunk_id} was not attributable to trace {trace_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_selected_unused_evidence(
+        &self,
+        trace_id: &str,
+        used_ids: &[String],
+        now: &str,
+    ) -> Result<()> {
+        let old_rows = self.storage.query_chunks_params(
+            "SELECT DISTINCT chunk_id FROM confidence_evidence
+             WHERE trace_id=? AND kind='selected_unused'",
+            rusqlite::params![trace_id],
+        )?;
+        let mut affected: HashSet<String> = old_rows
+            .iter()
+            .filter_map(|row| row.get("chunk_id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        self.storage
+            .delete_trace_confidence_evidence(trace_id, &["selected_unused"])?;
+
+        let used_set: HashSet<&str> = used_ids.iter().map(String::as_str).collect();
+        let context_key = self.storage.get_episodic_log(trace_id)?.and_then(|log| {
+            log.get("context_key")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        let selected_rows = self.storage.query_chunks_params(
+            "SELECT chunk_id FROM usage_trace
+             WHERE trace_id=? AND event='selected' AND chunk_id IS NOT NULL",
+            rusqlite::params![trace_id],
+        )?;
+        for row in selected_rows {
+            if let Some(chunk_id) = row.get("chunk_id").and_then(Value::as_str) {
+                if !used_set.contains(chunk_id) {
+                    self.upsert_trace_confidence_evidence(
+                        trace_id,
+                        chunk_id,
+                        "selected_unused",
+                        0.0,
+                        0.08,
+                        "selected_unused",
+                        context_key.as_deref(),
+                        now,
+                        false,
+                    )?;
+                    affected.insert(chunk_id.to_string());
+                }
+            }
+        }
+        for chunk_id in affected {
+            self.recompute_chunk_confidence(&chunk_id, now)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_trace_confidence_evidence(
+        &self,
+        trace_id: &str,
+        chunk_id: &str,
+        kind: &str,
+        target: f64,
+        strength: f64,
+        reason: &str,
+        context_key: Option<&str>,
+        now: &str,
+        explicit: bool,
+    ) -> Result<()> {
+        let chunk = match self.storage.get_chunk(chunk_id)? {
+            Some(chunk) => chunk,
+            None => return Ok(()),
+        };
+        if chunk.get("origin").and_then(Value::as_str) == Some("spark") {
+            return Ok(());
+        }
+        let recency_weight = if explicit {
+            const KAPPA: f64 = 0.5;
+            const WINDOW_DAYS: f64 = 14.0;
+            let gap_days = chunk
+                .get("last_used_at")
+                .and_then(Value::as_str)
+                .map(|ts| iso_days_diff(now, ts) as f64)
+                .unwrap_or(0.0);
+            (1.0
+                + KAPPA
+                    * (-(gap_days / WINDOW_DAYS) * std::f64::consts::LN_2).exp())
+            .min(1.5)
+        } else {
+            1.0
+        };
+        let alpha = (0.2 * strength * recency_weight).clamp(0.0, 1.0);
+        self.storage.upsert_confidence_evidence(
+            &gen_uuid(),
+            Some(trace_id),
+            chunk_id,
+            kind,
+            target,
+            alpha,
+            reason,
+            context_key,
+            now,
+        )?;
+        self.recompute_chunk_confidence(chunk_id, now)
+    }
+
+    fn recompute_chunk_confidence(&self, chunk_id: &str, now: &str) -> Result<()> {
+        let Some(chunk) = self.storage.get_chunk(chunk_id)? else {
+            return Ok(());
+        };
+        let mut confidence = chunk
+            .get("confidence_base")
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| {
+                chunk
+                    .get("confidence")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.5)
+            });
+        let mut reason = chunk
+            .get("confidence_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("base")
+            .to_string();
+        for evidence in self.storage.confidence_evidence_for_chunk(chunk_id)? {
+            let target = evidence
+                .get("target")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.5);
+            let alpha = evidence
+                .get("alpha")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            confidence = (confidence + alpha * (target - confidence)).clamp(0.0, 1.0);
+            reason = evidence
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("evidence")
+                .to_string();
+        }
+        self.storage.conn_execute(
+            "UPDATE chunks SET confidence=?, confidence_reason=?, updated_at=? WHERE id=?",
+            rusqlite::params![confidence, reason, now, chunk_id],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn replace_outcome_evidence(
         &self,
         trace_id: &str,
         outcome: &str,
         used: Option<&[String]>,
-        used_strength: f64,
-        used_attribution: &str,
+        used_complete: bool,
         now: &str,
     ) -> Result<()> {
-        let used_set: HashSet<&str> = used
-            .map(|u| u.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        let (target, strength, reason) = if outcome == "ok" {
-            (1.0, used_strength, used_attribution)
-        } else {
-            (0.0, used_strength * 0.5, "task_fail")
-        };
-        for cid in &used_set {
-            self.update_confidence(cid, target, strength, reason, now, false)?;
-        }
-        if let Some(used_ids) = used {
-            let context_key = self.storage.get_episodic_log(trace_id)?.and_then(|log| {
-                log.get("context_key")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            });
-            for cid in used_ids {
-                if let Some(ref key) = context_key {
-                    self.storage.update_context_stat(
-                        cid,
-                        key,
-                        i64::from(outcome == "ok"),
-                        i64::from(outcome == "fail"),
-                        0,
-                        0,
-                        now,
-                    )?;
-                }
-            }
+        let old_rows = self.storage.query_chunks_params(
+            "SELECT DISTINCT chunk_id FROM confidence_evidence
+             WHERE trace_id=? AND kind IN ('outcome_ok','outcome_fail','selected_unused')",
+            rusqlite::params![trace_id],
+        )?;
+        let mut affected: HashSet<String> = old_rows
+            .iter()
+            .filter_map(|row| row.get("chunk_id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        self.storage.delete_trace_confidence_evidence(
+            trace_id,
+            &["outcome_ok", "outcome_fail", "selected_unused"],
+        )?;
 
-            // Only an explicit usage declaration can prove selected chunks were unused.
+        let used_ids = used.unwrap_or_default();
+        let used_set: HashSet<&str> = used_ids.iter().map(String::as_str).collect();
+        let attribution_divisor = used_ids.len().max(1) as f64;
+        let context_key = self.storage.get_episodic_log(trace_id)?.and_then(|log| {
+            log.get("context_key")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        for chunk_id in used_ids {
+            let attribution = self
+                .storage
+                .query_chunks_params(
+                    "SELECT strength, attribution FROM usage_trace
+                     WHERE trace_id=? AND chunk_id=? AND event='used'",
+                    rusqlite::params![trace_id, chunk_id],
+                )?
+                .into_iter()
+                .next();
+            let base_strength = attribution
+                .as_ref()
+                .and_then(|row| row.get("strength"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.15)
+                / attribution_divisor;
+            let attribution_reason = attribution
+                .as_ref()
+                .and_then(|row| row.get("attribution"))
+                .and_then(Value::as_str)
+                .unwrap_or("inferred");
+            let (kind, target, strength, reason) = if outcome == "ok" {
+                ("outcome_ok", 1.0, base_strength, attribution_reason)
+            } else {
+                ("outcome_fail", 0.0, base_strength * 0.5, "task_fail")
+            };
+            self.upsert_trace_confidence_evidence(
+                trace_id,
+                chunk_id,
+                kind,
+                target,
+                strength,
+                reason,
+                context_key.as_deref(),
+                now,
+                false,
+            )?;
+            affected.insert(chunk_id.clone());
+        }
+
+        if used_complete {
             let selected_rows = self.storage.query_chunks_params(
-                "SELECT chunk_id FROM usage_trace WHERE trace_id=? AND event='selected' AND chunk_id IS NOT NULL",
+                "SELECT chunk_id FROM usage_trace
+                 WHERE trace_id=? AND event='selected' AND chunk_id IS NOT NULL",
                 rusqlite::params![trace_id],
             )?;
             for row in selected_rows {
-                if let Some(cid) = row.get("chunk_id").and_then(Value::as_str) {
-                    if !used_set.contains(cid) {
-                        self.update_confidence(cid, 0.3, 0.1, "selected_unused", now, false)?;
+                if let Some(chunk_id) = row.get("chunk_id").and_then(Value::as_str) {
+                    if !used_set.contains(chunk_id) {
+                        self.upsert_trace_confidence_evidence(
+                            trace_id,
+                            chunk_id,
+                            "selected_unused",
+                            0.0,
+                            0.08,
+                            "selected_unused",
+                            context_key.as_deref(),
+                            now,
+                            false,
+                        )?;
+                        affected.insert(chunk_id.to_string());
                     }
                 }
             }
+        }
+
+        for chunk_id in affected {
+            self.recompute_chunk_confidence(&chunk_id, now)?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_context_stats(&self, now: &str) -> Result<()> {
+        self.storage.conn_execute(
+            "DELETE FROM chunk_context_stats",
+            rusqlite::params![],
+        )?;
+        self.storage.conn_execute(
+            "INSERT INTO chunk_context_stats
+             (chunk_id, context_key, success_count, failure_count,
+              positive_feedback, negative_feedback, last_updated_at)
+             SELECT chunk_id, context_key, success_count, failure_count,
+                    positive_feedback, negative_feedback, ?
+             FROM chunk_context_stats_base",
+            rusqlite::params![now],
+        )?;
+        self.storage.conn_execute(
+            "INSERT INTO chunk_context_stats
+             (chunk_id, context_key, success_count, failure_count,
+              positive_feedback, negative_feedback, last_updated_at)
+             SELECT chunk_id, context_key,
+                    SUM(CASE WHEN kind='outcome_ok' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN kind='outcome_fail' THEN 1 ELSE 0 END),
+                    0, 0, ?
+             FROM confidence_evidence
+             WHERE context_key IS NOT NULL AND kind IN ('outcome_ok','outcome_fail')
+             GROUP BY chunk_id, context_key
+             ON CONFLICT(chunk_id, context_key) DO UPDATE SET
+               success_count=success_count+excluded.success_count,
+               failure_count=failure_count+excluded.failure_count,
+               last_updated_at=excluded.last_updated_at",
+            rusqlite::params![now],
+        )?;
+        self.storage.conn_execute(
+            "INSERT INTO chunk_context_stats
+             (chunk_id, context_key, success_count, failure_count,
+              positive_feedback, negative_feedback, last_updated_at)
+             SELECT fe.chunk_id, fe.context_key, 0, 0,
+                    SUM(CASE WHEN fe.signal='up' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN fe.signal='down' THEN 1 ELSE 0 END), ?
+             FROM feedback_events fe
+             WHERE fe.context_key IS NOT NULL
+               AND fe.ts > COALESCE((
+                 SELECT c.state_updated_at FROM chunks c
+                 WHERE c.id = fe.chunk_id AND c.state_reason = 'restore'
+               ), '')
+             GROUP BY fe.chunk_id, fe.context_key
+             ON CONFLICT(chunk_id, context_key) DO UPDATE SET
+               positive_feedback=positive_feedback+excluded.positive_feedback,
+               negative_feedback=negative_feedback+excluded.negative_feedback,
+               last_updated_at=excluded.last_updated_at",
+            rusqlite::params![now],
+        )
+    }
+
+    /// Targeted context_stats rebuild for only the specified chunk_ids.
+    /// Used by record() to avoid a full-table rebuild on every call.
+    /// curate() still calls the full rebuild_context_stats() for periodic accuracy.
+    fn rebuild_context_stats_for(&self, chunk_ids: &HashSet<String>, now: &str) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(());
+        }
+        for chunk_id in chunk_ids {
+            self.storage.conn_execute(
+                "DELETE FROM chunk_context_stats WHERE chunk_id=?",
+                rusqlite::params![chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "INSERT OR IGNORE INTO chunk_context_stats
+                 (chunk_id, context_key, success_count, failure_count,
+                  positive_feedback, negative_feedback, last_updated_at)
+                 SELECT chunk_id, context_key, success_count, failure_count,
+                        positive_feedback, negative_feedback, ?
+                 FROM chunk_context_stats_base WHERE chunk_id=?",
+                rusqlite::params![now, chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "INSERT INTO chunk_context_stats
+                 (chunk_id, context_key, success_count, failure_count,
+                  positive_feedback, negative_feedback, last_updated_at)
+                 SELECT chunk_id, context_key,
+                        SUM(CASE WHEN kind='outcome_ok' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN kind='outcome_fail' THEN 1 ELSE 0 END),
+                        0, 0, ?
+                 FROM confidence_evidence
+                 WHERE context_key IS NOT NULL AND kind IN ('outcome_ok','outcome_fail')
+                   AND chunk_id=?
+                 GROUP BY chunk_id, context_key
+                 ON CONFLICT(chunk_id, context_key) DO UPDATE SET
+                   success_count=success_count+excluded.success_count,
+                   failure_count=failure_count+excluded.failure_count,
+                   last_updated_at=excluded.last_updated_at",
+                rusqlite::params![now, chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "INSERT INTO chunk_context_stats
+                 (chunk_id, context_key, success_count, failure_count,
+                  positive_feedback, negative_feedback, last_updated_at)
+                 SELECT chunk_id, context_key, 0, 0,
+                        SUM(CASE WHEN signal='up' THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN signal='down' THEN 1 ELSE 0 END), ?
+                 FROM feedback_events
+                 WHERE context_key IS NOT NULL AND chunk_id=?
+                   AND ts > COALESCE((
+                     SELECT state_updated_at FROM chunks
+                     WHERE id=? AND state_reason='restore'
+                   ), '')
+                 GROUP BY chunk_id, context_key
+                 ON CONFLICT(chunk_id, context_key) DO UPDATE SET
+                   positive_feedback=positive_feedback+excluded.positive_feedback,
+                   negative_feedback=negative_feedback+excluded.negative_feedback,
+                   last_updated_at=excluded.last_updated_at",
+                rusqlite::params![now, chunk_id, chunk_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn refresh_governance_evidence(&self, chunk_id: &str, now: &str) -> Result<()> {
+        let rows = self.storage.query_chunks_params(
+            "SELECT COALESCE(actor, 'anonymous:' || source) AS actor_key,
+                    signal, strength, ts
+             FROM feedback_events
+             WHERE chunk_id=?
+               AND ts > COALESCE((
+                 SELECT state_updated_at FROM chunks
+                 WHERE id=? AND state_reason='restore'
+               ), '')",
+            rusqlite::params![chunk_id, chunk_id],
+        )?;
+        let mut actor_contributions: HashMap<String, f64> = HashMap::new();
+        for row in rows {
+            let actor = row
+                .get("actor_key")
+                .and_then(Value::as_str)
+                .unwrap_or("anonymous")
+                .to_string();
+            let age_days = row
+                .get("ts")
+                .and_then(Value::as_str)
+                .map(|ts| iso_days_diff(now, ts).max(0) as f64)
+                .unwrap_or(0.0);
+            let recency_weight = 0.5_f64.powf(age_days / 90.0);
+            let strength = row.get("strength").and_then(Value::as_f64).unwrap_or(0.0);
+            let signed = if row.get("signal").and_then(Value::as_str) == Some("down") {
+                strength
+            } else {
+                -strength
+            };
+            *actor_contributions.entry(actor).or_default() += signed * recency_weight;
+        }
+        let mut score = 0.0_f64;
+        let mut actor_count = 0_i64;
+        for contribution in actor_contributions.values().copied() {
+            let contribution = contribution.clamp(-1.0, 1.0);
+            score += contribution;
+            if contribution > 0.0 {
+                actor_count += 1;
+            }
+        }
+        let score = score.max(0.0);
+        if score >= 2.0 && actor_count >= 2 {
+            self.storage.upsert_governance_proposal(
+                &gen_uuid(),
+                chunk_id,
+                "review_applicability",
+                "Weighted negative feedback",
+                score.ceil() as i64,
+                score,
+                actor_count,
+                now,
+            )?;
+        } else {
+            self.storage.conn_execute(
+                "UPDATE governance_proposals
+                 SET state='rejected', evidence_count=?, evidence_score=?, actor_count=?, updated_at=?
+                 WHERE chunk_id=? AND state='pending'",
+                rusqlite::params![score.ceil() as i64, score, actor_count, now, chunk_id],
+            )?;
         }
         Ok(())
     }
@@ -1391,60 +2009,35 @@ impl KnowledgeBase {
         let age_due = oldest
             .as_deref()
             .is_some_and(|ts| ts <= hours_ago(now, self.evolve_schedule_interval_hours).as_str());
-        if ready >= self.evolve_threshold || (ready > 0 && age_due) {
+        let governance_pending = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM governance_proposals WHERE state='pending'",
+        )?;
+        // A chunk whose proposal already has enough evidence should trigger evolve
+        // immediately — don't wait for 3 different pending proposals.
+        let governance_ready = count_query_params(
+            &self.storage,
+            "SELECT COUNT(*) FROM governance_proposals
+             WHERE state='pending'
+               AND evidence_score >= ? AND actor_count >= 2",
+            rusqlite::params![self.governance_archive_threshold as f64],
+        )?;
+        if ready >= self.evolve_threshold
+            || (ready > 0 && age_due)
+            || governance_pending >= self.governance_evolve_threshold
+            || governance_ready > 0
+        {
             let reason = if ready >= self.evolve_threshold {
                 "threshold"
+            } else if governance_ready > 0 {
+                "governance_ready"
+            } else if governance_pending >= self.governance_evolve_threshold {
+                "governance"
             } else {
                 "scheduled"
             };
             self.storage.request_evolve(&gen_uuid(), reason, now)?;
         }
-        Ok(())
-    }
-
-    /// Update confidence via EMA.
-    /// `explicit=true` → user_up/user_down/judge signals; applies recency_w (κ=0.5, W=14d).
-    /// `explicit=false` → implicit/agent signals; recency_w ≡ 1.
-    fn update_confidence(
-        &self,
-        chunk_id: &str,
-        target: f64,
-        strength: f64,
-        reason: &str,
-        now: &str,
-        explicit: bool,
-    ) -> Result<()> {
-        let chunk = match self.storage.get_chunk(chunk_id)? {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-        if chunk.get("origin").and_then(Value::as_str) == Some("spark") {
-            return Ok(());
-        }
-        let conf = chunk
-            .get("confidence")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.5);
-
-        // §二·五B v3.8: recency_w only for explicit signals.
-        let recency_w = if explicit {
-            const KAPPA: f64 = 0.5;
-            const W_DAYS: f64 = 14.0;
-            let gap_days = chunk
-                .get("last_used_at")
-                .and_then(Value::as_str)
-                .map(|t| iso_days_diff(now, t) as f64)
-                .unwrap_or(0.0);
-            (1.0 + KAPPA * (-(gap_days / W_DAYS) * std::f64::consts::LN_2).exp()).min(1.5)
-        } else {
-            1.0
-        };
-
-        let alpha = 0.2_f64;
-        let effective_alpha = (alpha * strength * recency_w).min(1.0);
-        let new_conf = (conf + effective_alpha * (target - conf)).clamp(0.0, 1.0);
-        self.storage
-            .update_chunk_confidence(chunk_id, new_conf, Some(reason), now)?;
         Ok(())
     }
 
@@ -1809,11 +2402,18 @@ impl KnowledgeBase {
         if let Some(e) = existing.first() {
             if let Some(id) = e.get("id").and_then(Value::as_str) {
                 let id = id.to_string();
-                self.storage.query_chunks_params(
-                    "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
-                    rusqlite::params![now, spark_id],
-                )?;
-                self.storage.commit()?;
+                self.storage.begin_immediate()?;
+                let result = self
+                    .storage
+                    .query_chunks_params(
+                        "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
+                        rusqlite::params![now, spark_id],
+                    )
+                    .and_then(|_| self.storage.commit());
+                if result.is_err() {
+                    let _ = self.storage.rollback();
+                    result?;
+                }
                 return Ok(id);
             }
         }
@@ -1996,12 +2596,26 @@ impl KnowledgeBase {
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
             self.storage.query_chunks_params(
-                "UPDATE chunks SET state='archived', confidence=0.0, state_reason=?, state_updated_at=?, updated_at=? WHERE id=?",
+                "UPDATE chunks
+                 SET state='archived', confidence=0.0, confidence_base=0.0,
+                     confidence_reason='invalidated', state_reason=?,
+                     state_updated_at=?, updated_at=?
+                 WHERE id=?",
                 rusqlite::params![reason_str, now, now, chunk_id],
             )?;
             self.storage.query_chunks_params(
-                "UPDATE chunks SET state='archived', confidence=0.0, state_reason='invalidated:same_hash', state_updated_at=?, updated_at=? WHERE content_hash=? AND id!=?",
+                "UPDATE chunks
+                 SET state='archived', confidence=0.0, confidence_base=0.0,
+                     confidence_reason='invalidated',
+                     state_reason='invalidated:same_hash',
+                     state_updated_at=?, updated_at=?
+                 WHERE content_hash=? AND id!=?",
                 rusqlite::params![now, now, h, chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "DELETE FROM confidence_evidence
+                 WHERE chunk_id IN (SELECT id FROM chunks WHERE content_hash=?)",
+                rusqlite::params![h],
             )?;
             self.storage
                 .insert_invalidated_hash(&h, Some(reason), &now)?;
@@ -2050,9 +2664,32 @@ impl KnowledgeBase {
                 )?;
             }
             self.storage.query_chunks_params(
-                "UPDATE chunks SET confidence_reason='restore', updated_at=? WHERE id=?",
+                "UPDATE chunks
+                 SET confidence_base=CASE WHEN ? THEN 0.5 ELSE confidence_base END,
+                     confidence=CASE WHEN ? THEN 0.5 ELSE confidence END,
+                     confidence_reason='restore', updated_at=?
+                 WHERE id=?",
+                rusqlite::params![was_invalidated, was_invalidated, now, chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "DELETE FROM confidence_evidence
+                 WHERE chunk_id=? AND kind IN ('feedback_up','feedback_down')",
+                rusqlite::params![chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "UPDATE chunk_context_stats_base
+                 SET positive_feedback=0, negative_feedback=0
+                 WHERE chunk_id=?",
+                rusqlite::params![chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "UPDATE governance_proposals
+                 SET state='rejected', reason=reason || '; restored by user', updated_at=?
+                 WHERE chunk_id=? AND state IN ('pending','accepted')",
                 rusqlite::params![now, chunk_id],
             )?;
+            self.recompute_chunk_confidence(chunk_id, &now)?;
+            self.rebuild_context_stats_for(&HashSet::from([chunk_id.to_string()]), &now)?;
             self.storage.commit()
         })();
         if result.is_err() {
@@ -2076,15 +2713,18 @@ impl KnowledgeBase {
             &evolve_started_at,
             &minutes_ago(&evolve_started_at, self.screening_timeout_minutes),
         )?;
+        // Issue 7: scheduled without pending request → still run curate (time-based maintenance).
         if trigger == "scheduled" && request_id.is_none() {
+            let curator = Arc::clone(&self.curator);
+            let curate = curator.run(self, &CurateScope::default())?;
             return Ok(json!({
                 "distilled": 0,
-                "curate": null,
+                "curate": self.format_curate_report(&curate),
                 "skipped": "no_evolve_request"
             }));
         }
 
-        // Threshold check
+        // Issue 8: threshold / token-limit gates should not suppress curate.
         if trigger == "threshold" {
             let rows = self.storage.query_chunks(
                 "SELECT COUNT(*) AS cnt FROM episodic_log WHERE distill_state='new'",
@@ -2095,15 +2735,18 @@ impl KnowledgeBase {
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
             if cnt < self.evolve_threshold {
+                let curator = Arc::clone(&self.curator);
+                let curate = curator.run(self, &CurateScope::default())?;
                 if let Some(ref id) = request_id {
                     self.storage.finish_evolve_request(
-                        id,
-                        "completed",
-                        Some("below_threshold"),
-                        &utc_now_iso(),
+                        id, "completed", Some("below_threshold"), &utc_now_iso(),
                     )?;
                 }
-                return Ok(json!({"distilled": 0, "curate": null}));
+                return Ok(json!({
+                    "distilled": 0,
+                    "curate": self.format_curate_report(&curate),
+                    "skipped": "below_threshold"
+                }));
             }
 
             if let Some(limit) = self
@@ -2112,8 +2755,6 @@ impl KnowledgeBase {
                 .and_then(|value| value.parse::<i64>().ok())
                 .filter(|value| *value > 0)
             {
-                // Use a rolling time window so the limit can't cause a permanent lockout.
-                // Window length is configurable via evolve.distill_token_window_hours (default 24h).
                 let period_start = self.distill_token_period_start(&utc_now_iso())?;
                 let rows = self.storage.query_chunks_params(
                     "SELECT COALESCE(SUM(distill_prompt_tokens),0)
@@ -2122,25 +2763,24 @@ impl KnowledgeBase {
                      WHERE distill_accounted_at >= ?",
                     rusqlite::params![period_start],
                 )?;
-                let used = rows
+                let used_tokens = rows
                     .first()
                     .and_then(|row| row.get("used"))
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
-                if used >= limit {
+                if used_tokens >= limit {
+                    let curator = Arc::clone(&self.curator);
+                    let curate = curator.run(self, &CurateScope::default())?;
                     if let Some(ref id) = request_id {
                         self.storage.finish_evolve_request(
-                            id,
-                            "completed",
-                            Some("distill_token_limit"),
-                            &utc_now_iso(),
+                            id, "completed", Some("distill_token_limit"), &utc_now_iso(),
                         )?;
                     }
                     return Ok(json!({
                         "distilled": 0,
-                        "curate": null,
+                        "curate": self.format_curate_report(&curate),
                         "skipped": "distill_token_limit",
-                        "distill_tokens_used": used,
+                        "distill_tokens_used": used_tokens,
                         "distill_token_limit": limit,
                         "period_start": period_start,
                     }));
@@ -2149,20 +2789,22 @@ impl KnowledgeBase {
         }
 
         let result = (|| -> Result<Value> {
+            let retry_cutoff = minutes_ago(&utc_now_iso(), 5);
+            self.storage.conn_execute(
+                "UPDATE episodic_log
+                 SET distill_state='new', distill_note='retry_failed',
+                     distill_locked_at=NULL, distill_run_id=NULL
+                 WHERE distill_state='failed'
+                   AND distill_attempts < 3
+                   AND COALESCE(distill_accounted_at, ts) < ?",
+                rusqlite::params![retry_cutoff],
+            )?;
             let distilled = self.distill_batch()?;
             let curator = Arc::clone(&self.curator);
             let curate = curator.run(self, &CurateScope::default())?;
-
             Ok(json!({
                 "distilled": distilled,
-                "curate": {
-                    "archived": curate.archived.len(),
-                    "deduped": curate.deduped.len(),
-                    "decayed": curate.decayed.len(),
-                    "recovered": curate.recovered.len(),
-                    "orphans": curate.orphans.len(),
-                    "warnings": curate.warnings,
-                }
+                "curate": self.format_curate_report(&curate),
             }))
         })();
         if let Some(ref id) = request_id {
@@ -2173,7 +2815,33 @@ impl KnowledgeBase {
             self.storage
                 .finish_evolve_request(id, state, note.as_deref(), &utc_now_iso())?;
         }
+        if result.is_ok() {
+            self.storage
+                .finish_covered_evolve_requests(&evolve_started_at, &utc_now_iso())?;
+        }
+
+        // Issue 9: if more 'new' logs remain after this batch, self-queue so the next evolve drains them.
+        if result.is_ok() {
+            let remaining = count_query(
+                &self.storage,
+                "SELECT COUNT(*) FROM episodic_log WHERE distill_state='new'",
+            )?;
+            if remaining > 0 {
+                let _ = self.storage.request_evolve(&gen_uuid(), "batch_continue", &utc_now_iso());
+            }
+        }
         result
+    }
+
+    fn format_curate_report(&self, curate: &CurateReport) -> Value {
+        json!({
+            "archived": curate.archived.len(),
+            "deduped": curate.deduped.len(),
+            "decayed": curate.decayed.len(),
+            "recovered": curate.recovered.len(),
+            "orphans": curate.orphans.len(),
+            "warnings": curate.warnings,
+        })
     }
 
     fn distill_batch(&self) -> Result<usize> {
@@ -2196,18 +2864,52 @@ impl KnowledgeBase {
             }
         };
 
-        let mut count = 0;
+        let mut chunks_by_log: HashMap<String, Vec<DistilledChunk>> = HashMap::new();
+        let mut failed_logs = HashSet::new();
+        let mut distill_errors = Vec::new();
         for log in &logs {
             let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
-            let prompt_tokens = estimate_distill_prompt_tokens(log);
-            let chunks = match self.distiller.distill(std::slice::from_ref(log)) {
-                Ok(chunks) => chunks,
+            match self.distiller.distill_with_context(log, &logs) {
+                Ok(chunks) => {
+                    if chunks.iter().any(|chunk| chunk.source_log_id != log_id) {
+                        let error = "distiller returned a chunk for an unknown source log";
+                        failed_logs.insert(log_id.to_string());
+                        distill_errors.push(format!("{log_id}: {error}"));
+                        self.finish_distill_log(
+                            log_id,
+                            "failed",
+                            Some(&format!("distill_failed:{error}")),
+                            estimate_distill_prompt_tokens(log, &logs),
+                            0,
+                        )?;
+                        continue;
+                    }
+                    chunks_by_log.insert(log_id.to_string(), chunks);
+                }
                 Err(error) => {
                     let note = format!("distill_failed:{error}");
-                    self.finish_distill_log(log_id, "failed", Some(&note), prompt_tokens, 0)?;
-                    continue;
+                    failed_logs.insert(log_id.to_string());
+                    distill_errors.push(format!("{log_id}: {error}"));
+                    self.finish_distill_log(
+                        log_id,
+                        "failed",
+                        Some(&note),
+                        estimate_distill_prompt_tokens(log, &logs),
+                        0,
+                    )?;
                 }
-            };
+            }
+        }
+
+        let mut count = 0;
+        let provenance = self.distiller.provenance();
+        for log in &logs {
+            let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
+            if failed_logs.contains(log_id) {
+                continue;
+            }
+            let prompt_tokens = estimate_distill_prompt_tokens(log, &logs);
+            let chunks = chunks_by_log.remove(log_id).unwrap_or_default();
             let completion_tokens = chunks
                 .iter()
                 .map(estimate_distilled_chunk_tokens)
@@ -2222,119 +2924,120 @@ impl KnowledgeBase {
                 )?;
                 continue;
             }
-            if chunks.len() != 1 {
-                let note = format!("distill_failed:expected_one_chunk_got_{}", chunks.len());
-                self.finish_distill_log(
-                    log_id,
-                    "failed",
-                    Some(&note),
-                    prompt_tokens,
-                    completion_tokens,
-                )?;
-                continue;
-            }
 
-            // Prepare the chunk + embeddings outside the write transaction so
+            // Prepare all chunks + embeddings outside the write transaction so
             // slow embedding calls do not hold an exclusive SQLite lock.
-            let dc = chunks.into_iter().next().expect("length checked above");
-            let (content, action) = self.sanitize_content(&dc.content);
-            if action == SanitizeAction::Discard {
-                self.finish_distill_log(
-                    log_id,
-                    "discarded",
-                    Some("sanitize_discard"),
-                    prompt_tokens,
-                    completion_tokens,
-                )?;
-                continue;
+            // Supports N >= 1 chunks per log (e.g. multi-concept LLM distillation).
+            // Bad individual chunks are skipped; valid siblings still survive.
+            struct PreparedChunk {
+                row: ChunkRow,
+                cvec_bytes: Vec<u8>,
+                tvec_bytes: Vec<u8>,
             }
-            let h = content_hash(&content);
-            if self.storage.is_hash_invalidated(&h)? {
-                self.finish_distill_log(
-                    log_id,
-                    "discarded",
-                    Some("invalidated_hash"),
-                    prompt_tokens,
-                    completion_tokens,
-                )?;
-                continue;
+            let mut prepared: Vec<PreparedChunk> = Vec::with_capacity(chunks.len());
+            let mut embedding_failures = 0_usize;
+            for dc in chunks {
+                let (content, action) = self.sanitize_content(&dc.content);
+                if action == SanitizeAction::Discard {
+                    continue; // skip this chunk, try others
+                }
+                let h = content_hash(&content);
+                if self.storage.is_hash_invalidated(&h)? {
+                    continue; // skip invalidated content, try others
+                }
+                let redacted = action == SanitizeAction::Redact;
+                let conf = if redacted { 0.4 } else { 0.55 };
+                let now2 = utc_now_iso();
+                let chunk_id = gen_uuid();
+                let tokens = estimate_tokens(&content) as i64;
+                let row = ChunkRow {
+                    id: chunk_id,
+                    content: content.clone(),
+                    trigger_desc: dc.trigger_desc.clone(),
+                    anti_trigger_desc: dc.anti_trigger_desc,
+                    content_hash: h,
+                    token_count: Some(tokens),
+                    origin: "distilled".to_string(),
+                    distilled_from: Some(dc.source_log_id),
+                    distill_provider: provenance.provider.clone(),
+                    distill_model: provenance.model.clone(),
+                    distill_prompt_version: provenance.prompt_version.clone(),
+                    state: "pending".to_string(),
+                    state_reason: Some("init:distilled".to_string()),
+                    confidence: conf,
+                    confidence_reason: Some("init:distilled".to_string()),
+                    version: 1,
+                    embed_version: 1,
+                    created_at: now2.clone(),
+                    updated_at: now2,
+                    ..Default::default()
+                };
+                let cvec = match self.embedding.embed_content(&content) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        embedding_failures += 1;
+                        continue;
+                    }
+                };
+                let tvec = match self
+                    .embedding
+                    .embed_trigger(row.trigger_desc.as_deref().unwrap_or(&content))
+                {
+                    Ok(v) => v,
+                    Err(_) => {
+                        embedding_failures += 1;
+                        continue;
+                    }
+                };
+                prepared.push(PreparedChunk {
+                    row,
+                    cvec_bytes: pack_embedding(&cvec),
+                    tvec_bytes: pack_embedding(&tvec),
+                });
             }
-            let redacted = action == SanitizeAction::Redact;
-            let conf = if redacted { 0.4 } else { 0.45 };
-            let now2 = utc_now_iso();
-            let chunk_id = gen_uuid();
-            let tokens = estimate_tokens(&content) as i64;
-            let row = ChunkRow {
-                id: chunk_id.clone(),
-                content: content.clone(),
-                trigger_desc: dc.trigger_desc,
-                anti_trigger_desc: dc.anti_trigger_desc,
-                content_hash: h,
-                token_count: Some(tokens),
-                origin: "distilled".to_string(),
-                distilled_from: Some(dc.source_log_id),
-                state: "pending".to_string(),
-                state_reason: Some("init:distilled".to_string()),
-                confidence: conf,
-                confidence_reason: Some("init:distilled".to_string()),
-                version: 1,
-                embed_version: 1,
-                created_at: now2.clone(),
-                updated_at: now2,
-                ..Default::default()
-            };
-            let cvec = match self.embedding.embed_content(&content) {
-                Ok(v) => v,
-                Err(_) => {
-                    self.finish_distill_log(
-                        log_id,
-                        "failed",
-                        Some("embedding_failed"),
-                        prompt_tokens,
-                        completion_tokens,
-                    )?;
-                    continue;
-                }
-            };
-            let tvec = match self
-                .embedding
-                .embed_trigger(row.trigger_desc.as_deref().unwrap_or(&content))
-            {
-                Ok(v) => v,
-                Err(_) => {
-                    self.finish_distill_log(
-                        log_id,
-                        "failed",
-                        Some("embedding_failed"),
-                        prompt_tokens,
-                        completion_tokens,
-                    )?;
-                    continue;
-                }
-            };
-            let cvec_bytes = pack_embedding(&cvec);
-            let tvec_bytes = pack_embedding(&tvec);
-            let accounted_at = utc_now_iso();
 
-            // Write the chunk, vectors, token accounting, and terminal log state
-            // in one transaction.
-            // This prevents a crash window where chunks exist but log stays 'screening'.
+            if prepared.is_empty() {
+                let note = if embedding_failures > 0 {
+                    "embedding_failed"
+                } else {
+                    "all_chunks_filtered"
+                };
+                self.finish_distill_log(
+                    log_id,
+                    if embedding_failures > 0 {
+                        "failed"
+                    } else {
+                        "discarded"
+                    },
+                    Some(note),
+                    prompt_tokens,
+                    completion_tokens,
+                )?;
+                continue;
+            }
+
+            // Write all chunks, vectors, token accounting, and terminal log state atomically.
+            let accounted_at = utc_now_iso();
             self.storage.begin_immediate()?;
-            let result = (|| -> Result<()> {
-                self.storage.insert_chunk(&row)?;
-                self.storage.insert_vec_content(&row.id, &cvec_bytes)?;
-                self.storage.insert_vec_trigger(&row.id, &tvec_bytes)?;
+            let write_result = (|| -> Result<()> {
+                for pc in &prepared {
+                    self.storage.insert_chunk(&pc.row)?;
+                    self.storage.insert_vec_content(&pc.row.id, &pc.cvec_bytes)?;
+                    self.storage.insert_vec_trigger(&pc.row.id, &pc.tvec_bytes)?;
+                }
+                let note = (embedding_failures > 0)
+                    .then(|| format!("partial_embedding_failures:{embedding_failures}"));
                 self.storage.finish_distill_log(
                     log_id,
                     "distilled",
-                    None,
+                    note.as_deref(),
                     prompt_tokens,
                     completion_tokens,
                     &accounted_at,
                 )?;
                 self.storage.commit()
             })();
-            if let Err(error) = result {
+            if let Err(error) = write_result {
                 let _ = self.storage.rollback();
                 let note = format!("distill_write_failed:{error}");
                 self.finish_distill_log(
@@ -2347,6 +3050,16 @@ impl KnowledgeBase {
                 continue;
             }
             count += 1;
+        }
+        if !distill_errors.is_empty() {
+            // Log failures but do not abort: successful chunks are already committed and
+            // failed logs are marked 'failed' for bounded retry. Returning Ok preserves
+            // evolve request state and allows finish_covered_evolve_requests to run.
+            eprintln!(
+                "[innate] distillation partial failure ({} log(s)): {}",
+                distill_errors.len(),
+                distill_errors.join("; ")
+            );
         }
         Ok(count)
     }
@@ -2405,20 +3118,19 @@ impl KnowledgeBase {
         // ── Step 1-4: aggregate (single BEGIN IMMEDIATE, half-open cutoff window) ──
         self.storage.begin_immediate()?;
         let agg_result = (|| -> Result<()> {
-            let last_ts = self
-                .storage
-                .get_meta("last_agg_ts")?
-                .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string());
             let cutoff_ts = now_iso.clone();
 
-            // 1. Aggregate success traces from 'used' events (not 'selected') in the window.
+            // 1. Rebuild post-4.12 success facts from retained attribution events.
+            self.storage.conn_execute(
+                "DELETE FROM chunk_success_traces",
+                rusqlite::params![],
+            )?;
             self.storage.conn_execute(
                 "INSERT OR IGNORE INTO chunk_success_traces(chunk_id, trace_id, ts)
                  SELECT ut.chunk_id, ut.trace_id, MAX(ut.ts)
                  FROM usage_trace ut
                  WHERE ut.event = 'used'
                    AND ut.chunk_id IS NOT NULL
-                   AND ut.ts >= ? AND ut.ts < ?
                    AND (
                      EXISTS (SELECT 1 FROM usage_trace ok
                              WHERE ok.trace_id = ut.trace_id
@@ -2427,11 +3139,10 @@ impl KnowledgeBase {
                                 WHERE el.trace_id = ut.trace_id AND el.outcome = 'ok')
                    )
                  GROUP BY ut.chunk_id, ut.trace_id",
-                rusqlite::params![last_ts, cutoff_ts],
+                rusqlite::params![],
             )?;
 
-            // 2. Derive success counts from the persistent fact table.
-            // CTE computes COUNT and MAX(ts) once per chunk_id to avoid duplicate subqueries.
+            // 2. Derive success counts from migration baseline + replayable facts.
             self.storage.conn_execute(
                 "WITH cst AS (
                    SELECT chunk_id, COUNT(*) AS cnt, MAX(ts) AS max_ts
@@ -2439,31 +3150,39 @@ impl KnowledgeBase {
                    GROUP BY chunk_id
                  )
                  UPDATE chunks SET
-                   used_success_count      = cst.cnt,
-                   success_trace_ids_count = cst.cnt,
-                   last_success_at         = cst.max_ts
-                 FROM cst
-                 WHERE chunks.id = cst.chunk_id",
+                   used_success_count = used_success_count_base
+                     + COALESCE((SELECT cnt FROM cst WHERE cst.chunk_id=chunks.id), 0),
+                   success_trace_ids_count = used_success_count_base
+                     + COALESCE((SELECT cnt FROM cst WHERE cst.chunk_id=chunks.id), 0),
+                   last_success_at = COALESCE(
+                     (SELECT max_ts FROM cst WHERE cst.chunk_id=chunks.id),
+                     last_success_at
+                   )
+                 WHERE origin!='spark'",
                 rusqlite::params![],
             )?;
 
-            // 3. Increment selected_count / used_count from window.
+            // 3. Recompute selected/used counts and last-use from retained facts.
             self.storage.conn_execute(
                 "UPDATE chunks SET
-                   selected_count = selected_count + COALESCE(
+                   selected_count = selected_count_base + COALESCE(
                      (SELECT COUNT(*) FROM usage_trace
-                      WHERE chunk_id = chunks.id AND event = 'selected'
-                        AND ts >= ? AND ts < ?), 0),
-                   used_count = used_count + COALESCE(
+                      WHERE chunk_id = chunks.id AND event = 'selected'), 0),
+                   used_count = used_count_base + COALESCE(
                      (SELECT COUNT(*) FROM usage_trace
-                      WHERE chunk_id = chunks.id AND event = 'used'
-                        AND ts >= ? AND ts < ?), 0)
-                 WHERE id IN (SELECT DISTINCT chunk_id FROM usage_trace
-                              WHERE ts >= ? AND ts < ?)",
-                rusqlite::params![last_ts, cutoff_ts, last_ts, cutoff_ts, last_ts, cutoff_ts],
+                      WHERE chunk_id = chunks.id AND event = 'used'), 0),
+                   last_used_at = COALESCE(
+                     (SELECT MAX(ts) FROM usage_trace
+                      WHERE chunk_id=chunks.id AND event='used'),
+                     last_used_base
+                   )
+                 WHERE origin!='spark'",
+                rusqlite::params![],
             )?;
 
-            // 4. Advance watermark and purge raw traces before cutoff.
+            // 4. Advance watermark and purge only verbose retrieval events.
+            // Attributed facts remain replayable so repeated curate runs are idempotent
+            // and a later correction can subtract the previous trace contribution.
             self.storage.set_meta("last_agg_ts", &cutoff_ts)?;
             self.storage.purge_usage_trace(&cutoff_ts)?;
             self.storage.commit()
@@ -2491,11 +3210,13 @@ impl KnowledgeBase {
                     .unwrap_or("unknown");
                 let note = format!("screening_timeout:{run_id}");
                 self.storage.conn_execute(
-                    "UPDATE episodic_log
-                     SET distill_state='failed', distill_note=?,
-                         distill_run_id=NULL, distill_locked_at=NULL
-                     WHERE id=?",
-                    rusqlite::params![note, id],
+                "UPDATE episodic_log
+                 SET distill_state='failed', distill_note=?,
+                     distill_attempts=distill_attempts+1,
+                     distill_last_failed_at=?,
+                     distill_run_id=NULL, distill_locked_at=NULL
+                 WHERE id=?",
+                    rusqlite::params![note, now_iso, id],
                 )?;
                 report.recovered.push(id.to_string());
                 report
@@ -2524,11 +3245,24 @@ impl KnowledgeBase {
         let scope_skill = scope.skill_name.clone();
         self.storage.begin_immediate()?;
         let gov_result = (|| -> Result<()> {
+            // New feedback refreshes its chunk synchronously in Record. Curate only needs
+            // to age pending proposals; scanning every historical feedback row is unbounded.
+            let governance_chunks = self
+                .storage
+                .query_chunks(
+                    "SELECT DISTINCT chunk_id FROM governance_proposals WHERE state='pending'",
+                )?;
+            for row in governance_chunks {
+                if let Some(chunk_id) = row.get("chunk_id").and_then(Value::as_str) {
+                    self.refresh_governance_evidence(chunk_id, &now_iso)?;
+                }
+            }
+
             // ── 3a. Archive: low_confidence — only blocks that HAVE been used ──
             let low_conf_cutoff = days_ago(&now_iso, self.low_conf_idle_days);
             let low_conf = self.storage.query_chunks_params(
                 "SELECT id FROM chunks
-                 WHERE origin!='spark' AND protected=0 AND state='active'
+                 WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
                    AND last_used_at IS NOT NULL
                    AND confidence < ?
                    AND last_used_at < ?
@@ -2558,7 +3292,7 @@ impl KnowledgeBase {
             // ── 3b. Archive: repeated_selected_unused ──
             let rep_sel = self.storage.query_chunks_params(
                 "SELECT id FROM chunks
-                 WHERE origin!='spark' AND protected=0 AND state='active'
+                 WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
                    AND selected_count >= ? AND used_count = 0 AND confidence < ?
                    AND (? IS NULL OR origin=?)
                    AND (? IS NULL OR skill_name=?)",
@@ -2589,7 +3323,7 @@ impl KnowledgeBase {
             let never_used_cutoff = days_ago(&now_iso, self.never_used_age_days);
             let never_used = self.storage.query_chunks_params(
                 "SELECT id FROM chunks
-                 WHERE origin!='spark' AND protected=0 AND state='active'
+                 WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
                    AND used_count = 0 AND selected_count = 0
                    AND created_at < ?
                    AND (? IS NULL OR origin=?)
@@ -2612,6 +3346,132 @@ impl KnowledgeBase {
                             &now_iso,
                         )?;
                         report.archived.push(id.to_string());
+                    }
+                }
+            }
+
+            // ── 3d. Archive: governance_proposal ──
+            // Chunks whose pending governance proposals have accumulated enough evidence
+            // are archived and the proposals accepted atomically.
+            let gov_proposals = self.storage.query_chunks_params(
+                "SELECT DISTINCT chunk_id FROM governance_proposals
+                 WHERE state='pending'
+                   AND evidence_score >= ? AND actor_count >= 2",
+                rusqlite::params![self.governance_archive_threshold as f64],
+            )?;
+            for c in &gov_proposals {
+                if let Some(cid) = c.get("chunk_id").and_then(Value::as_str) {
+                    let already_archived = report.archived.contains(&cid.to_string());
+                    let eligible = !already_archived && self.storage.get_chunk(cid)?.map(|ch| {
+                        ch.get("origin").and_then(Value::as_str) != Some("spark")
+                            && ch.get("protected").and_then(Value::as_i64).unwrap_or(0) == 0
+                            && matches!(
+                                ch.get("state").and_then(Value::as_str),
+                                Some("active") | Some("pending")
+                            )
+                    }).unwrap_or(false);
+                    if eligible {
+                        self.storage.update_chunk_state(
+                            cid,
+                            "archived",
+                            Some("governance_proposal"),
+                            &now_iso,
+                        )?;
+                        report.archived.push(cid.to_string());
+                        self.storage.conn_execute(
+                            "UPDATE governance_proposals
+                             SET state='accepted', updated_at=?
+                             WHERE chunk_id=? AND state='pending'",
+                            rusqlite::params![now_iso, cid],
+                        )?;
+                    } else {
+                        self.storage.conn_execute(
+                            "UPDATE governance_proposals
+                             SET state='rejected', updated_at=?
+                             WHERE chunk_id=? AND state='pending'",
+                            rusqlite::params![now_iso, cid],
+                        )?;
+                    }
+                }
+            }
+
+            // ── 3d2. Expire stale governance proposals (insufficient evidence, too old) ──
+            // Proposals that never accumulate enough evidence cause repeated evolve cycles.
+            // Reject them after governance_proposal_max_age_days so they stop triggering.
+            let proposal_expiry_cutoff = days_ago(&now_iso, self.governance_proposal_max_age_days);
+            self.storage.conn_execute(
+                "UPDATE governance_proposals
+                 SET state='rejected', updated_at=?
+                 WHERE state='pending'
+                   AND evidence_score < ?
+                   AND created_at < ?",
+                rusqlite::params![
+                    now_iso,
+                    self.governance_archive_threshold as f64,
+                    proposal_expiry_cutoff
+                ],
+            )?;
+
+            // ── 3e. Archive: sustained_negative_feedback ──
+            // Chunks with too many negative feedback events are archived regardless of
+            // how long they've been idle, giving feedback a direct archival path.
+            let neg_feedback_chunks = self.storage.query_chunks_params(
+                "SELECT p.chunk_id FROM governance_proposals p
+                 JOIN chunks c ON c.id = p.chunk_id
+                 WHERE c.origin!='spark' AND c.protected=0
+                   AND c.state IN ('active','pending')
+                   AND p.state='pending'
+                   AND p.evidence_score >= ? AND p.actor_count >= 2
+                   AND (? IS NULL OR c.origin=?)
+                   AND (? IS NULL OR c.skill_name=?)
+                 GROUP BY p.chunk_id",
+                rusqlite::params![
+                    self.negative_feedback_archive_threshold as f64,
+                    scope_origin,
+                    scope_origin,
+                    scope_skill,
+                    scope_skill
+                ],
+            )?;
+            for c in &neg_feedback_chunks {
+                if let Some(cid) = c.get("chunk_id").and_then(Value::as_str) {
+                    if !report.archived.contains(&cid.to_string()) {
+                        self.storage.update_chunk_state(
+                            cid,
+                            "archived",
+                            Some("sustained_negative_feedback"),
+                            &now_iso,
+                        )?;
+                        report.archived.push(cid.to_string());
+                    }
+                }
+            }
+
+            // ── 3f. Archive: sustained_task_failure ──
+            // Covers both active and pending chunks: a pending chunk recalled repeatedly
+            // but never producing successful tasks also has no other archive path.
+            let high_fail_chunks = self.storage.query_chunks_params(
+                "SELECT id FROM chunks
+                 WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
+                   AND used_count >= ?
+                   AND CAST(used_success_count AS REAL) / CAST(used_count AS REAL) < ?
+                   AND confidence < ?
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)",
+                rusqlite::params![
+                    self.failure_min_uses,
+                    self.failure_max_success_rate,
+                    self.failure_confidence_max,
+                    scope_origin, scope_origin, scope_skill, scope_skill
+                ],
+            )?;
+            for c in &high_fail_chunks {
+                if let Some(cid) = c.get("id").and_then(Value::as_str) {
+                    if !report.archived.contains(&cid.to_string()) {
+                        self.storage.update_chunk_state(
+                            cid, "archived", Some("sustained_task_failure"), &now_iso,
+                        )?;
+                        report.archived.push(cid.to_string());
                     }
                 }
             }
@@ -2655,9 +3515,12 @@ impl KnowledgeBase {
             }
 
             // ── 5. Decay: confidence time-decay for idle non-spark non-protected active chunks ──
+            // Issue 6: Use last_decayed_at as the delta reference to avoid compounding.
+            // Each curate only applies the INCREMENTAL decay since the previous run, so the
+            // 90-day half-life is preserved regardless of how often curate runs.
             let decay_candidates = self.storage.query_chunks_params(
-                "SELECT id, confidence, last_used_at FROM chunks
-                 WHERE origin!='spark' AND protected=0 AND state='active'
+                "SELECT id, confidence, last_used_at, last_decayed_at FROM chunks
+                 WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
                    AND last_used_at IS NOT NULL
                    AND (? IS NULL OR origin=?)
                    AND (? IS NULL OR skill_name=?)",
@@ -2669,21 +3532,35 @@ impl KnowledgeBase {
                     None => continue,
                 };
                 let conf = c.get("confidence").and_then(Value::as_f64).unwrap_or(0.5);
-                let last_used = c
-                    .get("last_used_at")
+                let last_used = c.get("last_used_at").and_then(Value::as_str).unwrap_or(&now_iso);
+                // Use last_decayed_at (or last_used_at) as the reference for incremental delta.
+                let decay_ref = c
+                    .get("last_decayed_at")
                     .and_then(Value::as_str)
-                    .unwrap_or(&now_iso);
-                let days_idle = iso_days_diff(&now_iso, last_used);
-                if days_idle <= 0 {
+                    .filter(|s| *s > last_used)
+                    .unwrap_or(last_used);
+                let delta_days = iso_days_diff(&now_iso, decay_ref);
+                if delta_days <= 0 {
                     continue;
                 }
-                let floor = 0.3_f64;
-                let new_conf = floor + (conf - floor) * 0.5_f64.powf(days_idle as f64 / 90.0);
-                let new_conf = new_conf.clamp(floor, 1.0);
+                let floor = self.decay_floor;
+                let decay_alpha = 1.0 - 0.5_f64.powf(delta_days as f64 / 90.0);
+                let new_conf = conf + decay_alpha * (floor - conf);
                 if (new_conf - conf).abs() > 0.001 {
-                    let note = format!("decay:{days_idle}d");
-                    self.storage
-                        .update_chunk_confidence(id, new_conf, Some(&note), &now_iso)?;
+                    let note = format!("decay:{delta_days}d");
+                    self.storage.upsert_confidence_evidence(
+                        &gen_uuid(),
+                        None,
+                        id,
+                        "decay",
+                        floor,
+                        decay_alpha,
+                        &note,
+                        None,
+                        &now_iso,
+                    )?;
+                    self.recompute_chunk_confidence(id, &now_iso)?;
+                    self.storage.update_chunk_last_decayed_at(id, &now_iso)?;
                     report.decayed.push(id.to_string());
                 }
             }
@@ -2749,6 +3626,11 @@ impl KnowledgeBase {
             report.orphans = orphans.into_iter().collect();
             report.orphans.sort();
 
+            // ── 8. Full context_stats rebuild — periodic correction pass.
+            // record() only does targeted per-chunk updates; curate keeps the whole
+            // table accurate by rebuilding from all sources once per cycle.
+            self.rebuild_context_stats(&now_iso)?;
+
             self.storage.commit()
         })();
         if gov_result.is_err() {
@@ -2756,21 +3638,43 @@ impl KnowledgeBase {
             gov_result?;
         }
 
-        // ── Step 8: purge_old_logs (physical delete of terminal episodic_log rows >30d) ──
+        // ── Step 8: compact old terminal logs while preserving trace identity. ──
+        // The compact row keeps attribution corrections and audit joins possible without
+        // retaining potentially large raw outputs indefinitely.
         self.storage.begin_immediate()?;
         let purge_cutoff = days_ago(&now_iso, 30);
         let purge_result = self
             .storage
             .conn_execute(
-                "DELETE FROM episodic_log
-             WHERE distill_state IN ('distilled','discarded','failed')
-               AND ts < ?",
+                "UPDATE episodic_log
+                 SET query=NULL, recall_snapshot=NULL, output=NULL, output_summary=NULL,
+                     nomination=NULL,
+                     distill_note=COALESCE(distill_note, 'compacted')
+                 WHERE distill_state IN ('distilled','discarded','failed')
+                   AND ts < ?",
                 rusqlite::params![purge_cutoff],
             )
             .and_then(|_| self.storage.commit());
         if purge_result.is_err() {
             let _ = self.storage.rollback();
             purge_result?;
+        }
+
+        // ── Step 9: prune completed/failed evolve_requests older than 30 days ──
+        // Prevents unbounded table growth that would slow COUNT(*) queries.
+        self.storage.begin_immediate()?;
+        let evolve_req_cutoff = days_ago(&now_iso, 30);
+        let prune_req_result = self
+            .storage
+            .conn_execute(
+                "DELETE FROM evolve_requests
+                 WHERE state IN ('completed','failed') AND requested_at < ?",
+                rusqlite::params![evolve_req_cutoff],
+            )
+            .and_then(|_| self.storage.commit());
+        if prune_req_result.is_err() {
+            let _ = self.storage.rollback();
+            prune_req_result?;
         }
 
         Ok(report)
@@ -2815,14 +3719,18 @@ impl KnowledgeBase {
         let lib_id = self.storage.get_meta_or("lib_id", "?");
         let last_agg = self.storage.get_meta_or("last_agg_ts", "never");
 
-        let trace_metrics = self.storage.query_chunks(
+        let metric_window_start = days_ago(&utc_now_iso(), 30);
+        let trace_metrics = self.storage.query_chunks_params(
             "SELECT COUNT(*) AS total,
                     SUM(CASE WHEN task_state='completed' THEN 1 ELSE 0 END) AS completed,
                     SUM(CASE WHEN task_state='timed_out' THEN 1 ELSE 0 END) AS timed_out,
-                    SUM(CASE WHEN usage_state!='unknown' THEN 1 ELSE 0 END) AS usage_known,
-                    SUM(CASE WHEN usage_state='known_some' THEN 1 ELSE 0 END) AS usage_some,
+                    SUM(CASE WHEN task_state='completed' AND usage_state!='unknown'
+                             THEN 1 ELSE 0 END) AS usage_known,
+                    SUM(CASE WHEN task_state='completed' AND usage_state='known_some'
+                             THEN 1 ELSE 0 END) AS usage_some,
                     SUM(CASE WHEN outcome='ok' THEN 1 ELSE 0 END) AS succeeded
-             FROM episodic_log",
+             FROM episodic_log WHERE ts >= ?",
+            rusqlite::params![metric_window_start],
         )?;
         let trace_row = trace_metrics.first();
         let trace_total = trace_row
@@ -2849,9 +3757,12 @@ impl KnowledgeBase {
             .and_then(|row| row.get("succeeded"))
             .and_then(Value::as_i64)
             .unwrap_or(0);
-        let usage_rows = self.storage.query_chunks(
+        let usage_rows = self.storage.query_chunks_params(
             "SELECT recall_snapshot, used_ids FROM episodic_log
-             WHERE usage_state!='unknown' AND recall_snapshot IS NOT NULL AND used_ids IS NOT NULL",
+             WHERE usage_state!='unknown' AND used_complete=1
+               AND recall_snapshot IS NOT NULL AND used_ids IS NOT NULL
+               AND ts >= ?",
+            rusqlite::params![metric_window_start],
         )?;
         let mut selected_total = 0_i64;
         let mut selected_used = 0_i64;
@@ -2875,10 +3786,18 @@ impl KnowledgeBase {
             selected_total += selected.len() as i64;
             selected_used += selected.intersection(&used).count() as i64;
         }
-        let feedback_count = count_query(&self.storage, "SELECT COUNT(*) FROM feedback_events")?;
-        let feedback_traces = count_query(
+        let feedback_count = count_query_params(
             &self.storage,
-            "SELECT COUNT(DISTINCT trace_id) FROM feedback_events",
+            "SELECT COUNT(*) FROM feedback_events WHERE ts >= ?",
+            rusqlite::params![metric_window_start],
+        )?;
+        let feedback_traces = count_query_params(
+            &self.storage,
+            "SELECT COUNT(DISTINCT f.trace_id)
+             FROM feedback_events f
+             JOIN episodic_log e ON e.trace_id=f.trace_id
+             WHERE f.ts >= ? AND e.ts >= ? AND e.task_state='completed'",
+            rusqlite::params![metric_window_start, metric_window_start],
         )?;
         let pending_evolve = count_query(
             &self.storage,
@@ -2888,26 +3807,46 @@ impl KnowledgeBase {
             &self.storage,
             "SELECT COUNT(*) FROM governance_proposals WHERE state='pending'",
         )?;
+        let failed_evolve = count_query_params(
+            &self.storage,
+            "SELECT COUNT(*) FROM evolve_requests
+             WHERE last_failed_at >= ?",
+            rusqlite::params![metric_window_start],
+        )?;
+        let failed_distill = count_query_params(
+            &self.storage,
+            "SELECT COUNT(*) FROM episodic_log
+             WHERE distill_last_failed_at >= ?",
+            rusqlite::params![metric_window_start],
+        )?;
         let confidence_buckets = self.storage.query_chunks(
-            "SELECT
+            &format!("SELECT
                SUM(CASE WHEN confidence < 0.25 THEN 1 ELSE 0 END) AS low,
-               SUM(CASE WHEN confidence >= 0.25 AND confidence < 0.65 THEN 1 ELSE 0 END) AS medium,
-               SUM(CASE WHEN confidence >= 0.65 THEN 1 ELSE 0 END) AS high
+               SUM(CASE WHEN confidence >= 0.25 AND confidence < {0} THEN 1 ELSE 0 END) AS medium,
+               SUM(CASE WHEN confidence >= {0} THEN 1 ELSE 0 END) AS high
              FROM chunks WHERE origin!='spark' AND state!='archived'",
+                self.promote_confidence_min),
         )?;
         let confidence_row = confidence_buckets.first();
 
-        // Health signal 1: knowledge debt ratio
-        // Zombie = active, confidence in [0.4, 0.6], created > 7d ago, non-spark
-        // Use Rust-computed cutoff to match the fixed YYYY-MM-DDTHH:MM:SS.mmmZ format;
-        // datetime('now') returns YYYY-MM-DD HH:MM:SS (space, no Z) which compares
-        // incorrectly at same-day boundaries against our ISO 8601 timestamps.
-        let zombie_cutoff = days_ago(&utc_now_iso(), 7);
+        // P3-A: oldest pending chunk timestamp — surfaces long-lived pending debt.
+        let pending_oldest_ts = self.storage.query_chunks(
+            "SELECT MIN(created_at) AS oldest FROM chunks WHERE state='pending' AND origin!='spark'",
+        )?.into_iter().next()
+            .and_then(|r| r.get("oldest").cloned())
+            .and_then(|v| if v.is_null() { None } else { Some(v) });
+
+        // Health signal 1: knowledge debt ratio.
+        // Zombie = active chunks with middling confidence (stuck, neither good nor bad)
+        // that are at least 14d old and have been used at least once.
+        // "never-recalled old" chunks are handled by curate 3c (never_used archive).
+        let zombie_cutoff = days_ago(&utc_now_iso(), 14);
         let zombie: i64 = count_query_params(
             &self.storage,
             "SELECT COUNT(*) FROM chunks
              WHERE origin!='spark' AND state='active'
                AND confidence >= 0.4 AND confidence <= 0.6
+               AND last_used_at IS NOT NULL
                AND created_at < ?",
             rusqlite::params![zombie_cutoff],
         )?;
@@ -3002,7 +3941,10 @@ impl KnowledgeBase {
             "schema_version": schema_version,
             "lib_id": lib_id,
             "last_agg_ts": last_agg,
-            "chunks": {"total": total, "active": active, "pending": pending, "archived": archived},
+            "chunks": {
+                "total": total, "active": active, "pending": pending, "archived": archived,
+                "pending_oldest_ts": pending_oldest_ts,
+            },
             "sparks": sparks,
             "episodic_log": {"open": open_logs, "new": new_logs},
             "embed_rebuild_queue": embed_rebuild,
@@ -3018,7 +3960,10 @@ impl KnowledgeBase {
                 "feedback_events": feedback_count,
                 "timed_out_traces": trace_timed_out,
                 "pending_evolve_requests": pending_evolve,
+                "failed_evolve_requests_30d": failed_evolve,
+                "failed_distill_logs_30d": failed_distill,
                 "pending_governance_proposals": governance_pending,
+                "window_days": 30,
                 "confidence_distribution": {
                     "low": confidence_row.and_then(|row| row.get("low")).and_then(Value::as_i64).unwrap_or(0),
                     "medium": confidence_row.and_then(|row| row.get("medium")).and_then(Value::as_i64).unwrap_or(0),
@@ -3194,8 +4139,40 @@ fn chunk_is_valid_for_recall(chunk: &Value, embed_version: i64) -> bool {
             >= embed_version
 }
 
-fn estimate_distill_prompt_tokens(log: &Value) -> i64 {
-    [
+/// Normalize a query string before hashing into a context_key.
+///
+/// Goals: collapse whitespace variations and case differences so that
+/// semantically equivalent queries (same words, different capitalisation or
+/// spacing) accumulate statistics in the same context_stat bucket.
+///
+/// Deliberately conservative: no stemming, no stop-word removal. The canonical
+/// query guidance in SKILL.md handles vocabulary consistency at the agent level.
+fn normalize_query(query: &str) -> String {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "and", "for", "in", "of", "on", "the", "to", "with",
+    ];
+    let cleaned: String = query
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let mut tokens: Vec<&str> = cleaned
+        .split_whitespace()
+        .filter(|token| !STOP_WORDS.contains(token))
+        .collect();
+    tokens.sort_unstable();
+    tokens.dedup();
+    tokens.join(" ")
+}
+
+fn estimate_distill_prompt_tokens(log: &Value, related_logs: &[Value]) -> i64 {
+    let primary: i64 = [
         "query",
         "recall_snapshot",
         "output",
@@ -3205,7 +4182,20 @@ fn estimate_distill_prompt_tokens(log: &Value) -> i64 {
     .iter()
     .filter_map(|key| log.get(*key).and_then(Value::as_str))
     .map(|text| estimate_tokens(text) as i64)
-    .sum()
+    .sum();
+    let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
+    let related: i64 = related_logs
+        .iter()
+        .filter(|other| other.get("id").and_then(Value::as_str).unwrap_or("") != log_id)
+        .take(4)
+        .flat_map(|other| {
+            ["query", "output_summary", "outcome"]
+                .into_iter()
+                .filter_map(|key| other.get(key).and_then(Value::as_str))
+        })
+        .map(|text| estimate_tokens(text) as i64)
+        .sum();
+    primary + related
 }
 
 fn estimate_distilled_chunk_tokens(chunk: &DistilledChunk) -> i64 {
