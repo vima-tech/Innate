@@ -2,12 +2,22 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub const SCHEMA_JSONC: &str = include_str!("settings.schema.jsonc");
+
+fn default_schema_path() -> String {
+    "https://raw.githubusercontent.com/vima-tech/Innate/main/settings.schema.jsonc".to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Top-level Settings
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    /// JSON Schema reference — always present; written alongside settings.json.
+    #[serde(rename = "$schema", default = "default_schema_path")]
+    pub schema: String,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmConfig>,
 
@@ -19,6 +29,18 @@ pub struct Settings {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupConfig>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            schema: default_schema_path(),
+            llm: None,
+            embedding: None,
+            daemon: None,
+            backup: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +294,9 @@ pub fn save(settings: &Settings) -> anyhow::Result<()> {
 pub fn save_to(settings: &Settings, path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        // Write the schema file alongside settings.json so $schema resolves locally.
+        let schema_path = parent.join("settings.schema.jsonc");
+        let _ = std::fs::write(&schema_path, SCHEMA_JSONC);
     }
     let json = serde_json::to_string_pretty(settings)?;
     std::fs::write(path, &json)?;

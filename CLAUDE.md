@@ -43,7 +43,7 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 ## Authoritative Design Reference
 
-`docs/Innate-设计文档-v0.1.6.md` is the **编码基线**. Every design decision references a section. When behavior is ambiguous, consult the doc first.
+`docs/Innate-设计文档-v0.1.8.md` is the **编码基线**. Every design decision references a section. When behavior is ambiguous, consult the doc first.
 
 ## Architecture
 

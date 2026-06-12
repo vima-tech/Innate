@@ -1579,6 +1579,13 @@ fn configure_llm_interactive() {
             "",
         );
 
+        let embed_dim_str = prompt_text(
+            "Embedding dimension",
+            "1536",
+            "(model-specific: text-embedding-3-small=1536, qwen3-embedding=2560)",
+        );
+        let mut embed_dim: usize = embed_dim_str.parse().unwrap_or(1536);
+
         let embed_key_raw = prompt_secret(
             "Embedding API key",
             "(leave blank to reuse LLM API key)",
@@ -1594,19 +1601,31 @@ fn configure_llm_interactive() {
             base_url: embed_base_url,
             model_id: embed_model.clone(),
             api_key: embed_key.clone(),
-            dim: 1536,
+            dim: embed_dim,
         };
 
         let do_test_embed = prompt_confirm("Test embedding connection now?", true);
         if do_test_embed {
             info("Testing embedding…");
             match crate::llm::test_embedding(&embed_cfg) {
-                Ok(dim) => result_line(&format!("Embedding OK — dim={dim} model={embed_model}")),
+                Ok(detected_dim) => {
+                    result_line(&format!("Embedding OK — dim={detected_dim} model={embed_model}"));
+                    if detected_dim != embed_dim {
+                        info(&format!(
+                            "Auto-corrected dim: {} → {}",
+                            embed_dim, detected_dim
+                        ));
+                        embed_dim = detected_dim;
+                    }
+                }
                 Err(e) => warn_line(&format!("Embedding test failed: {e}")),
             }
         }
 
-        s.embedding = Some(embed_cfg);
+        s.embedding = Some(EmbeddingConfig {
+            dim: embed_dim,
+            ..embed_cfg
+        });
     }
 
     // ── Save settings ─────────────────────────────────────────────────────

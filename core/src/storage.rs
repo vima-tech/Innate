@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::errors::{InnateError, Result};
 use crate::utils::{cosine_similarity, unpack_embedding};
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.13";
+const EXPECTED_SCHEMA_VERSION: &str = "4.14";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("schema.sql");
@@ -31,6 +31,12 @@ pub struct Storage {
     vec_trigger_cache: VectorCache,
     /// Last observed vector revision. Only vector writes advance this value.
     vector_cache_revision: Cell<Option<i64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvolveRequestClaim {
+    pub id: String,
+    pub reason: String,
 }
 
 impl Storage {
@@ -564,7 +570,8 @@ impl Storage {
             "UPDATE chunks
              SET last_used_at=COALESCE(
                    (SELECT MAX(ts) FROM usage_trace
-                    WHERE chunk_id=? AND event='used'),
+                    WHERE chunk_id=? AND event='used'
+                      AND ts > COALESCE(chunks.evidence_cutoff_at, '')),
                    last_used_base
                  ),
                  updated_at=?
@@ -959,24 +966,53 @@ impl Storage {
     }
 
     pub fn request_evolve(&self, id: &str, reason: &str, now: &str) -> Result<()> {
+        self.request_evolve_at(id, reason, now, None)
+    }
+
+    pub fn request_evolve_at(
+        &self,
+        id: &str,
+        reason: &str,
+        now: &str,
+        next_retry_at: Option<&str>,
+    ) -> Result<()> {
         let priority = match reason {
             "governance_ready" => 100,
             "governance" => 80,
             "threshold" => 60,
+            "distill_retry" => 50,
             "batch_continue" => 40,
             _ => 20,
         };
         self.conn.execute(
-            "INSERT INTO evolve_requests(id, reason, state, requested_at, priority)
-             VALUES (?,?,'pending',?,?)
+            "INSERT INTO evolve_requests(
+               id, reason, state, requested_at, priority, next_retry_at
+             )
+             VALUES (?,?,'pending',?,?,?)
              ON CONFLICT(reason) WHERE state='pending'
-             DO UPDATE SET priority=MAX(priority, excluded.priority)",
-            params![id, reason, now, priority],
+             DO UPDATE SET
+               priority=MAX(priority, excluded.priority),
+               next_retry_at=CASE
+                 WHEN excluded.next_retry_at IS NULL THEN NULL
+                 WHEN evolve_requests.next_retry_at IS NULL THEN NULL
+                 ELSE MIN(evolve_requests.next_retry_at, excluded.next_retry_at)
+               END",
+            params![id, reason, now, priority, next_retry_at],
         )?;
         Ok(())
     }
 
     pub fn claim_evolve_request(&self, now: &str, stale_before: &str) -> Result<Option<String>> {
+        Ok(self
+            .claim_evolve_request_with_reason(now, stale_before)?
+            .map(|claim| claim.id))
+    }
+
+    pub fn claim_evolve_request_with_reason(
+        &self,
+        now: &str,
+        stale_before: &str,
+    ) -> Result<Option<EvolveRequestClaim>> {
         self.conn.execute(
             "UPDATE evolve_requests
              SET state='pending', leased_at=NULL, note='lease_recovered'
@@ -990,20 +1026,47 @@ impl Storage {
                AND COALESCE(next_retry_at, completed_at) < ?",
             [now],
         )?;
-        Ok(self
-            .conn
-            .query_row(
-                "UPDATE evolve_requests
-                 SET state='running', leased_at=?, attempts=attempts+1
-                 WHERE id=(
-                   SELECT id FROM evolve_requests
-                   WHERE state='pending' ORDER BY priority DESC, requested_at ASC LIMIT 1
-                 ) AND state='pending'
-                 RETURNING id",
-                [now],
-                |row| row.get(0),
-            )
-            .optional()?)
+        Ok(self.conn.query_row(
+            "UPDATE evolve_requests
+             SET state='running', leased_at=?, attempts=attempts+1
+             WHERE id=(
+               SELECT id FROM evolve_requests
+               WHERE state='pending'
+                 AND (next_retry_at IS NULL OR next_retry_at <= ?)
+               ORDER BY priority DESC, requested_at ASC LIMIT 1
+             ) AND state='pending'
+             RETURNING id, reason",
+            params![now, now],
+            |row| {
+                Ok(EvolveRequestClaim {
+                    id: row.get(0)?,
+                    reason: row.get(1)?,
+                })
+            },
+        ).optional()?)
+    }
+
+    pub fn defer_evolve_request(
+        &self,
+        id: &str,
+        note: &str,
+        next_retry_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM evolve_requests
+             WHERE state='pending'
+               AND id!=?
+               AND reason=(SELECT reason FROM evolve_requests WHERE id=?)",
+            params![id, id],
+        )?;
+        self.conn.execute(
+            "UPDATE evolve_requests
+             SET state='pending', leased_at=NULL, completed_at=NULL,
+                 note=?, next_retry_at=?
+             WHERE id=?",
+            params![note, next_retry_at, id],
+        )?;
+        Ok(())
     }
 
     pub fn finish_evolve_request(
@@ -1068,6 +1131,18 @@ impl Storage {
         completion_tokens: i64,
         accounted_at: &str,
     ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO distill_token_usage(
+               log_id, prompt_tokens, completion_tokens, outcome, accounted_at
+             ) VALUES (?,?,?,?,?)",
+            params![
+                id,
+                prompt_tokens,
+                completion_tokens,
+                state,
+                accounted_at
+            ],
+        )?;
         self.conn.execute(
             "UPDATE episodic_log
              SET distill_state=?, distill_note=?,
@@ -1234,6 +1309,10 @@ impl Storage {
     pub fn conn_execute<P: rusqlite::Params>(&self, sql: &str, p: P) -> Result<()> {
         self.conn.execute(sql, p)?;
         Ok(())
+    }
+
+    pub fn conn_execute_count<P: rusqlite::Params>(&self, sql: &str, p: P) -> Result<usize> {
+        Ok(self.conn.execute(sql, p)?)
     }
 }
 

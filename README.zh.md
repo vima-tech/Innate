@@ -23,7 +23,7 @@ curl -fsSL https://innate.mengkai.ren/ | sh
 
 ```bash
 # 固定安装版本
-curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.1.6 sh
+curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.1.8 sh
 
 # 仅安装二进制，跳过 Agent 配置
 curl -fsSL https://innate.mengkai.ren/ | NO_INNATE_SETUP=1 sh
@@ -365,7 +365,7 @@ Innate System
 
 ## 文档
 
-- [`docs/Innate-设计文档-v0.1.6.md`](docs/Innate-设计文档-v0.1.6.md) — 完整系统设计（权威基线）
+- [`docs/Innate-设计文档-v0.1.8.md`](docs/Innate-设计文档-v0.1.8.md) — 完整系统设计（权威基线）
 - [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent Skill 元数据与使用规范
 
 ---

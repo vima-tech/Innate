@@ -79,9 +79,14 @@ Rules:
 fn build_distill_prompt_with_related(log: &Value, logs: &[Value]) -> String {
     let mut prompt = build_distill_prompt(log);
     let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
+    let context_key = log.get("context_key").and_then(Value::as_str);
     let related: Vec<String> = logs
         .iter()
         .filter(|other| other.get("id").and_then(Value::as_str).unwrap_or("") != log_id)
+        .filter(|other| {
+            context_key.is_some()
+                && other.get("context_key").and_then(Value::as_str) == context_key
+        })
         .take(4)
         .map(|other| {
             let query = safe_prompt_field(other.get("query").and_then(Value::as_str));

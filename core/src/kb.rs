@@ -82,6 +82,12 @@ pub struct CurateReport {
     pub stats: HashMap<String, Value>,
 }
 
+#[derive(Debug, Default)]
+struct DistillBatchReport {
+    distilled: usize,
+    failed: usize,
+}
+
 /// Scope for a single Curate run — allows limiting governance to a subset of chunks.
 #[derive(Debug, Default, Clone)]
 pub struct CurateScope {
@@ -237,7 +243,7 @@ impl KnowledgeBase {
         let defaults: &[(&str, &str)] = &[
             ("lib_id", &lib_id),
             ("lib_role", "personal"),
-            ("schema_version", "4.13"),
+            ("schema_version", "4.14"),
             ("content_dim", &content_dim),
             ("trigger_dim", &trigger_dim),
             ("embed_model", embed_model),
@@ -1168,18 +1174,6 @@ impl KnowledgeBase {
                 .get("outcome")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            if let Some(new_outcome) = outcome {
-                if let Some(ref ex) = existing_outcome {
-                    if ex != "unknown" && ex != new_outcome {
-                        return Err(InnateError::OutcomeConflict {
-                            trace_id: trace_id.to_string(),
-                            existing: ex.clone(),
-                            requested: new_outcome.to_string(),
-                        });
-                    }
-                }
-            }
-
             // usage_trace: used
             let effective_used_attribution = if used.is_some() {
                 used_attribution
@@ -1255,6 +1249,12 @@ impl KnowledgeBase {
                 if matches!(o, "ok" | "fail") {
                     let event = if o == "ok" { "task_ok" } else { "task_fail" };
                     let strength = if event == "task_fail" { 0.15 } else { 1.0 };
+                    self.storage.conn_execute(
+                        "DELETE FROM usage_trace
+                         WHERE trace_id=? AND event IN ('task_ok','task_fail')
+                           AND chunk_id IS NULL",
+                        rusqlite::params![trace_id],
+                    )?;
                     self.storage.insert_usage_trace(
                         trace_id, None, event, strength, None, None, None, None, None, source, &now,
                     )?;
@@ -1462,17 +1462,22 @@ impl KnowledgeBase {
                 .and_then(Value::as_str)
                 .unwrap_or("open");
             let lifecycle_completed = lifecycle_state == "completed";
+            let has_material = output_summary.is_some()
+                || nomination.is_some()
+                || output.is_some()
+                || log.get("output_summary").and_then(Value::as_str).is_some()
+                || log.get("nomination").and_then(Value::as_str).is_some()
+                || log.get("output").and_then(Value::as_str).is_some();
+            let retryable_discard = current_state == "discarded"
+                && matches!(
+                    log.get("distill_note").and_then(Value::as_str),
+                    Some("insufficient_material" | "abandoned" | "timed_out")
+                );
             let new_state = if current_state == "open"
                 && matches!(lifecycle_state, "abandoned" | "timed_out")
             {
                 Some("discarded")
-            } else if current_state == "open" && lifecycle_completed {
-                let has_material = output_summary.is_some()
-                    || nomination.is_some()
-                    || output.is_some()
-                    || log.get("output_summary").and_then(Value::as_str).is_some()
-                    || log.get("nomination").and_then(Value::as_str).is_some()
-                    || log.get("output").and_then(Value::as_str).is_some();
+            } else if lifecycle_completed && (current_state == "open" || retryable_discard) {
                 if has_material {
                     Some("new")
                 } else {
@@ -1498,6 +1503,12 @@ impl KnowledgeBase {
                     note,
                     outcome_str.as_deref(),
                 )?;
+                if state == "new" && retryable_discard {
+                    self.storage.conn_execute(
+                        "UPDATE episodic_log SET distill_note=NULL WHERE trace_id=?",
+                        rusqlite::params![trace_id],
+                    )?;
+                }
             } else if outcome.is_some() {
                 let outcome_str = outcome.map(str::to_string);
                 self.storage.update_episodic_log_state(
@@ -1854,8 +1865,8 @@ impl KnowledgeBase {
              FROM feedback_events fe
              WHERE fe.context_key IS NOT NULL
                AND fe.ts > COALESCE((
-                 SELECT c.state_updated_at FROM chunks c
-                 WHERE c.id = fe.chunk_id AND c.state_reason = 'restore'
+                 SELECT c.evidence_cutoff_at FROM chunks c
+                 WHERE c.id = fe.chunk_id
                ), '')
              GROUP BY fe.chunk_id, fe.context_key
              ON CONFLICT(chunk_id, context_key) DO UPDATE SET
@@ -1915,8 +1926,8 @@ impl KnowledgeBase {
                  FROM feedback_events
                  WHERE context_key IS NOT NULL AND chunk_id=?
                    AND ts > COALESCE((
-                     SELECT state_updated_at FROM chunks
-                     WHERE id=? AND state_reason='restore'
+                     SELECT evidence_cutoff_at FROM chunks
+                     WHERE id=?
                    ), '')
                  GROUP BY chunk_id, context_key
                  ON CONFLICT(chunk_id, context_key) DO UPDATE SET
@@ -1931,13 +1942,13 @@ impl KnowledgeBase {
 
     fn refresh_governance_evidence(&self, chunk_id: &str, now: &str) -> Result<()> {
         let rows = self.storage.query_chunks_params(
-            "SELECT COALESCE(actor, 'anonymous:' || source) AS actor_key,
+            "SELECT actor AS actor_key,
                     signal, strength, ts
              FROM feedback_events
-             WHERE chunk_id=?
+             WHERE chunk_id=? AND actor IS NOT NULL AND actor!=''
                AND ts > COALESCE((
-                 SELECT state_updated_at FROM chunks
-                 WHERE id=? AND state_reason='restore'
+                 SELECT evidence_cutoff_at FROM chunks
+                 WHERE id=?
                ), '')",
             rusqlite::params![chunk_id, chunk_id],
         )?;
@@ -2665,21 +2676,32 @@ impl KnowledgeBase {
             }
             self.storage.query_chunks_params(
                 "UPDATE chunks
-                 SET confidence_base=CASE WHEN ? THEN 0.5 ELSE confidence_base END,
-                     confidence=CASE WHEN ? THEN 0.5 ELSE confidence END,
-                     confidence_reason='restore', updated_at=?
+                 SET confidence_base=0.5, confidence=0.5,
+                     confidence_reason='restore',
+                     selected_count=0, selected_count_base=0,
+                     used_count=0, used_count_base=0,
+                     used_success_count=0, used_success_count_base=0,
+                     success_trace_ids_count=0,
+                     last_used_at=NULL, last_used_base=NULL,
+                     last_success_at=NULL, last_decayed_at=NULL,
+                     evidence_cutoff_at=?, updated_at=?
                  WHERE id=?",
-                rusqlite::params![was_invalidated, was_invalidated, now, chunk_id],
+                rusqlite::params![now, now, chunk_id],
             )?;
             self.storage.conn_execute(
-                "DELETE FROM confidence_evidence
-                 WHERE chunk_id=? AND kind IN ('feedback_up','feedback_down')",
+                "DELETE FROM confidence_evidence WHERE chunk_id=?",
                 rusqlite::params![chunk_id],
             )?;
             self.storage.conn_execute(
-                "UPDATE chunk_context_stats_base
-                 SET positive_feedback=0, negative_feedback=0
-                 WHERE chunk_id=?",
+                "DELETE FROM chunk_success_traces WHERE chunk_id=?",
+                rusqlite::params![chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "DELETE FROM chunk_context_stats_base WHERE chunk_id=?",
+                rusqlite::params![chunk_id],
+            )?;
+            self.storage.conn_execute(
+                "DELETE FROM chunk_context_stats WHERE chunk_id=?",
                 rusqlite::params![chunk_id],
             )?;
             self.storage.conn_execute(
@@ -2688,8 +2710,6 @@ impl KnowledgeBase {
                  WHERE chunk_id=? AND state IN ('pending','accepted')",
                 rusqlite::params![now, chunk_id],
             )?;
-            self.recompute_chunk_confidence(chunk_id, &now)?;
-            self.rebuild_context_stats_for(&HashSet::from([chunk_id.to_string()]), &now)?;
             self.storage.commit()
         })();
         if result.is_err() {
@@ -2709,10 +2729,45 @@ impl KnowledgeBase {
             )));
         }
         let evolve_started_at = utc_now_iso();
-        let request_id = self.storage.claim_evolve_request(
+        let retry_cutoff = minutes_ago(&evolve_started_at, 5);
+        let recovered_failed = self.storage.conn_execute_count(
+            "UPDATE episodic_log
+             SET distill_state='new', distill_note='retry_failed',
+                 distill_locked_at=NULL, distill_run_id=NULL
+             WHERE distill_state='failed'
+               AND distill_attempts < 3
+               AND COALESCE(distill_last_failed_at, distill_accounted_at, ts) < ?",
+            rusqlite::params![retry_cutoff],
+        )?;
+        if recovered_failed > 0 {
+            self.storage.request_evolve(
+                &gen_uuid(),
+                "distill_retry",
+                &evolve_started_at,
+            )?;
+        }
+        if trigger == "scheduled" {
+            let age_cutoff = hours_ago(
+                &evolve_started_at,
+                self.evolve_schedule_interval_hours,
+            );
+            let aged_new = count_query_params(
+                &self.storage,
+                "SELECT COUNT(*) FROM episodic_log
+                 WHERE distill_state='new' AND ts <= ?",
+                rusqlite::params![age_cutoff],
+            )?;
+            if aged_new > 0 {
+                self.storage
+                    .request_evolve(&gen_uuid(), "scheduled", &evolve_started_at)?;
+            }
+        }
+        let request = self.storage.claim_evolve_request_with_reason(
             &evolve_started_at,
             &minutes_ago(&evolve_started_at, self.screening_timeout_minutes),
         )?;
+        let request_id = request.as_ref().map(|claim| claim.id.as_str());
+        let request_reason = request.as_ref().map(|claim| claim.reason.as_str());
         // Issue 7: scheduled without pending request → still run curate (time-based maintenance).
         if trigger == "scheduled" && request_id.is_none() {
             let curator = Arc::clone(&self.curator);
@@ -2737,10 +2792,24 @@ impl KnowledgeBase {
             if cnt < self.evolve_threshold {
                 let curator = Arc::clone(&self.curator);
                 let curate = curator.run(self, &CurateScope::default())?;
-                if let Some(ref id) = request_id {
-                    self.storage.finish_evolve_request(
-                        id, "completed", Some("below_threshold"), &utc_now_iso(),
-                    )?;
+                if let Some(id) = request_id {
+                    if matches!(request_reason, Some("governance" | "governance_ready")) {
+                        self.storage.finish_evolve_request(
+                            id,
+                            "completed",
+                            Some("curate_only"),
+                            &utc_now_iso(),
+                        )?;
+                    } else {
+                        self.storage.defer_evolve_request(
+                            id,
+                            "below_threshold",
+                            &hours_after(
+                                &evolve_started_at,
+                                self.evolve_schedule_interval_hours.max(1),
+                            ),
+                        )?;
+                    }
                 }
                 return Ok(json!({
                     "distilled": 0,
@@ -2749,18 +2818,20 @@ impl KnowledgeBase {
                 }));
             }
 
+        }
+
+        if trigger != "manual" {
             if let Some(limit) = self
                 .storage
                 .get_meta("max_distill_tokens_per_period")?
                 .and_then(|value| value.parse::<i64>().ok())
                 .filter(|value| *value > 0)
             {
-                let period_start = self.distill_token_period_start(&utc_now_iso())?;
+                let period_start = self.distill_token_period_start(&evolve_started_at)?;
                 let rows = self.storage.query_chunks_params(
-                    "SELECT COALESCE(SUM(distill_prompt_tokens),0)
-                            + COALESCE(SUM(distill_completion_tokens),0) AS used
-                     FROM episodic_log
-                     WHERE distill_accounted_at >= ?",
+                    "SELECT COALESCE(SUM(prompt_tokens + completion_tokens),0) AS used
+                     FROM distill_token_usage
+                     WHERE accounted_at >= ?",
                     rusqlite::params![period_start],
                 )?;
                 let used_tokens = rows
@@ -2771,10 +2842,21 @@ impl KnowledgeBase {
                 if used_tokens >= limit {
                     let curator = Arc::clone(&self.curator);
                     let curate = curator.run(self, &CurateScope::default())?;
-                    if let Some(ref id) = request_id {
-                        self.storage.finish_evolve_request(
-                            id, "completed", Some("distill_token_limit"), &utc_now_iso(),
-                        )?;
+                    if let Some(id) = request_id {
+                        if matches!(request_reason, Some("governance" | "governance_ready")) {
+                            self.storage.finish_evolve_request(
+                                id,
+                                "completed",
+                                Some("curate_only"),
+                                &utc_now_iso(),
+                            )?;
+                        } else {
+                            self.storage.defer_evolve_request(
+                                id,
+                                "distill_token_limit",
+                                &hours_after(&evolve_started_at, 1),
+                            )?;
+                        }
                     }
                     return Ok(json!({
                         "distilled": 0,
@@ -2789,25 +2871,16 @@ impl KnowledgeBase {
         }
 
         let result = (|| -> Result<Value> {
-            let retry_cutoff = minutes_ago(&utc_now_iso(), 5);
-            self.storage.conn_execute(
-                "UPDATE episodic_log
-                 SET distill_state='new', distill_note='retry_failed',
-                     distill_locked_at=NULL, distill_run_id=NULL
-                 WHERE distill_state='failed'
-                   AND distill_attempts < 3
-                   AND COALESCE(distill_accounted_at, ts) < ?",
-                rusqlite::params![retry_cutoff],
-            )?;
-            let distilled = self.distill_batch()?;
+            let distill = self.distill_batch()?;
             let curator = Arc::clone(&self.curator);
             let curate = curator.run(self, &CurateScope::default())?;
             Ok(json!({
-                "distilled": distilled,
+                "distilled": distill.distilled,
+                "distill_failed": distill.failed,
                 "curate": self.format_curate_report(&curate),
             }))
         })();
-        if let Some(ref id) = request_id {
+        if let Some(id) = request_id {
             let (state, note) = match &result {
                 Ok(_) => ("completed", None),
                 Err(error) => ("failed", Some(error.to_string())),
@@ -2818,6 +2891,20 @@ impl KnowledgeBase {
         if result.is_ok() {
             self.storage
                 .finish_covered_evolve_requests(&evolve_started_at, &utc_now_iso())?;
+        }
+
+        let failed_remaining = count_query(
+            &self.storage,
+            "SELECT COUNT(*) FROM episodic_log
+             WHERE distill_state='failed' AND distill_attempts < 3",
+        )?;
+        if failed_remaining > 0 {
+            self.storage.request_evolve_at(
+                &gen_uuid(),
+                "distill_retry",
+                &utc_now_iso(),
+                Some(&minutes_after(&utc_now_iso(), 5)),
+            )?;
         }
 
         // Issue 9: if more 'new' logs remain after this batch, self-queue so the next evolve drains them.
@@ -2844,7 +2931,7 @@ impl KnowledgeBase {
         })
     }
 
-    fn distill_batch(&self) -> Result<usize> {
+    fn distill_batch(&self) -> Result<DistillBatchReport> {
         let run_id = gen_uuid();
         let now = utc_now_iso();
 
@@ -2869,7 +2956,17 @@ impl KnowledgeBase {
         let mut distill_errors = Vec::new();
         for log in &logs {
             let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
-            match self.distiller.distill_with_context(log, &logs) {
+            let context_key = log.get("context_key").and_then(Value::as_str);
+            let related_logs: Vec<Value> = logs
+                .iter()
+                .filter(|other| {
+                    other.get("id").and_then(Value::as_str) == Some(log_id)
+                        || (context_key.is_some()
+                            && other.get("context_key").and_then(Value::as_str) == context_key)
+                })
+                .cloned()
+                .collect();
+            match self.distiller.distill_with_context(log, &related_logs) {
                 Ok(chunks) => {
                     if chunks.iter().any(|chunk| chunk.source_log_id != log_id) {
                         let error = "distiller returned a chunk for an unknown source log";
@@ -2879,7 +2976,7 @@ impl KnowledgeBase {
                             log_id,
                             "failed",
                             Some(&format!("distill_failed:{error}")),
-                            estimate_distill_prompt_tokens(log, &logs),
+                            estimate_distill_prompt_tokens(log, &related_logs),
                             0,
                         )?;
                         continue;
@@ -2894,7 +2991,7 @@ impl KnowledgeBase {
                         log_id,
                         "failed",
                         Some(&note),
-                        estimate_distill_prompt_tokens(log, &logs),
+                        estimate_distill_prompt_tokens(log, &related_logs),
                         0,
                     )?;
                 }
@@ -2908,7 +3005,17 @@ impl KnowledgeBase {
             if failed_logs.contains(log_id) {
                 continue;
             }
-            let prompt_tokens = estimate_distill_prompt_tokens(log, &logs);
+            let context_key = log.get("context_key").and_then(Value::as_str);
+            let related_logs: Vec<Value> = logs
+                .iter()
+                .filter(|other| {
+                    other.get("id").and_then(Value::as_str) == Some(log_id)
+                        || (context_key.is_some()
+                            && other.get("context_key").and_then(Value::as_str) == context_key)
+                })
+                .cloned()
+                .collect();
+            let prompt_tokens = estimate_distill_prompt_tokens(log, &related_logs);
             let chunks = chunks_by_log.remove(log_id).unwrap_or_default();
             let completion_tokens = chunks
                 .iter()
@@ -3013,6 +3120,9 @@ impl KnowledgeBase {
                     prompt_tokens,
                     completion_tokens,
                 )?;
+                if embedding_failures > 0 {
+                    failed_logs.insert(log_id.to_string());
+                }
                 continue;
             }
 
@@ -3047,6 +3157,7 @@ impl KnowledgeBase {
                     prompt_tokens,
                     completion_tokens,
                 )?;
+                failed_logs.insert(log_id.to_string());
                 continue;
             }
             count += 1;
@@ -3061,7 +3172,10 @@ impl KnowledgeBase {
                 distill_errors.join("; ")
             );
         }
-        Ok(count)
+        Ok(DistillBatchReport {
+            distilled: count,
+            failed: failed_logs.len(),
+        })
     }
 
     fn finish_distill_log(
@@ -3131,6 +3245,10 @@ impl KnowledgeBase {
                  FROM usage_trace ut
                  WHERE ut.event = 'used'
                    AND ut.chunk_id IS NOT NULL
+                   AND ut.ts > COALESCE((
+                     SELECT evidence_cutoff_at FROM chunks c
+                     WHERE c.id=ut.chunk_id
+                   ), '')
                    AND (
                      EXISTS (SELECT 1 FROM usage_trace ok
                              WHERE ok.trace_id = ut.trace_id
@@ -3167,13 +3285,16 @@ impl KnowledgeBase {
                 "UPDATE chunks SET
                    selected_count = selected_count_base + COALESCE(
                      (SELECT COUNT(*) FROM usage_trace
-                      WHERE chunk_id = chunks.id AND event = 'selected'), 0),
+                      WHERE chunk_id = chunks.id AND event = 'selected'
+                        AND ts > COALESCE(chunks.evidence_cutoff_at, '')), 0),
                    used_count = used_count_base + COALESCE(
                      (SELECT COUNT(*) FROM usage_trace
-                      WHERE chunk_id = chunks.id AND event = 'used'), 0),
+                      WHERE chunk_id = chunks.id AND event = 'used'
+                        AND ts > COALESCE(chunks.evidence_cutoff_at, '')), 0),
                    last_used_at = COALESCE(
                      (SELECT MAX(ts) FROM usage_trace
-                      WHERE chunk_id=chunks.id AND event='used'),
+                      WHERE chunk_id=chunks.id AND event='used'
+                        AND ts > COALESCE(chunks.evidence_cutoff_at, '')),
                      last_used_base
                    )
                  WHERE origin!='spark'",
@@ -3325,7 +3446,7 @@ impl KnowledgeBase {
                 "SELECT id FROM chunks
                  WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
                    AND used_count = 0 AND selected_count = 0
-                   AND created_at < ?
+                   AND COALESCE(evidence_cutoff_at, created_at) < ?
                    AND (? IS NULL OR origin=?)
                    AND (? IS NULL OR skill_name=?)",
                 rusqlite::params![
@@ -3728,6 +3849,9 @@ impl KnowledgeBase {
                              THEN 1 ELSE 0 END) AS usage_known,
                     SUM(CASE WHEN task_state='completed' AND usage_state='known_some'
                              THEN 1 ELSE 0 END) AS usage_some,
+                    SUM(CASE WHEN task_state='completed'
+                                  AND outcome IN ('ok','fail')
+                             THEN 1 ELSE 0 END) AS outcome_known,
                     SUM(CASE WHEN outcome='ok' THEN 1 ELSE 0 END) AS succeeded
              FROM episodic_log WHERE ts >= ?",
             rusqlite::params![metric_window_start],
@@ -3757,9 +3881,14 @@ impl KnowledgeBase {
             .and_then(|row| row.get("succeeded"))
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        let outcome_known = trace_row
+            .and_then(|row| row.get("outcome_known"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let usage_rows = self.storage.query_chunks_params(
             "SELECT recall_snapshot, used_ids FROM episodic_log
-             WHERE usage_state!='unknown' AND used_complete=1
+             WHERE task_state='completed'
+               AND usage_state!='unknown' AND used_complete=1
                AND recall_snapshot IS NOT NULL AND used_ids IS NOT NULL
                AND ts >= ?",
             rusqlite::params![metric_window_start],
@@ -3866,10 +3995,10 @@ impl KnowledgeBase {
         // Health signal 4: actual Distill cost within the configured rolling window.
         let distill_period_start = self.distill_token_period_start(&utc_now_iso())?;
         let distill_cost = self.storage.query_chunks_params(
-            "SELECT COALESCE(SUM(distill_prompt_tokens),0) AS pt,
-                    COALESCE(SUM(distill_completion_tokens),0) AS ct
-             FROM episodic_log
-             WHERE distill_accounted_at >= ?",
+            "SELECT COALESCE(SUM(prompt_tokens),0) AS pt,
+                    COALESCE(SUM(completion_tokens),0) AS ct
+             FROM distill_token_usage
+             WHERE accounted_at >= ?",
             rusqlite::params![distill_period_start],
         )?;
         let prompt_tokens = distill_cost
@@ -3955,7 +4084,7 @@ impl KnowledgeBase {
                 "usage_annotation_rate": ratio(usage_known, trace_completed),
                 "trace_use_rate": ratio(usage_some, usage_known),
                 "selected_to_used_rate": ratio(selected_used, selected_total),
-                "task_success_rate": ratio(succeeded, trace_completed),
+                "task_success_rate": ratio(succeeded, outcome_known),
                 "feedback_coverage": ratio(feedback_traces, trace_completed),
                 "feedback_events": feedback_count,
                 "timed_out_traces": trace_timed_out,
@@ -4184,9 +4313,14 @@ fn estimate_distill_prompt_tokens(log: &Value, related_logs: &[Value]) -> i64 {
     .map(|text| estimate_tokens(text) as i64)
     .sum();
     let log_id = log.get("id").and_then(Value::as_str).unwrap_or("");
+    let context_key = log.get("context_key").and_then(Value::as_str);
     let related: i64 = related_logs
         .iter()
         .filter(|other| other.get("id").and_then(Value::as_str).unwrap_or("") != log_id)
+        .filter(|other| {
+            context_key.is_some()
+                && other.get("context_key").and_then(Value::as_str) == context_key
+        })
         .take(4)
         .flat_map(|other| {
             ["query", "output_summary", "outcome"]
@@ -4312,6 +4446,24 @@ fn hours_ago(now_iso: &str, hours: i64) -> String {
     use chrono::{DateTime, Duration, Utc};
     if let Ok(t) = now_iso.parse::<DateTime<Utc>>() {
         let cutoff = t - Duration::hours(hours);
+        return cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    }
+    now_iso.to_string()
+}
+
+fn minutes_after(now_iso: &str, minutes: i64) -> String {
+    use chrono::{DateTime, Duration, Utc};
+    if let Ok(t) = now_iso.parse::<DateTime<Utc>>() {
+        let cutoff = t + Duration::minutes(minutes);
+        return cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    }
+    now_iso.to_string()
+}
+
+fn hours_after(now_iso: &str, hours: i64) -> String {
+    use chrono::{DateTime, Duration, Utc};
+    if let Ok(t) = now_iso.parse::<DateTime<Utc>>() {
+        let cutoff = t + Duration::hours(hours);
         return cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     }
     now_iso.to_string()

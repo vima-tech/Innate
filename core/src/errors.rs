@@ -17,15 +17,6 @@ pub enum InnateError {
     #[error("Invalid state transition: {0}")]
     InvalidState(String),
 
-    #[error(
-        "Outcome conflict: trace {trace_id} already has outcome {existing}, cannot set {requested}"
-    )]
-    OutcomeConflict {
-        trace_id: String,
-        existing: String,
-        requested: String,
-    },
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

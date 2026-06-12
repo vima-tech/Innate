@@ -30,9 +30,10 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("4.10", "4.11", include_str!("migrations/4.10_to_4.11.sql")),
     ("4.11", "4.12", include_str!("migrations/4.11_to_4.12.sql")),
     ("4.12", "4.13", include_str!("migrations/4.12_to_4.13.sql")),
+    ("4.13", "4.14", include_str!("migrations/4.13_to_4.14.sql")),
 ];
 
-const TARGET: &str = "4.13";
+const TARGET: &str = "4.14";
 
 /// Run all pending migrations on `db_path`. Idempotent if already at target.
 /// Returns the list of migration steps executed.
@@ -71,7 +72,17 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
             Ok(()) => {
                 if copy_last_used {
                     if let Err(error) =
-                        conn.execute("UPDATE chunks SET last_used_base=last_used_at", [])
+                        conn.execute(
+                            "UPDATE chunks
+                             SET last_used_base=CASE
+                               WHEN EXISTS (
+                                 SELECT 1 FROM usage_trace u
+                                 WHERE u.chunk_id=chunks.id AND u.event='used'
+                               ) THEN NULL
+                               ELSE last_used_at
+                             END",
+                            [],
+                        )
                     {
                         let _ = conn.execute_batch("ROLLBACK");
                         return Err(error.into());

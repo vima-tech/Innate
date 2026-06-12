@@ -1,0 +1,156 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "settings.schema.jsonc",
+  "title": "Innate Settings",
+  "description": "~/.innate/settings.json — Innate knowledge layer configuration. Configure with: innate install",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference (auto-written by innate on save)"
+    },
+
+    // ── LLM ────────────────────────────────────────────────────────────────
+    "llm": {
+      "description": "Generative LLM used for knowledge distillation (innate evolve). If absent, Innate falls back to heuristic distillation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model_id"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["openai", "anthropic"],
+          "description": "API wire format. Use \"openai\" for any OpenAI-compatible endpoint (DeepSeek, Ollama, Qwen, Mistral, …). Use \"anthropic\" for api.anthropic.com."
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Override the default API base URL. Defaults: openai → https://api.openai.com/v1 | anthropic → https://api.anthropic.com. Trailing slash is stripped automatically."
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Model identifier sent verbatim in the API request body. Examples: gpt-4o-mini, claude-haiku-4-5-20251001, qwen3.7-max, deepseek-chat."
+        },
+        "api_key": {
+          "type": "string",
+          "description": "API key (file stored at mode 0600). Env var override chain: INNATE_LLM_API_KEY → OPENAI_API_KEY (openai) / ANTHROPIC_API_KEY (anthropic)."
+        }
+      }
+    },
+
+    // ── Embedding ──────────────────────────────────────────────────────────
+    "embedding": {
+      "description": "Embedding model for semantic recall (innate recall). If absent, Innate uses a hash-based dummy embedder (no semantic similarity).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": ["openai"],
+          "default": "openai",
+          "description": "Always \"openai\" — only OpenAI-compatible embedding APIs are supported. Anthropic has no embedding API."
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Override the default embedding API base URL. Defaults to https://api.openai.com/v1."
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Embedding model ID. Examples: text-embedding-3-small, text-embedding-3-large, qwen3-embedding."
+        },
+        "api_key": {
+          "type": "string",
+          "description": "API key. Env var override chain: INNATE_LLM_API_KEY → OPENAI_API_KEY."
+        },
+        "dim": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1536,
+          "description": "Embedding vector dimension — must match what the model actually produces. Common values: text-embedding-3-small=1536, text-embedding-3-large=3072, qwen3-embedding=2560. Mismatch causes silent cosine-similarity errors."
+        }
+      }
+    },
+
+    // ── Daemon ─────────────────────────────────────────────────────────────
+    "daemon": {
+      "description": "Background daemon that watches session log files and triggers innate evolve after each session ends.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "watch_dirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["~/.innate/sessions"],
+          "description": "Directories the daemon tails for .log / .json hook files. Supports ~ expansion. The default directory (~/.innate/sessions) is created automatically."
+        },
+        "auto_start": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically spawn the daemon process when the MCP server starts (innate mcp). The daemon is idempotent — a second spawn is a no-op."
+        }
+      }
+    },
+
+    // ── Backup ─────────────────────────────────────────────────────────────
+    "backup": {
+      "description": "Automatic database backup to Cloudflare R2 object storage.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "default": false,
+          "description": "Master switch. Backup is disabled by default — set to true to enable."
+        },
+        "r2": {
+          "description": "Cloudflare R2 credentials. Required when enable=true.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account_id", "bucket"],
+          "properties": {
+            "account_id": {
+              "type": "string",
+              "description": "Cloudflare account ID — visible in the R2 dashboard URL (dash.cloudflare.com/<account_id>/r2)."
+            },
+            "bucket": {
+              "type": "string",
+              "description": "R2 bucket name."
+            },
+            "access_key_id": {
+              "type": "string",
+              "description": "R2 API token access key ID (generated in R2 → Manage R2 API tokens). Env override: INNATE_R2_ACCESS_KEY_ID."
+            },
+            "secret_access_key": {
+              "type": "string",
+              "description": "R2 API token secret access key. Env override: INNATE_R2_SECRET_ACCESS_KEY."
+            },
+            "prefix": {
+              "type": "string",
+              "default": "",
+              "description": "Optional key prefix prepended to every backup object (e.g. \"innate/\" → innate/2024-01-01T00:00:00Z.db.gz)."
+            }
+          }
+        },
+        "auto_backup_interval_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 24,
+          "description": "Minimum hours between automatic backups. A backup is skipped if one already ran within this window. Use innate backup now --force to bypass."
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60,
+          "description": "Delete remote backups older than this many days during the next backup run."
+        },
+        "min_backups": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Always retain at least this many backup files regardless of age (prevents over-pruning)."
+        }
+      }
+    }
+  }
+}

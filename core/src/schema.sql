@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.13 (Rust edition)
+-- Innate knowledge layer schema v4.14 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.13');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.14');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     updated_at       TEXT NOT NULL,
     last_used_at     TEXT,
     last_used_base   TEXT,
-    last_decayed_at  TEXT
+    last_decayed_at  TEXT,
+    evidence_cutoff_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_distilled_from ON chunks(distilled_from) WHERE distilled_from IS NOT NULL;
@@ -173,6 +174,19 @@ CREATE INDEX IF NOT EXISTS idx_log_distill_last_failed
   WHERE distill_last_failed_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_log_task_state ON episodic_log(task_state);
 CREATE INDEX IF NOT EXISTS idx_log_context ON episodic_log(context_key);
+
+CREATE TABLE IF NOT EXISTS distill_token_usage (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    log_id            TEXT NOT NULL,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    outcome           TEXT NOT NULL,
+    accounted_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_distill_usage_accounted
+  ON distill_token_usage(accounted_at);
+CREATE INDEX IF NOT EXISTS idx_distill_usage_log
+  ON distill_token_usage(log_id);
 
 CREATE TABLE IF NOT EXISTS chunk_success_traces (
     chunk_id  TEXT NOT NULL,

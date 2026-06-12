@@ -171,6 +171,51 @@ fn record_state_machine() {
 }
 
 #[test]
+fn late_material_reopens_insufficient_material_log() {
+    let (kb, _f) = tmp_kb();
+    let trace_id = crate::utils::gen_uuid();
+    kb.record(
+        &trace_id,
+        Some("late material"),
+        None,
+        None,
+        Some("ok"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+    let discarded = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
+    assert_eq!(discarded["distill_state"].as_str(), Some("discarded"));
+    assert_eq!(
+        discarded["distill_note"].as_str(),
+        Some("insufficient_material")
+    );
+
+    kb.record(
+        &trace_id,
+        None,
+        None,
+        Some("material arrived after completion"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+
+    let reopened = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
+    assert_eq!(reopened["distill_state"].as_str(), Some("new"));
+    assert!(reopened["distill_note"].is_null());
+}
+
+#[test]
 fn mcp_is_a_valid_event_source() {
     let (kb, _f) = tmp_kb();
     let result = kb
@@ -611,7 +656,7 @@ fn distiller_error_marks_log_failed() {
 }
 
 #[test]
-fn distillation_receives_related_logs_without_losing_failure_isolation() {
+fn distillation_only_receives_same_context_related_logs() {
     let file = NamedTempFile::new().unwrap();
     let related_counts = Arc::new(Mutex::new(Vec::new()));
     let kb = KnowledgeBase::open_with(
@@ -644,7 +689,7 @@ fn distillation_receives_related_logs_without_losing_failure_isolation() {
 
     kb.evolve("manual").unwrap();
 
-    assert_eq!(*related_counts.lock().unwrap(), vec![1, 1]);
+    assert_eq!(*related_counts.lock().unwrap(), vec![0, 0]);
 }
 
 #[test]
@@ -817,6 +862,16 @@ fn threshold_evolve_respects_distill_token_limit() {
     assert_eq!(result["skipped"].as_str(), Some("distill_token_limit"));
     let second_log = kb.storage.get_episodic_log(&second_trace).unwrap().unwrap();
     assert_eq!(second_log["distill_state"].as_str(), Some("new"));
+    let requests = kb
+        .storage
+        .query_chunks(
+            "SELECT state, note, next_retry_at
+             FROM evolve_requests
+             WHERE state='pending' AND note='distill_token_limit'",
+        )
+        .unwrap();
+    assert_eq!(requests.len(), 1, "budget-limited work must remain queued");
+    assert!(requests[0]["next_retry_at"].as_str().is_some());
 }
 
 #[test]
@@ -880,6 +935,61 @@ fn distill_token_window_uses_actual_distill_time_not_log_creation_time() {
     .unwrap();
 
     let result = kb.evolve("threshold").unwrap();
+    assert_eq!(result["skipped"].as_str(), Some("distill_token_limit"));
+    let second_log = kb.storage.get_episodic_log(&second_trace).unwrap().unwrap();
+    assert_eq!(second_log["distill_state"].as_str(), Some("new"));
+}
+
+#[test]
+fn scheduled_evolve_respects_distill_token_limit() {
+    let file = NamedTempFile::new().unwrap();
+    let first_trace = crate::utils::gen_uuid();
+    {
+        let kb = KnowledgeBase::open(file.path()).unwrap();
+        kb.record(
+            &first_trace,
+            Some("first scheduled budget query"),
+            None,
+            Some("first scheduled budget material"),
+            Some("ok"),
+            None,
+            None,
+            None,
+            None,
+            0,
+            "sdk",
+        )
+        .unwrap();
+        kb.evolve("manual").unwrap();
+        let first_log = kb.storage.get_episodic_log(&first_trace).unwrap().unwrap();
+        let used = first_log["distill_prompt_tokens"].as_i64().unwrap_or(0)
+            + first_log["distill_completion_tokens"].as_i64().unwrap_or(0);
+        kb.storage
+            .set_meta("max_distill_tokens_per_period", &used.to_string())
+            .unwrap();
+        kb.storage
+            .set_meta("evolve.threshold_new_count", "1")
+            .unwrap();
+    }
+
+    let kb = KnowledgeBase::open(file.path()).unwrap();
+    let second_trace = crate::utils::gen_uuid();
+    kb.record(
+        &second_trace,
+        Some("second scheduled budget query"),
+        None,
+        Some("second scheduled budget material"),
+        Some("ok"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+
+    let result = kb.evolve("scheduled").unwrap();
     assert_eq!(result["skipped"].as_str(), Some("distill_token_limit"));
     let second_log = kb.storage.get_episodic_log(&second_trace).unwrap().unwrap();
     assert_eq!(second_log["distill_state"].as_str(), Some("new"));
@@ -958,7 +1068,8 @@ fn migration_4_5_1_adds_distill_accounting_time() {
 
     let applied = crate::migrate::run_migrations(file.path()).unwrap();
     assert_eq!(applied, vec!["4.5.1→4.5.2", "4.5.2→4.6", "4.6→4.7", "4.7→4.8",
-        "4.8→4.9", "4.9→4.10", "4.10→4.11", "4.11→4.12", "4.12→4.13"]);
+        "4.8→4.9", "4.9→4.10", "4.10→4.11", "4.11→4.12", "4.12→4.13",
+        "4.13→4.14"]);
 
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     let has_column: bool = conn
@@ -976,7 +1087,7 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "4.13");
+    assert_eq!(version, "4.14");
 }
 
 #[test]
@@ -1586,6 +1697,14 @@ fn threshold_evolve_runs_curate_when_below_distill_threshold() {
         report.get("curate").map(|v| !v.is_null()).unwrap_or(false),
         "curate must run for threshold evolve even when below distill threshold"
     );
+    let pending = kb
+        .storage
+        .query_chunks(
+            "SELECT COUNT(*) AS cnt FROM evolve_requests
+             WHERE state='pending' AND reason='governance_ready'",
+        )
+        .unwrap();
+    assert_eq!(pending[0]["cnt"].as_i64(), Some(0));
 }
 
 #[test]
@@ -1623,6 +1742,112 @@ fn failed_distill_logs_are_retried_after_cooloff() {
 }
 
 #[test]
+fn scheduled_evolve_recovers_retryable_failed_log_without_existing_request() {
+    let file = NamedTempFile::new().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let kb = KnowledgeBase::open_with(
+        file.path(),
+        None,
+        None,
+        Some(Arc::new(CountingFailingDistiller {
+            calls: Arc::clone(&calls),
+        })),
+        None,
+        None,
+    )
+    .unwrap();
+    let trace_id = crate::utils::gen_uuid();
+    kb.record(
+        &trace_id,
+        Some("automatic retry"),
+        None,
+        Some("retryable material"),
+        Some("ok"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+    kb.evolve("manual").unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    kb.storage
+        .conn_execute(
+            "UPDATE episodic_log
+             SET distill_last_failed_at='2020-01-01T00:00:00.000Z'
+             WHERE trace_id=?",
+            rusqlite::params![trace_id],
+        )
+        .unwrap();
+    kb.storage
+        .conn_execute("DELETE FROM evolve_requests", [])
+        .unwrap();
+
+    kb.evolve("scheduled").unwrap();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
+    assert_eq!(log["distill_attempts"].as_i64(), Some(2));
+}
+
+#[test]
+fn distill_retry_cost_is_cumulative() {
+    let file = NamedTempFile::new().unwrap();
+    let kb = KnowledgeBase::open_with(
+        file.path(),
+        None,
+        None,
+        Some(Arc::new(FailingDistiller)),
+        None,
+        None,
+    )
+    .unwrap();
+    let trace_id = crate::utils::gen_uuid();
+    kb.record(
+        &trace_id,
+        Some("cost retry"),
+        None,
+        Some("cost material"),
+        Some("ok"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+    kb.evolve("manual").unwrap();
+    kb.storage
+        .conn_execute(
+            "UPDATE episodic_log
+             SET distill_last_failed_at='2020-01-01T00:00:00.000Z'
+             WHERE trace_id=?",
+            rusqlite::params![trace_id],
+        )
+        .unwrap();
+    kb.evolve("manual").unwrap();
+
+    let usage = kb
+        .storage
+        .query_chunks_params(
+            "SELECT COUNT(*) AS attempts,
+                    SUM(prompt_tokens + completion_tokens) AS total
+             FROM distill_token_usage
+             WHERE log_id=(SELECT id FROM episodic_log WHERE trace_id=?)",
+            rusqlite::params![trace_id],
+        )
+        .unwrap();
+    assert_eq!(usage[0]["attempts"].as_i64(), Some(2));
+    let latest = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
+    let latest_total = latest["distill_prompt_tokens"].as_i64().unwrap_or(0)
+        + latest["distill_completion_tokens"].as_i64().unwrap_or(0);
+    assert!(usage[0]["total"].as_i64().unwrap_or(0) > latest_total);
+}
+
+#[test]
 fn distill_retries_are_bounded_and_failures_remain_observable() {
     let file = NamedTempFile::new().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1653,17 +1878,20 @@ fn distill_retries_are_bounded_and_failures_remain_observable() {
     )
     .unwrap();
 
-    for _ in 0..3 {
+    for attempt in 0..3 {
         // evolve() succeeds even on distillation failure; failure details stay in DB.
         kb.evolve("manual").unwrap();
-        kb.storage
-            .conn_execute(
-                "UPDATE episodic_log
-                 SET distill_accounted_at='2020-01-01T00:00:00.000Z'
-                 WHERE trace_id=?",
-                rusqlite::params![trace_id],
-            )
-            .unwrap();
+        if attempt < 2 {
+            kb.storage
+                .conn_execute(
+                    "UPDATE episodic_log
+                     SET distill_accounted_at='2020-01-01T00:00:00.000Z',
+                         distill_last_failed_at='2020-01-01T00:00:00.000Z'
+                     WHERE trace_id=?",
+                    rusqlite::params![trace_id],
+                )
+                .unwrap();
+        }
     }
     kb.evolve("manual").unwrap();
 
@@ -1900,15 +2128,23 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
          CREATE TABLE usage_trace (
            trace_id TEXT NOT NULL,
            chunk_id TEXT,
-           event TEXT NOT NULL
+           event TEXT NOT NULL,
+           ts TEXT NOT NULL
          );
          INSERT INTO usage_trace VALUES
-           ('t1', 'c1', 'selected'),
-           ('t2', 'c1', 'selected'),
-           ('t1', 'c1', 'used'),
-           ('t1', NULL, 'task_ok');
-         CREATE TABLE episodic_log (trace_id TEXT, outcome TEXT);
-         INSERT INTO episodic_log VALUES ('t1', 'ok');
+           ('t1', 'c1', 'selected', '2026-01-01T00:00:00.000Z'),
+           ('t2', 'c1', 'selected', '2026-01-01T00:00:00.000Z'),
+           ('t1', 'c1', 'used', '2026-01-01T00:00:00.000Z'),
+           ('t1', NULL, 'task_ok', '2026-01-01T00:00:00.000Z');
+         CREATE TABLE episodic_log (
+           id TEXT, trace_id TEXT, outcome TEXT,
+           distill_state TEXT,
+           distill_prompt_tokens INTEGER,
+           distill_completion_tokens INTEGER,
+           distill_accounted_at TEXT
+         );
+         INSERT INTO episodic_log VALUES
+           ('l1', 't1', 'ok', 'distilled', NULL, NULL, NULL);
          CREATE TABLE feedback_events (
            chunk_id TEXT, context_key TEXT, signal TEXT
          );
@@ -1927,7 +2163,7 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
 
     assert_eq!(
         crate::migrate::run_migrations(file.path()).unwrap(),
-        vec!["4.11→4.12", "4.12→4.13"]
+        vec!["4.11→4.12", "4.12→4.13", "4.13→4.14"]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     let values = conn
@@ -1941,7 +2177,7 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
@@ -1949,7 +2185,81 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
     assert_eq!(values.0, 3);
     assert_eq!(values.1, 3);
     assert_eq!(values.2, 2);
-    assert_eq!(values.3, "2026-01-01T00:00:00.000Z");
+    assert_eq!(values.3, None);
+}
+
+#[test]
+fn migration_4_14_repairs_existing_4_13_baselines_and_cost_history() {
+    let file = NamedTempFile::new().unwrap();
+    {
+        let kb = KnowledgeBase::open(file.path()).unwrap();
+        let chunk_id = kb
+            .add("migration repair", "note", None, None, "manual", None)
+            .unwrap();
+        let trace_id = attributed_trace(&kb, &chunk_id);
+        kb.record(
+            &trace_id,
+            None,
+            None,
+            Some("repair material"),
+            Some("ok"),
+            Some(&[chunk_id.clone()]),
+            None,
+            None,
+            None,
+            0,
+            "sdk",
+        )
+        .unwrap();
+        kb.evolve("manual").unwrap();
+        kb.storage
+            .conn_execute(
+                "UPDATE chunks
+                 SET selected_count_base=selected_count,
+                     used_count_base=used_count,
+                     used_success_count_base=used_success_count,
+                     last_used_base=last_used_at
+                 WHERE id=?",
+                rusqlite::params![chunk_id],
+            )
+            .unwrap();
+        kb.storage
+            .conn_execute("DROP TABLE distill_token_usage", [])
+            .unwrap();
+        kb.storage
+            .conn_execute("ALTER TABLE chunks DROP COLUMN evidence_cutoff_at", [])
+            .unwrap();
+        kb.storage.set_meta("schema_version", "4.13").unwrap();
+    }
+
+    assert_eq!(
+        crate::migrate::run_migrations(file.path()).unwrap(),
+        vec!["4.13→4.14"]
+    );
+    let conn = rusqlite::Connection::open(file.path()).unwrap();
+    let values = conn
+        .query_row(
+            "SELECT selected_count_base, used_count_base,
+                    used_success_count_base, last_used_base
+             FROM chunks WHERE content='migration repair'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(values, (0, 0, 0, None));
+    let cost_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM distill_token_usage", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(cost_rows > 0);
 }
 
 #[test]
@@ -2727,6 +3037,140 @@ fn restore_supersedes_historical_governance_feedback() {
 }
 
 #[test]
+fn restore_starts_a_new_evidence_window() {
+    let (kb, _file) = tmp_kb();
+    let chunk_id = kb
+        .add(
+            "restored failure history",
+            "note",
+            Some("restore"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    kb.storage
+        .conn_execute(
+            "UPDATE chunks
+             SET state='archived', state_reason='sustained_task_failure',
+                 confidence=0.1, confidence_base=0.1,
+                 selected_count=10, selected_count_base=0,
+                 used_count=10, used_count_base=0,
+                 used_success_count=0, used_success_count_base=0,
+                 last_used_at='2020-01-01T00:00:00.000Z'
+             WHERE id=?",
+            rusqlite::params![chunk_id],
+        )
+        .unwrap();
+    for index in 0..10 {
+        let trace_id = format!("old-restore-{index}");
+        kb.storage
+            .insert_usage_trace(
+                &trace_id,
+                Some(&chunk_id),
+                "selected",
+                1.0,
+                None,
+                None,
+                None,
+                Some(index + 1),
+                None,
+                "sdk",
+                "2020-01-01T00:00:00.000Z",
+            )
+            .unwrap();
+        kb.storage
+            .insert_usage_trace(
+                &trace_id,
+                Some(&chunk_id),
+                "used",
+                0.3,
+                None,
+                None,
+                None,
+                None,
+                Some("explicit"),
+                "sdk",
+                "2020-01-01T00:00:00.000Z",
+            )
+            .unwrap();
+        kb.storage
+            .insert_usage_trace(
+                &trace_id,
+                None,
+                "task_fail",
+                0.15,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "sdk",
+                "2020-01-01T00:00:00.000Z",
+            )
+            .unwrap();
+    }
+
+    kb.restore(&chunk_id).unwrap();
+    kb.builtin_curate_impl(&CurateScope::default()).unwrap();
+
+    let chunk = kb.storage.get_chunk(&chunk_id).unwrap().unwrap();
+    assert_eq!(chunk["state"].as_str(), Some("active"));
+    assert_eq!(chunk["selected_count"].as_i64(), Some(0));
+    assert_eq!(chunk["used_count"].as_i64(), Some(0));
+    assert_eq!(chunk["confidence"].as_f64(), Some(0.5));
+    assert!(chunk["evidence_cutoff_at"].as_str().is_some());
+}
+
+#[test]
+fn anonymous_feedback_does_not_create_governance_consensus() {
+    let (kb, _file) = tmp_kb();
+    let chunk_id = kb
+        .add(
+            "anonymous governance",
+            "note",
+            Some("anonymous"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    for _ in 0..5 {
+        let trace_id = attributed_trace(&kb, &chunk_id);
+        kb.record_detailed(
+            &trace_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "explicit",
+            true,
+            None,
+            Some(&[chunk_id.clone()]),
+            "user",
+            None,
+            None,
+            None,
+            0,
+            None,
+            "sdk",
+        )
+        .unwrap();
+    }
+
+    let proposals = kb
+        .storage
+        .query_chunks_params(
+            "SELECT COUNT(*) AS cnt FROM governance_proposals
+             WHERE chunk_id=? AND state='pending'",
+            rusqlite::params![chunk_id],
+        )
+        .unwrap();
+    assert_eq!(proposals[0]["cnt"].as_i64(), Some(0));
+}
+
+#[test]
 fn restoring_invalidated_chunk_resets_zero_confidence_baseline() {
     let (kb, _file) = tmp_kb();
     let chunk_id = kb
@@ -2793,7 +3237,7 @@ fn record_rejects_retrieved_but_unselected_attribution() {
 }
 
 #[test]
-fn unknown_outcome_can_be_resolved_but_final_outcome_is_immutable() {
+fn final_outcome_can_be_corrected_and_replayed() {
     let (kb, _file) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
     kb.record(
@@ -2830,22 +3274,32 @@ fn unknown_outcome_can_be_resolved_but_final_outcome_is_immutable() {
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(log["outcome"].as_str(), Some("ok"));
 
-    let error = kb
-        .record(
-            &trace_id,
-            None,
-            None,
-            None,
-            Some("fail"),
-            None,
-            None,
-            None,
-            None,
-            0,
-            "sdk",
+    kb.record(
+        &trace_id,
+        None,
+        None,
+        None,
+        Some("fail"),
+        None,
+        None,
+        None,
+        None,
+        0,
+        "sdk",
+    )
+    .unwrap();
+    let corrected = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
+    assert_eq!(corrected["outcome"].as_str(), Some("fail"));
+    let outcome_events = kb
+        .storage
+        .query_chunks_params(
+            "SELECT event FROM usage_trace
+             WHERE trace_id=? AND event IN ('task_ok','task_fail')",
+            rusqlite::params![trace_id],
         )
-        .unwrap_err();
-    assert!(matches!(error, InnateError::OutcomeConflict { .. }));
+        .unwrap();
+    assert_eq!(outcome_events.len(), 1);
+    assert_eq!(outcome_events[0]["event"].as_str(), Some("task_fail"));
 }
 
 #[test]
