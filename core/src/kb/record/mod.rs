@@ -176,7 +176,13 @@ impl KnowledgeBase {
                 "explicit" => 0.3,
                 "cited" => 0.25,
                 "inferred" => 0.15,
-                _ => unreachable!(),
+                // The parameter is validated above; this arm is only reachable if the
+                // stored used_attribution was tampered with outside the API.
+                other => {
+                    return Err(InnateError::InvalidState(format!(
+                        "invalid stored used attribution: {other}"
+                    )))
+                }
             };
             let existing_used_ids: Vec<String> = log
                 .get("used_ids")

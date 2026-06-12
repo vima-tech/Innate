@@ -24,11 +24,7 @@ fn safe_prompt_field(value: Option<&str>) -> String {
 fn build_distill_prompt(log: &Value) -> String {
     let query = safe_prompt_field(log.get("query").and_then(Value::as_str));
     let output = safe_prompt_field(log.get("output").and_then(Value::as_str));
-    let output_summary = safe_prompt_field(
-        log
-        .get("output_summary")
-        .and_then(Value::as_str)
-    );
+    let output_summary = safe_prompt_field(log.get("output_summary").and_then(Value::as_str));
     let nomination = safe_prompt_field(log.get("nomination").and_then(Value::as_str));
     let outcome = safe_prompt_field(log.get("outcome").and_then(Value::as_str));
 
@@ -84,14 +80,12 @@ fn build_distill_prompt_with_related(log: &Value, logs: &[Value]) -> String {
         .iter()
         .filter(|other| other.get("id").and_then(Value::as_str).unwrap_or("") != log_id)
         .filter(|other| {
-            context_key.is_some()
-                && other.get("context_key").and_then(Value::as_str) == context_key
+            context_key.is_some() && other.get("context_key").and_then(Value::as_str) == context_key
         })
         .take(4)
         .map(|other| {
             let query = safe_prompt_field(other.get("query").and_then(Value::as_str));
-            let summary =
-                safe_prompt_field(other.get("output_summary").and_then(Value::as_str));
+            let summary = safe_prompt_field(other.get("output_summary").and_then(Value::as_str));
             let outcome = safe_prompt_field(other.get("outcome").and_then(Value::as_str));
             format!("- Query: {query}; outcome: {outcome}; summary: {summary}")
         })
@@ -275,8 +269,9 @@ fn distill_entry_with(
         ))?;
         parsed = parse_distill_response(&raw);
     }
-    let items = parsed
-        .map_err(|error| InnateError::Other(format!("LLM distillation response invalid: {error}")))?;
+    let items = parsed.map_err(|error| {
+        InnateError::Other(format!("LLM distillation response invalid: {error}"))
+    })?;
     let mut out = Vec::new();
     for parsed in items {
         let content = parsed
@@ -347,9 +342,7 @@ fn extract_json(text: &str) -> &str {
 // Build distiller from settings
 // ---------------------------------------------------------------------------
 
-pub fn build_distiller(
-    config: &LlmConfig,
-) -> std::sync::Arc<dyn Distiller + Send + Sync> {
+pub fn build_distiller(config: &LlmConfig) -> std::sync::Arc<dyn Distiller + Send + Sync> {
     match config.provider.as_str() {
         "anthropic" => std::sync::Arc::new(AnthropicDistiller::new(config.clone())),
         _ => std::sync::Arc::new(OpenAiDistiller::new(config.clone())),
@@ -371,9 +364,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{
-        build_distill_prompt, distill_entry_with, distill_with, parse_distill_response,
-    };
+    use super::{build_distill_prompt, distill_entry_with, distill_with, parse_distill_response};
 
     #[test]
     fn prompt_redacts_secrets_before_external_llm_call() {
@@ -460,6 +451,7 @@ impl LlmEmbeddingProvider {
         });
 
         let response = ureq::post(&url)
+            .timeout(Duration::from_secs(30))
             .set("Authorization", &format!("Bearer {api_key}"))
             .set("Content-Type", "application/json")
             .send_json(&body)

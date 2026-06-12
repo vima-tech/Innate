@@ -109,7 +109,10 @@ pub(super) enum ConfigStatus {
 
 pub(super) fn configure_claude(agent: &Agent, binary: &Path, auto_allow: bool) -> ConfigStatus {
     let path = &agent.config;
-    let mut settings: Value = read_json(path).unwrap_or(json!({}));
+    let mut settings: Value = match read_json_object(path) {
+        Ok(v) => v,
+        Err(e) => return ConfigStatus::Error(e),
+    };
 
     let binary_str = binary.to_string_lossy().to_string();
 
@@ -129,35 +132,49 @@ pub(super) fn configure_claude(agent: &Agent, binary: &Path, auto_allow: bool) -
         return ConfigStatus::Unchanged(path.clone());
     }
 
-    // Set mcpServers.innate
-    settings
-        .as_object_mut()
-        .unwrap()
+    // Set mcpServers.innate (root is an object — guaranteed by read_json_object)
+    let root = settings.as_object_mut().unwrap();
+    let Some(mcp_servers) = root
         .entry("mcpServers")
         .or_insert(json!({}))
         .as_object_mut()
-        .unwrap()
-        .insert(
-            "innate".to_string(),
-            json!({
-                "type": "stdio",
-                "command": binary_str,
-                "args": ["mcp"]
-            }),
-        );
+    else {
+        return ConfigStatus::Error(format!(
+            "{}: \"mcpServers\" is not an object",
+            path.display()
+        ));
+    };
+    mcp_servers.insert(
+        "innate".to_string(),
+        json!({
+            "type": "stdio",
+            "command": binary_str,
+            "args": ["mcp"]
+        }),
+    );
 
     // Set permissions.allow
     if auto_allow {
-        let allow = settings
-            .as_object_mut()
-            .unwrap()
+        let Some(permissions) = root
             .entry("permissions")
             .or_insert(json!({}))
             .as_object_mut()
-            .unwrap()
+        else {
+            return ConfigStatus::Error(format!(
+                "{}: \"permissions\" is not an object",
+                path.display()
+            ));
+        };
+        let Some(arr) = permissions
             .entry("allow")
-            .or_insert(json!([]));
-        let arr = allow.as_array_mut().unwrap();
+            .or_insert(json!([]))
+            .as_array_mut()
+        else {
+            return ConfigStatus::Error(format!(
+                "{}: \"permissions.allow\" is not an array",
+                path.display()
+            ));
+        };
         let pat = "mcp__innate__*";
         if !arr.iter().any(|v| v.as_str() == Some(pat)) {
             arr.push(json!(pat));
@@ -245,21 +262,20 @@ pub(super) fn configure_opencode(agent: &Agent, binary: &Path, _auto_allow: bool
         }
     }
 
-    config
-        .as_object_mut()
-        .unwrap()
-        .entry("mcp")
-        .or_insert(json!({}))
-        .as_object_mut()
-        .unwrap()
-        .insert(
-            "innate".to_string(),
-            json!({
-                "type": "local",
-                "command": [binary_str, "mcp"],
-                "enabled": true
-            }),
-        );
+    let Some(root) = config.as_object_mut() else {
+        return ConfigStatus::Error(format!("{}: root is not a JSON object", path.display()));
+    };
+    let Some(mcp) = root.entry("mcp").or_insert(json!({})).as_object_mut() else {
+        return ConfigStatus::Error(format!("{}: \"mcp\" is not an object", path.display()));
+    };
+    mcp.insert(
+        "innate".to_string(),
+        json!({
+            "type": "local",
+            "command": [binary_str, "mcp"],
+            "enabled": true
+        }),
+    );
 
     match write_json(path, &config) {
         Ok(()) => ConfigStatus::Updated(path.clone()),
@@ -359,7 +375,10 @@ pub(super) fn remove_opencode_config() -> ConfigStatus {
 /// Append a Stop hook entry to the Claude Code settings at `config_path`.
 /// Uses the provided `binary` path so no Python interpreter is required.
 pub(super) fn configure_claude_stop_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
-    let mut settings: Value = read_json(config_path).unwrap_or(json!({}));
+    let mut settings: Value = match read_json_object(config_path) {
+        Ok(v) => v,
+        Err(e) => return ConfigStatus::Error(e),
+    };
 
     // Quote the binary path in case it contains spaces.
     let binary_str = binary.to_string_lossy();
@@ -390,19 +409,26 @@ pub(super) fn configure_claude_stop_hook(config_path: &Path, binary: &Path) -> C
         return ConfigStatus::Unchanged(config_path.to_path_buf());
     }
 
-    let hooks_map = settings
+    // Root is an object — guaranteed by read_json_object.
+    let Some(hooks_map) = settings
         .as_object_mut()
-        .expect("settings is object")
+        .unwrap()
         .entry("hooks")
         .or_insert(json!({}))
         .as_object_mut()
-        .expect("hooks is object");
+    else {
+        return ConfigStatus::Error(format!(
+            "{}: \"hooks\" is not an object",
+            config_path.display()
+        ));
+    };
 
-    let stop_arr = hooks_map
-        .entry("Stop")
-        .or_insert(json!([]))
-        .as_array_mut()
-        .expect("Stop is array");
+    let Some(stop_arr) = hooks_map.entry("Stop").or_insert(json!([])).as_array_mut() else {
+        return ConfigStatus::Error(format!(
+            "{}: \"hooks.Stop\" is not an array",
+            config_path.display()
+        ));
+    };
 
     stop_arr.push(json!({
         "hooks": [{"type": "command", "command": cmd}]

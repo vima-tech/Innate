@@ -28,10 +28,9 @@ pub fn open_kb(db_path: impl AsRef<std::path::Path>) -> Result<KnowledgeBase> {
     use std::sync::Arc;
     let s = settings::load();
 
-    let embedding: Option<Arc<dyn embedding::EmbeddingProvider>> = s
-        .embedding
-        .as_ref()
-        .map(|c| Arc::new(llm::LlmEmbeddingProvider::new(c.clone())) as Arc<dyn embedding::EmbeddingProvider>);
+    let embedding: Option<Arc<dyn embedding::EmbeddingProvider>> = s.embedding.as_ref().map(|c| {
+        Arc::new(llm::LlmEmbeddingProvider::new(c.clone())) as Arc<dyn embedding::EmbeddingProvider>
+    });
 
     let distiller: Option<Arc<dyn refine::Distiller>> = s
         .llm

@@ -60,6 +60,27 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&txt).ok()
 }
 
+/// Read a JSON config file whose root must be an object.
+/// A missing file yields an empty object; an unreadable, unparseable, or
+/// non-object file yields `Err` so an existing user config is never
+/// silently replaced by a rewrite.
+fn read_json_object(path: &Path) -> Result<Value, String> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(json!({})),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+        Ok(txt) => match serde_json::from_str::<Value>(&txt) {
+            Err(e) => Err(format!(
+                "cannot parse {}: {e} — fix the file and re-run",
+                path.display()
+            )),
+            Ok(v) if !v.is_object() => {
+                Err(format!("{}: root is not a JSON object", path.display()))
+            }
+            Ok(v) => Ok(v),
+        },
+    }
+}
+
 fn write_json(path: &Path, value: &Value) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

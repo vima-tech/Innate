@@ -63,17 +63,15 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
                  Is the database from an unsupported version?"
             )));
         }
-        let copy_last_used =
-            *to == "4.12" && column_exists(&conn, "chunks", "last_used_at")?;
+        let copy_last_used = *to == "4.12" && column_exists(&conn, "chunks", "last_used_at")?;
         // Run the step atomically.
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = conn.execute_batch(sql);
         match r {
             Ok(()) => {
                 if copy_last_used {
-                    if let Err(error) =
-                        conn.execute(
-                            "UPDATE chunks
+                    if let Err(error) = conn.execute(
+                        "UPDATE chunks
                              SET last_used_base=CASE
                                WHEN EXISTS (
                                  SELECT 1 FROM usage_trace u
@@ -81,9 +79,8 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
                                ) THEN NULL
                                ELSE last_used_at
                              END",
-                            [],
-                        )
-                    {
+                        [],
+                    ) {
                         let _ = conn.execute_batch("ROLLBACK");
                         return Err(error.into());
                     }

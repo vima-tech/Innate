@@ -56,7 +56,11 @@ pub fn run_server(db_path: PathBuf) -> anyhow::Result<()> {
         let _ = std::fs::create_dir_all(p);
     }
     let log: Mutex<Box<dyn io::Write + Send>> = Mutex::new(
-        match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
             Ok(f) => Box::new(f),
             Err(_) => Box::new(io::sink()),
         },
@@ -145,7 +149,12 @@ fn handle_tools_list(id: &Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": {"tools": tools}})
 }
 
-fn handle_tool_call(kb: &Mutex<KnowledgeBase>, id: &Value, params: &Value, log: &Mutex<Box<dyn io::Write + Send>>) -> Value {
+fn handle_tool_call(
+    kb: &Mutex<KnowledgeBase>,
+    id: &Value,
+    params: &Value,
+    log: &Mutex<Box<dyn io::Write + Send>>,
+) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -625,7 +634,9 @@ fn maybe_auto_start_daemon(db_path: &std::path::Path) {
     }
 
     // Spawn `innate --db <path> daemon start --watch ...` as a detached child process.
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
     let mut cmd = std::process::Command::new(&exe);
     // --db is a global flag that must come before the subcommand.
     cmd.arg("--db").arg(db_path);

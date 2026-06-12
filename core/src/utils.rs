@@ -232,17 +232,23 @@ pub fn pack_embedding(v: &[f32]) -> Vec<u8> {
 /// Unpack bytes into Vec<f32>.
 pub fn unpack_embedding(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
-    out.extend(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+    out.extend(
+        bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+    );
     out
 }
 
 /// Cosine similarity between two equal-length slices. Returns 0.0 on zero norms.
 /// Single-pass fold: computes dot product and both norms in one traversal.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let (dot, na2, nb2) = a.iter().zip(b.iter()).fold(
-        (0.0f32, 0.0f32, 0.0f32),
-        |(d, na, nb), (x, y)| (d + x * y, na + x * x, nb + y * y),
-    );
+    let (dot, na2, nb2) = a
+        .iter()
+        .zip(b.iter())
+        .fold((0.0f32, 0.0f32, 0.0f32), |(d, na, nb), (x, y)| {
+            (d + x * y, na + x * x, nb + y * y)
+        });
     if na2 == 0.0 || nb2 == 0.0 {
         0.0
     } else {

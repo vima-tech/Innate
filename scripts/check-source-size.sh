@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Always run from the repo root so the find paths below resolve.
+cd "$(dirname "$0")/.."
+
 warn_limit="${SOURCE_FILE_WARN_LINES:-800}"
 fail_limit="${SOURCE_FILE_MAX_LINES:-1200}"
 failed=0

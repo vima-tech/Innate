@@ -30,10 +30,8 @@ uuid       = { version = "1", features = ["v4"] }
 chrono     = { version = "0.4", features = ["serde"] }
 thiserror  = "1"
 sha2       = "0.10"
-tokio      = { version = "1", features = ["full"] }
 clap       = { version = "4", features = ["derive", "env"] }
 anyhow     = "1"
-tracing    = "0.1"
 dirs-next  = "2"
 libc       = "0.2"
 ureq       = { version = "2", features = ["json"] }
@@ -41,3 +39,8 @@ hmac       = { version = "0.12", features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

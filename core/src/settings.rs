@@ -77,8 +77,12 @@ impl LlmConfig {
             }
         }
         match self.provider.as_str() {
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()),
-            _ => std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()),
+            "anthropic" => std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty()),
+            _ => std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty()),
         }
     }
 
@@ -138,7 +142,9 @@ impl EmbeddingConfig {
                 return Some(k);
             }
         }
-        std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty())
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
     }
 
     pub fn resolved_base_url(&self) -> String {
@@ -235,7 +241,9 @@ impl R2Config {
                 return Some(k.clone());
             }
         }
-        std::env::var("INNATE_R2_ACCESS_KEY_ID").ok().filter(|k| !k.is_empty())
+        std::env::var("INNATE_R2_ACCESS_KEY_ID")
+            .ok()
+            .filter(|k| !k.is_empty())
     }
 
     pub fn resolved_secret_access_key(&self) -> Option<String> {
@@ -244,7 +252,9 @@ impl R2Config {
                 return Some(k.clone());
             }
         }
-        std::env::var("INNATE_R2_SECRET_ACCESS_KEY").ok().filter(|k| !k.is_empty())
+        std::env::var("INNATE_R2_SECRET_ACCESS_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
     }
 }
 

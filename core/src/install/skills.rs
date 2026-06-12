@@ -95,6 +95,10 @@ fn update_skill_lock(installing: bool) {
     let lock_path = home_dir().join(".agents").join(".skill-lock.json");
     let mut lock: Value =
         read_json(&lock_path).unwrap_or_else(|| json!({"version": 3, "skills": {}}));
+    // The lock file is innate's own metadata — reset a malformed root instead of panicking.
+    if !lock.is_object() {
+        lock = json!({"version": 3, "skills": {}});
+    }
 
     if installing {
         let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -104,24 +108,27 @@ fn update_skill_lock(installing: bool) {
             .map(str::to_string)
             .unwrap_or_else(|| now.clone());
 
-        lock.as_object_mut()
-            .unwrap()
-            .entry("skills")
-            .or_insert(json!({}))
+        let skills = lock
             .as_object_mut()
             .unwrap()
-            .insert(
-                "innate-memory".to_string(),
-                json!({
-                    "source": "local",
-                    "sourceType": "local",
-                    "sourceUrl": null,
-                    "skillPath": "skills/innate-memory/SKILL.md",
-                    "skillFolderHash": skill_content_hash(),
-                    "installedAt": installed_at,
-                    "updatedAt": now,
-                }),
-            );
+            .entry("skills")
+            .or_insert(json!({}));
+        // Same defensive reset for a malformed "skills" field.
+        if !skills.is_object() {
+            *skills = json!({});
+        }
+        skills.as_object_mut().unwrap().insert(
+            "innate-memory".to_string(),
+            json!({
+                "source": "local",
+                "sourceType": "local",
+                "sourceUrl": null,
+                "skillPath": "skills/innate-memory/SKILL.md",
+                "skillFolderHash": skill_content_hash(),
+                "installedAt": installed_at,
+                "updatedAt": now,
+            }),
+        );
     } else if let Some(skills) = lock.pointer_mut("/skills") {
         if let Some(obj) = skills.as_object_mut() {
             obj.remove("innate-memory");
