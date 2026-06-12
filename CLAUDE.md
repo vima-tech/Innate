@@ -157,9 +157,16 @@ Both SDKs wrap the CLI binary via subprocess — they are not native Rust FFI bi
 | `innate_approve/archive/invalidate/restore` | governance APIs |
 | `innate_mature_spark/promote_spark/drop_spark` | spark lifecycle |
 
-## SKILL.md (`skills/innate-memory/SKILL.md`)
+## SKILL.md
 
 - `name:` must match directory name (`innate-memory`)
 - `description:` is the agent activation signal — keep precise about WHEN to activate
 - MCP tools are the primary interface; CLI is the fallback
 - Body is plain markdown agent instructions; no code execution
+- The Skill is intentionally stored in two locations:
+  - `skills/innate-memory/SKILL.md` is the public source used by Skill installers.
+  - `core/assets/SKILL.md` is embedded in the Rust binary and used by `innate install`.
+- **Always modify both files together and keep their contents byte-for-byte identical.**
+  Never update, commit, or release a Skill change when only one copy has changed.
+- Before committing a Skill change, verify synchronization with:
+  `cmp skills/innate-memory/SKILL.md core/assets/SKILL.md`
