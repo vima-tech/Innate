@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
+pub use crate::backup::BackupCommands;
+pub use crate::daemon::DaemonCommands;
+pub use crate::hook::HookCommands;
+
 fn default_db() -> PathBuf {
     dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -186,55 +190,6 @@ pub enum Commands {
     },
 }
 
-#[derive(Subcommand)]
-pub enum BackupCommands {
-    /// Backup the database now (respects auto_backup_interval_hours check; use --force to skip)
-    Run {
-        /// Skip the 24-hour interval check and backup immediately
-        #[arg(long)]
-        force: bool,
-    },
-    /// Show last backup time and R2 config status
-    Status,
-    /// List all backups stored in R2
-    List,
-    /// Delete backups older than retention_days (keeps min_backups regardless)
-    Prune,
-}
-
-#[derive(Subcommand)]
-pub enum HookCommands {
-    /// Process a Claude Code Stop hook payload from stdin and record session events
-    Stop,
-}
-
-#[derive(Subcommand)]
-pub enum DaemonCommands {
-    /// Start the background log-watcher daemon
-    Start {
-        #[arg(long = "watch", value_name = "LOG_DIR")]
-        watch: Vec<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
-        pid_file: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
-        state_db: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
-        log_file: Option<std::path::PathBuf>,
-    },
-    /// Stop a running daemon
-    Stop {
-        #[arg(long, value_name = "PATH")]
-        pid_file: Option<std::path::PathBuf>,
-    },
-    /// Show daemon status
-    Status {
-        #[arg(long, value_name = "PATH")]
-        state_db: Option<std::path::PathBuf>,
-        #[arg(long, value_name = "PATH")]
-        pid_file: Option<std::path::PathBuf>,
-    },
-}
-
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_path = cli.db.unwrap_or_else(default_db);
@@ -265,11 +220,11 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     if let Commands::Daemon { action } = &cli.command {
-        return run_daemon(action, &db_path);
+        return crate::daemon::run_command(action, &db_path);
     }
 
     if let Commands::Backup { action } = &cli.command {
-        return run_backup(action, &db_path);
+        return crate::backup::run_command(action, &db_path);
     }
 
     if let Commands::Upgrade { version, check } = &cli.command {
@@ -277,9 +232,7 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     if let Commands::Hook { action } = &cli.command {
-        return match action {
-            HookCommands::Stop => run_hook_stop(),
-        };
+        return crate::hook::run_command(action);
     }
 
     let kb = crate::open_kb(&db_path)?;
@@ -513,258 +466,5 @@ pub fn run() -> anyhow::Result<()> {
         | Commands::Backup { .. }
         | Commands::Hook { .. } => unreachable!(),
     }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Daemon implementation
-// ---------------------------------------------------------------------------
-
-fn default_pid_file() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".innate")
-        .join("daemon.pid")
-}
-
-fn default_state_db() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".innate")
-        .join("daemon_state.sqlite")
-}
-
-fn default_log_file() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".innate")
-        .join("daemon.log")
-}
-
-fn run_daemon(action: &DaemonCommands, db_path: &std::path::Path) -> anyhow::Result<()> {
-    match action {
-        DaemonCommands::Start {
-            watch,
-            pid_file,
-            state_db,
-            log_file,
-        } => {
-            // Merge CLI --watch dirs with settings watch_dirs when CLI provides none.
-            let effective_watch: Vec<std::path::PathBuf> = if !watch.is_empty() {
-                watch.clone()
-            } else {
-                let s = crate::settings::load();
-                crate::settings::resolved_watch_dirs(&s)
-                    .into_iter()
-                    .map(std::path::PathBuf::from)
-                    .collect()
-            };
-            crate::daemon::start(
-                &effective_watch,
-                db_path,
-                pid_file.as_deref().unwrap_or(&default_pid_file()),
-                state_db.as_deref().unwrap_or(&default_state_db()),
-                log_file.as_deref().unwrap_or(&default_log_file()),
-            )
-        }
-        DaemonCommands::Stop { pid_file } => {
-            crate::daemon::stop(pid_file.as_deref().unwrap_or(&default_pid_file()))
-        }
-        DaemonCommands::Status { state_db, pid_file } => crate::daemon::status(
-            state_db.as_deref().unwrap_or(&default_state_db()),
-            pid_file.as_deref().unwrap_or(&default_pid_file()),
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Backup implementation
-// ---------------------------------------------------------------------------
-
-fn run_backup(action: &BackupCommands, db_path: &std::path::Path) -> anyhow::Result<()> {
-    use crate::backup::R2BackupService;
-
-    let settings = crate::settings::load();
-    let cfg = settings.backup.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No backup config found in ~/.innate/settings.json.\n\
-             Add a \"backup\" section with \"enable\": true and \"r2\" credentials to enable R2 backup."
-        )
-    })?;
-
-    // status works regardless of enable flag
-    if let BackupCommands::Status = action {
-        use crate::backup::R2BackupService;
-        let state = R2BackupService::last_backup_state();
-        println!("R2 backup enabled : {}", cfg.enable);
-        println!("R2 bucket         : {}", cfg.r2.as_ref().map(|r| r.bucket.as_str()).unwrap_or("-"));
-        println!("Last backup       : {}", state.last_backup_at.as_deref().unwrap_or("never"));
-        println!("Last backup key   : {}", state.last_backup_key.as_deref().unwrap_or("-"));
-        let due = R2BackupService::needs_backup(cfg.auto_backup_interval_hours);
-        println!("Backup due        : {}", if cfg.enable && due { "yes" } else if !cfg.enable { "disabled" } else { "no" });
-        println!("Interval (h)      : {}", cfg.auto_backup_interval_hours);
-        println!("Retention (days)  : {}", cfg.retention_days);
-        println!("Min backups       : {}", cfg.min_backups);
-        return Ok(());
-    }
-
-    if !cfg.enable {
-        anyhow::bail!(
-            "R2 backup is disabled (backup.enable = false).\n\
-             Set \"enable\": true in the backup section of ~/.innate/settings.json to activate."
-        );
-    }
-    let r2_cfg = cfg.r2.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("backup.r2 not configured in ~/.innate/settings.json")
-    })?;
-
-    match action {
-        BackupCommands::Run { force } => {
-            if !force && !R2BackupService::needs_backup(cfg.auto_backup_interval_hours) {
-                let state = R2BackupService::last_backup_state();
-                println!(
-                    "backup not due yet (last: {}; interval: {}h). Use --force to override.",
-                    state.last_backup_at.as_deref().unwrap_or("never"),
-                    cfg.auto_backup_interval_hours
-                );
-                return Ok(());
-            }
-            println!("Starting backup to R2 bucket '{}'…", r2_cfg.bucket);
-            let svc = R2BackupService::from_config(r2_cfg)?;
-            let result = svc.backup_now(db_path, cfg.retention_days, cfg.min_backups)?;
-            println!("Backed up: {} ({} bytes)", result.key, result.size_bytes);
-            if !result.prune.deleted.is_empty() {
-                println!("Pruned {} old backup(s):", result.prune.deleted.len());
-                for k in &result.prune.deleted {
-                    println!("  - {k}");
-                }
-            }
-            if result.prune.protected_by_min > 0 {
-                println!(
-                    "  ({} old backup(s) kept to satisfy min_backups={})",
-                    result.prune.protected_by_min, cfg.min_backups
-                );
-            }
-            println!("Done. {} backup(s) remain in R2.", result.prune.kept);
-        }
-        BackupCommands::Status => unreachable!(), // handled above
-        BackupCommands::List => {
-            let svc = R2BackupService::from_config(r2_cfg)?;
-            let backups = svc.list_backups()?;
-            if backups.is_empty() {
-                println!("No backups found in R2.");
-            } else {
-                println!("{} backup(s):", backups.len());
-                for b in &backups {
-                    println!("  {} | {} | {} bytes", b.last_modified, b.key, b.size_bytes);
-                }
-            }
-        }
-        BackupCommands::Prune => {
-            let svc = R2BackupService::from_config(r2_cfg)?;
-            let result = svc.prune_old_backups(cfg.retention_days, cfg.min_backups)?;
-            if result.deleted.is_empty() {
-                println!("Nothing to prune ({} backup(s) kept).", result.kept);
-            } else {
-                println!("Deleted {} backup(s):", result.deleted.len());
-                for k in &result.deleted {
-                    println!("  - {k}");
-                }
-                if result.protected_by_min > 0 {
-                    println!(
-                        "  ({} old backup(s) kept to satisfy min_backups={})",
-                        result.protected_by_min, cfg.min_backups
-                    );
-                }
-                println!("{} backup(s) remain.", result.kept);
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Hook implementation
-// ---------------------------------------------------------------------------
-
-fn extract_content_text(content: Option<&serde_json::Value>) -> String {
-    match content {
-        None => String::new(),
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => String::new(),
-    }
-}
-
-fn run_hook_stop() -> anyhow::Result<()> {
-    use std::io::{Read, Write};
-
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-
-    let data: serde_json::Value =
-        serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
-
-    let empty = vec![];
-    let transcript = data
-        .get("transcript")
-        .or_else(|| data.get("messages"))
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty);
-
-    let mut query = String::new();
-    let mut summary = String::new();
-
-    for m in transcript.iter().rev() {
-        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if query.is_empty() && role == "user" {
-            query = extract_content_text(m.get("content"))
-                .chars()
-                .take(200)
-                .collect();
-        }
-        if summary.is_empty() && role == "assistant" {
-            summary = extract_content_text(m.get("content"))
-                .chars()
-                .take(400)
-                .collect();
-        }
-        if !query.is_empty() && !summary.is_empty() {
-            break;
-        }
-    }
-
-    let mut events: Vec<serde_json::Value> = Vec::new();
-    if !query.is_empty() {
-        events.push(json!({"event_type": "session_start", "query": query.trim()}));
-    }
-    if !summary.is_empty() {
-        events.push(json!({"event_type": "tool_success", "output_summary": summary.trim(), "outcome": "ok"}));
-    }
-    events.push(json!({"event_type": "session_end"}));
-
-    let log_path = dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".innate")
-        .join("sessions")
-        .join("session.log");
-
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-
-    for event in &events {
-        writeln!(file, "{}", serde_json::to_string(event)?)?;
-    }
-
     Ok(())
 }

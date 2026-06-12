@@ -11,6 +11,11 @@ use sha2::{Digest, Sha256};
 
 use crate::settings::{BackupConfig, R2Config};
 
+mod command;
+
+pub(crate) use command::run_command;
+pub use command::BackupCommands;
+
 type HmacSha256 = Hmac<Sha256>;
 
 // ── Backup state (local cache of last backup time) ───────────────────────────
@@ -80,18 +85,18 @@ pub struct R2BackupService {
 
 impl R2BackupService {
     pub fn from_config(cfg: &R2Config) -> anyhow::Result<Self> {
-        let access_key_id = cfg
-            .resolved_access_key_id()
-            .ok_or_else(|| anyhow::anyhow!(
+        let access_key_id = cfg.resolved_access_key_id().ok_or_else(|| {
+            anyhow::anyhow!(
                 "R2 access_key_id not set; configure backup.r2.access_key_id \
                  or INNATE_R2_ACCESS_KEY_ID env var"
-            ))?;
-        let secret_access_key = cfg
-            .resolved_secret_access_key()
-            .ok_or_else(|| anyhow::anyhow!(
+            )
+        })?;
+        let secret_access_key = cfg.resolved_secret_access_key().ok_or_else(|| {
+            anyhow::anyhow!(
                 "R2 secret_access_key not set; configure backup.r2.secret_access_key \
                  or INNATE_R2_SECRET_ACCESS_KEY env var"
-            ))?;
+            )
+        })?;
         Ok(Self {
             account_id: cfg.account_id.clone(),
             bucket: cfg.bucket.clone(),
@@ -144,8 +149,13 @@ impl R2BackupService {
         ];
         hdrs.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let canonical_headers: String = hdrs.iter().map(|(k, v)| format!("{}:{}\n", k, v)).collect();
-        let signed_headers: String = hdrs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(";");
+        let canonical_headers: String =
+            hdrs.iter().map(|(k, v)| format!("{}:{}\n", k, v)).collect();
+        let signed_headers: String = hdrs
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect::<Vec<_>>()
+            .join(";");
 
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
@@ -289,7 +299,11 @@ impl R2BackupService {
 
         let prune = self.prune_old_backups(retention_days, min_backups)?;
 
-        Ok(BackupResult { key, size_bytes, prune })
+        Ok(BackupResult {
+            key,
+            size_bytes,
+            prune,
+        })
     }
 
     /// List all backup objects in R2.
@@ -430,7 +444,11 @@ fn parse_list_xml(body: &str) -> Vec<BackupInfo> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if let (Some(key), Some(last_modified)) = (key, lm) {
-            results.push(BackupInfo { key, last_modified, size_bytes: size });
+            results.push(BackupInfo {
+                key,
+                last_modified,
+                size_bytes: size,
+            });
         }
     }
     results

@@ -3,6 +3,7 @@ pub mod cli;
 pub mod daemon;
 pub mod embedding;
 pub mod errors;
+pub mod hook;
 pub mod install;
 pub mod kb;
 pub mod llm;
