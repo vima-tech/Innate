@@ -31,10 +31,38 @@ const TOOLS: &[(&str, &str)] = &[
     ("innate_mature_spark",   "Advance a spark maturity: seed → sprouting → incubating."),
     ("innate_promote_spark",  "Promote a spark to a full knowledge chunk."),
     ("innate_drop_spark",     "Drop (abandon) a spark."),
+    ("innate_backup",         "Backup or inspect R2 backups. action: run=backup now (honours interval unless force=true), status=show state, list=list backups in R2, prune=delete old backups."),
 ];
+
+fn default_mcp_log() -> PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".innate")
+        .join("mcp.log")
+}
+
+fn mcp_log(log: &Mutex<Box<dyn io::Write + Send>>, msg: &str) {
+    let ts = crate::utils::utc_now_iso();
+    if let Ok(mut w) = log.lock() {
+        let _ = writeln!(w, "{ts} {msg}");
+    }
+}
 
 pub fn run_server(db_path: PathBuf) -> anyhow::Result<()> {
     maybe_auto_start_daemon(&db_path);
+
+    let log_path = default_mcp_log();
+    if let Some(p) = log_path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let log: Mutex<Box<dyn io::Write + Send>> = Mutex::new(
+        match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            Ok(f) => Box::new(f),
+            Err(_) => Box::new(io::sink()),
+        },
+    );
+    mcp_log(&log, &format!("[mcp] started db={}", db_path.display()));
+
     let kb = Mutex::new(crate::open_kb(&db_path)?);
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -48,6 +76,7 @@ pub fn run_server(db_path: PathBuf) -> anyhow::Result<()> {
         let req: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
+                mcp_log(&log, &format!("[mcp] parse error: {e}"));
                 write_response(
                     &stdout,
                     json!({
@@ -67,7 +96,7 @@ pub fn run_server(db_path: PathBuf) -> anyhow::Result<()> {
         let response = match method {
             "initialize" => handle_initialize(&id),
             "tools/list" => handle_tools_list(&id),
-            "tools/call" => handle_tool_call(&kb, &id, &params),
+            "tools/call" => handle_tool_call(&kb, &id, &params, &log),
             "notifications/initialized" | "ping" => continue,
             _ => json!({
                 "jsonrpc": "2.0",
@@ -116,7 +145,7 @@ fn handle_tools_list(id: &Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": {"tools": tools}})
 }
 
-fn handle_tool_call(kb: &Mutex<KnowledgeBase>, id: &Value, params: &Value) -> Value {
+fn handle_tool_call(kb: &Mutex<KnowledgeBase>, id: &Value, params: &Value, log: &Mutex<Box<dyn io::Write + Send>>) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -126,22 +155,28 @@ fn handle_tool_call(kb: &Mutex<KnowledgeBase>, id: &Value, params: &Value) -> Va
     };
 
     match result {
-        Ok(v) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{"type": "text", "text": v.to_string()}],
-                "isError": false
-            }
-        }),
-        Err(e) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{"type": "text", "text": format!("error: {e}")}],
-                "isError": true
-            }
-        }),
+        Ok(v) => {
+            mcp_log(log, &format!("[mcp] tool={name} ok"));
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": v.to_string()}],
+                    "isError": false
+                }
+            })
+        }
+        Err(e) => {
+            mcp_log(log, &format!("[mcp] tool={name} err={e}"));
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": format!("error: {e}")}],
+                    "isError": true
+                }
+            })
+        }
     }
 }
 
@@ -338,6 +373,10 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             kb.drop_spark(&s("spark_id"), &s("reason"))?;
             Ok(json!({"ok": true}))
         }
+        "innate_backup" => {
+            let db_path = kb.storage.db_path.clone();
+            dispatch_backup(&s("action"), b("force", false), &db_path)
+        }
         _ => Err(crate::errors::InnateError::Other(format!(
             "unknown tool: {name}"
         ))),
@@ -353,6 +392,7 @@ fn tool_schema(name: &str) -> Value {
                 "budget": {"type": "integer", "description": "Token budget (default 6000)"},
                 "top": {"type": "integer", "description": "Max results"},
                 "include_sparks": {"type": "boolean"},
+                "expand_deps": {"type": "string", "enum": ["false","direct","closure"], "description": "Dependency expansion: false (default) | direct | closure"},
                 "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]}
             },
             "required": ["query"]
@@ -376,7 +416,7 @@ fn tool_schema(name: &str) -> Value {
                 "output_summary": {"type": "string"},
                 "nomination": {"type": "string"},
                 "priority": {"type": "integer"},
-                "source": {"type": "string"}
+                "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]}
             },
             "required": ["trace_id"]
         }),
@@ -441,7 +481,116 @@ fn tool_schema(name: &str) -> Value {
             },
             "required": ["spark_id"]
         }),
+        "innate_backup" => json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["run", "status", "list", "prune"],
+                    "description": "run=backup now, status=show last backup state, list=list R2 backups, prune=delete old backups"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "For action=run: skip the interval check and backup immediately (default false)"
+                }
+            },
+            "required": ["action"]
+        }),
         _ => json!({"type": "object", "properties": {}}),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backup dispatch (converts anyhow errors to InnateError::Other)
+// ---------------------------------------------------------------------------
+
+fn dispatch_backup(
+    action: &str,
+    force: bool,
+    db_path: &std::path::Path,
+) -> crate::errors::Result<Value> {
+    use crate::backup::R2BackupService;
+    use crate::errors::InnateError;
+
+    let settings = crate::settings::load();
+    let cfg = settings.backup.as_ref().ok_or_else(|| {
+        InnateError::Other(
+            "backup not configured — add a \"backup\" section with \"enable\": true \
+             and \"r2\" credentials to ~/.innate/settings.json"
+                .into(),
+        )
+    })?;
+    if !cfg.enable {
+        return Err(InnateError::Other(
+            "R2 backup is disabled (backup.enable = false). \
+             Set \"enable\": true in ~/.innate/settings.json to activate."
+                .into(),
+        ));
+    }
+    let r2_cfg = cfg.r2.as_ref().ok_or_else(|| {
+        InnateError::Other("backup.r2 not configured in ~/.innate/settings.json".into())
+    })?;
+
+    match action {
+        "run" => {
+            if !force && !R2BackupService::needs_backup(cfg.auto_backup_interval_hours) {
+                let state = R2BackupService::last_backup_state();
+                return Ok(json!({
+                    "ok": false,
+                    "reason": "not_due",
+                    "last_backup_at": state.last_backup_at,
+                    "interval_hours": cfg.auto_backup_interval_hours,
+                }));
+            }
+            let svc = R2BackupService::from_config(r2_cfg)
+                .map_err(|e| InnateError::Other(e.to_string()))?;
+            let result = svc
+                .backup_now(db_path, cfg.retention_days, cfg.min_backups)
+                .map_err(|e| InnateError::Other(e.to_string()))?;
+            Ok(json!({
+                "ok": true,
+                "key": result.key,
+                "size_bytes": result.size_bytes,
+                "pruned": result.prune.deleted,
+                "kept": result.prune.kept,
+                "protected_by_min": result.prune.protected_by_min,
+            }))
+        }
+        "status" => {
+            let state = R2BackupService::last_backup_state();
+            Ok(json!({
+                "bucket": r2_cfg.bucket,
+                "last_backup_at": state.last_backup_at,
+                "last_backup_key": state.last_backup_key,
+                "backup_due": R2BackupService::needs_backup(cfg.auto_backup_interval_hours),
+                "interval_hours": cfg.auto_backup_interval_hours,
+                "retention_days": cfg.retention_days,
+                "min_backups": cfg.min_backups,
+            }))
+        }
+        "list" => {
+            let svc = R2BackupService::from_config(r2_cfg)
+                .map_err(|e| InnateError::Other(e.to_string()))?;
+            let backups = svc
+                .list_backups()
+                .map_err(|e| InnateError::Other(e.to_string()))?;
+            Ok(json!({"backups": backups}))
+        }
+        "prune" => {
+            let svc = R2BackupService::from_config(r2_cfg)
+                .map_err(|e| InnateError::Other(e.to_string()))?;
+            let result = svc
+                .prune_old_backups(cfg.retention_days, cfg.min_backups)
+                .map_err(|e| InnateError::Other(e.to_string()))?;
+            Ok(json!({
+                "deleted": result.deleted,
+                "kept": result.kept,
+                "protected_by_min": result.protected_by_min,
+            }))
+        }
+        other => Err(InnateError::Other(format!(
+            "unknown backup action '{other}'; valid: run, status, list, prune"
+        ))),
     }
 }
 

@@ -16,6 +16,9 @@ pub struct Settings {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon: Option<DaemonConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +145,97 @@ pub struct DaemonConfig {
 
 fn default_true() -> bool {
     true
+}
+
+// ---------------------------------------------------------------------------
+// Backup config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupConfig {
+    /// Master switch — backup is disabled by default. Set to true to enable.
+    #[serde(default)]
+    pub enable: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r2: Option<R2Config>,
+
+    /// Auto-backup interval in hours (default: 24).
+    #[serde(default = "default_backup_interval_hours")]
+    pub auto_backup_interval_hours: u64,
+
+    /// Delete backups older than this many days (default: 60).
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+
+    /// Always keep at least this many backup files regardless of age (default: 5).
+    #[serde(default = "default_min_backups")]
+    pub min_backups: usize,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            r2: None,
+            auto_backup_interval_hours: default_backup_interval_hours(),
+            retention_days: default_retention_days(),
+            min_backups: default_min_backups(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct R2Config {
+    /// Cloudflare account ID (found in the R2 dashboard URL).
+    pub account_id: String,
+
+    /// R2 bucket name.
+    pub bucket: String,
+
+    /// R2 API token access key ID. Env override: INNATE_R2_ACCESS_KEY_ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_key_id: Option<String>,
+
+    /// R2 API token secret access key. Env override: INNATE_R2_SECRET_ACCESS_KEY.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_access_key: Option<String>,
+
+    /// Optional key prefix (e.g. "innate/"). Default: "".
+    #[serde(default)]
+    pub prefix: String,
+}
+
+impl R2Config {
+    pub fn resolved_access_key_id(&self) -> Option<String> {
+        if let Some(ref k) = self.access_key_id {
+            if !k.is_empty() {
+                return Some(k.clone());
+            }
+        }
+        std::env::var("INNATE_R2_ACCESS_KEY_ID").ok().filter(|k| !k.is_empty())
+    }
+
+    pub fn resolved_secret_access_key(&self) -> Option<String> {
+        if let Some(ref k) = self.secret_access_key {
+            if !k.is_empty() {
+                return Some(k.clone());
+            }
+        }
+        std::env::var("INNATE_R2_SECRET_ACCESS_KEY").ok().filter(|k| !k.is_empty())
+    }
+}
+
+fn default_backup_interval_hours() -> u64 {
+    24
+}
+
+fn default_retention_days() -> u64 {
+    60
+}
+
+fn default_min_backups() -> usize {
+    5
 }
 
 // ---------------------------------------------------------------------------

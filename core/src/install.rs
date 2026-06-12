@@ -1312,6 +1312,25 @@ pub fn run_install() -> anyhow::Result<()> {
                     }
                 }
             }
+
+            // Install Stop hook so daemon gets session events automatically.
+            match configure_claude_stop_hook(&agent.config, &binary_path) {
+                ConfigStatus::Updated(p) => {
+                    result_line(&format!(
+                        "{}: Stop hook → {}",
+                        bold("claude"),
+                        gray(&tilde_path(&p))
+                    ));
+                }
+                ConfigStatus::Unchanged(_) => {}
+                ConfigStatus::Skipped(_) => {}
+                ConfigStatus::Error(e) => {
+                    warn_line(&format!(
+                        "{}: \x1b[31mStop hook error — {e}\x1b[0m",
+                        bold("claude")
+                    ));
+                }
+            }
         }
     }
     sep();
@@ -1606,22 +1625,30 @@ fn configure_llm_interactive() {
 fn configure_daemon_interactive() {
     use crate::settings::{self, DaemonConfig};
 
+    // Auto-create the default hooks directory.
+    let hooks_dir = home_dir().join(".innate").join("sessions");
+    let _ = std::fs::create_dir_all(&hooks_dir);
+    let default_watch = "~/.innate/sessions".to_string();
+
     let want = prompt_confirm(
-        "Configure daemon auto-start? (auto-learns from agent conversations)",
-        false,
+        "Enable daemon auto-collection? (auto-evolves knowledge after each session)",
+        true,
     );
     if !want {
         return;
     }
 
-    info("The daemon watches directories for .log files written by agents.");
-    info("Example: ~/.claude/logs   or the directory your agent writes sessions to.");
+    info(&format!(
+        "Default watch dir: {}  (created automatically)",
+        bold(&default_watch)
+    ));
+    info("Add more directories below, or press Enter to use the default only.");
     sep();
 
-    let mut watch_dirs: Vec<String> = Vec::new();
+    let mut watch_dirs: Vec<String> = vec![default_watch];
     loop {
         let dir = prompt_text(
-            "Watch directory path",
+            "Additional watch directory",
             "",
             "(leave blank to finish, ~ is expanded)",
         );
@@ -1632,21 +1659,10 @@ fn configure_daemon_interactive() {
         result_line(&format!("Added: {dir}"));
     }
 
-    if watch_dirs.is_empty() {
-        warn_line("No watch directories added — daemon will not auto-start.");
-        sep();
-        return;
-    }
-
-    let auto_start = prompt_confirm(
-        "Auto-start daemon when the MCP server launches? (recommended)",
-        true,
-    );
-
     let mut s = settings::load();
     s.daemon = Some(DaemonConfig {
         watch_dirs,
-        auto_start,
+        auto_start: true,
     });
 
     match settings::save(&s) {
@@ -1657,4 +1673,62 @@ fn configure_daemon_interactive() {
         Err(e) => warn_line(&format!("Could not save daemon config: {e}")),
     }
     sep();
+}
+
+/// Append a Stop hook entry to the Claude Code settings at `config_path`.
+/// Uses the provided `binary` path so no Python interpreter is required.
+fn configure_claude_stop_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
+    let mut settings: Value = read_json(config_path).unwrap_or(json!({}));
+
+    // Quote the binary path in case it contains spaces.
+    let binary_str = binary.to_string_lossy();
+    let cmd = if binary_str.contains(' ') {
+        format!("\"{}\" hook stop", binary_str)
+    } else {
+        format!("{} hook stop", binary_str)
+    };
+
+    // Idempotence check — skip if the command is already present.
+    let already = settings
+        .pointer("/hooks/Stop")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter().any(|h| {
+                h.pointer("/hooks")
+                    .and_then(Value::as_array)
+                    .map(|cmds| {
+                        cmds.iter()
+                            .any(|c| c.get("command").and_then(Value::as_str) == Some(&cmd))
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    if already {
+        return ConfigStatus::Unchanged(config_path.to_path_buf());
+    }
+
+    let hooks_map = settings
+        .as_object_mut()
+        .expect("settings is object")
+        .entry("hooks")
+        .or_insert(json!({}))
+        .as_object_mut()
+        .expect("hooks is object");
+
+    let stop_arr = hooks_map
+        .entry("Stop")
+        .or_insert(json!([]))
+        .as_array_mut()
+        .expect("Stop is array");
+
+    stop_arr.push(json!({
+        "hooks": [{"type": "command", "command": cmd}]
+    }));
+
+    match write_json(config_path, &settings) {
+        Ok(()) => ConfigStatus::Updated(config_path.to_path_buf()),
+        Err(e) => ConfigStatus::Error(e.to_string()),
+    }
 }

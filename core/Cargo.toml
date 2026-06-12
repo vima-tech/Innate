@@ -1,6 +1,6 @@
 [package]
 name        = "innate"
-version     = "0.1.6"
+version     = "0.1.7"
 edition     = "2021"
 license     = "MIT"
 authors     = ["vima-tech"]
@@ -37,6 +37,7 @@ tracing    = "0.1"
 dirs-next  = "2"
 libc       = "0.2"
 ureq       = { version = "2", features = ["json"] }
+hmac       = { version = "0.12", features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

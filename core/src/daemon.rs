@@ -278,6 +278,8 @@ pub fn run_watch_loop(
     // Main poll loop: 500 ms tick.
     let mut last_evolve_poll = std::time::Instant::now();
     const EVOLVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut last_backup_poll = std::time::Instant::now();
+    const BACKUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     loop {
         for dir in watch_dirs {
             let dir_path = std::path::Path::new(dir);
@@ -306,6 +308,13 @@ pub fn run_watch_loop(
                 );
             }
             last_evolve_poll = std::time::Instant::now();
+        }
+        if last_backup_poll.elapsed() >= BACKUP_POLL_INTERVAL {
+            if let Err(error) = call_cli_backup(db_path) {
+                let _ = writeln!(logger, "[innate-daemon] auto-backup failed: {error}");
+                record_daemon_error(&state_db, "<scheduler>", "auto_backup", &error.to_string());
+            }
+            last_backup_poll = std::time::Instant::now();
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
@@ -361,17 +370,30 @@ fn process_log_file(
         return;
     }
 
-    let reader = std::io::BufReader::new(&mut f);
+    let mut reader = std::io::BufReader::new(&mut f);
     let mut new_offset = start_offset;
+    let mut line_buf = String::new();
 
-    for line_res in reader.lines() {
-        let line = match line_res {
-            Ok(l) => l,
+    loop {
+        let line_start_offset = new_offset;
+        line_buf.clear();
+        let bytes_read = match reader.read_line(&mut line_buf) {
+            Ok(n) => n,
             Err(_) => break,
         };
-        new_offset += line.len() as i64 + 1; // +1 for newline
+        if bytes_read == 0 {
+            break; // EOF
+        }
+        // Partial line at EOF (no trailing newline): leave offset before this line
+        // so it is re-read once the writer completes it.
+        if !line_buf.ends_with('\n') {
+            new_offset = line_start_offset;
+            break;
+        }
+        new_offset += bytes_read as i64;
+        let line = line_buf.trim_end_matches('\n').trim_end_matches('\r');
 
-        let Some(event) = parse_log_event(&line) else {
+        let Some(event) = parse_log_event(line) else {
             continue;
         };
         let event_type = event.kind;
@@ -382,7 +404,7 @@ fn process_log_file(
         let event_id = event
             .event_id
             .clone()
-            .unwrap_or_else(|| event_id_for_line(path_str.as_ref(), &inode, new_offset, &line));
+            .unwrap_or_else(|| event_id_for_line(path_str.as_ref(), &inode, new_offset, line));
 
         // Skip if already processed.
         let already: i64 = state_db
@@ -410,9 +432,10 @@ fn process_log_file(
                         "INSERT OR IGNORE INTO processed_events(event_id, watch_path, trace_id, event_type, ts) VALUES (?,?,?,?,?)",
                         rusqlite::params![event_id, path_str.as_ref(), &tid, event_type, &ts],
                     );
+                    let _ = writeln!(log, "{ts} [daemon] start trace={tid} query={query:?}");
                 }
                 Err(e) => {
-                    let _ = writeln!(log, "[innate-daemon] recall for start event failed: {e}");
+                    let _ = writeln!(log, "{} [daemon] start recall failed: {e}", crate::utils::utc_now_iso());
                     record_daemon_error(state_db, path_str.as_ref(), "recall", &e.to_string());
                 }
             }
@@ -445,9 +468,10 @@ fn process_log_file(
                          VALUES (?,?,?,?,?)",
                         rusqlite::params![event_id, path_str.as_ref(), trace_id, event_type, ts],
                     );
+                    let _ = writeln!(log, "{ts} [daemon] end evolve ok");
                 }
                 Err(e) => {
-                    let _ = writeln!(log, "[innate-daemon] evolve at session end failed: {e}");
+                    let _ = writeln!(log, "{ts} [daemon] end evolve failed: {e}");
                     record_daemon_error(state_db, path_str.as_ref(), "evolve", &e.to_string());
                 }
             }
@@ -474,9 +498,10 @@ fn process_log_file(
                          VALUES (?,?,?,?,?)",
                         rusqlite::params![event_id, path_str.as_ref(), tid, event_type, ts],
                     );
+                    let _ = writeln!(log, "{ts} [daemon] {event_type} record trace={tid} ok");
                 }
                 Err(e) => {
-                    let _ = writeln!(log, "[innate-daemon] record failed for trace {tid}: {e}");
+                    let _ = writeln!(log, "{ts} [daemon] {event_type} record trace={tid} failed: {e}");
                     record_daemon_error(state_db, path_str.as_ref(), "record", &e.to_string());
                 }
             }
@@ -700,6 +725,18 @@ fn call_cli_recall(db_path: &str, query: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no trace_id in recall output"))
 }
 
+fn call_cli_backup(db_path: &str) -> anyhow::Result<()> {
+    let self_exe = std::env::current_exe()?;
+    let status = std::process::Command::new(&self_exe)
+        .args(["--db", db_path, "backup", "run"])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("innate backup run exited {:?}", status.code())
+    }
+}
+
 fn call_cli_evolve(db_path: &str, trigger: &str) -> anyhow::Result<()> {
     let self_exe = std::env::current_exe()?;
     let run = || {
@@ -750,7 +787,7 @@ fn process_alive(_pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_id_for_line, init_state_db, parse_log_event};
+    use super::{event_id_for_line, init_state_db, parse_log_event, process_log_file};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -819,5 +856,67 @@ mod tests {
         let before = event_id_for_line("/tmp/agent.log", "inode-1", 42, "Tests passed");
         let after = event_id_for_line("/tmp/agent.log", "inode-2", 42, "Tests passed");
         assert_ne!(before, after);
+    }
+
+    fn open_state_db(path: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(super::DAEMON_SCHEMA).unwrap();
+        conn
+    }
+
+    fn saved_offset(state_db: &rusqlite::Connection, path: &std::path::Path) -> i64 {
+        state_db
+            .query_row(
+                "SELECT last_processed_offset FROM watch_state WHERE watch_path=?",
+                rusqlite::params![path.to_string_lossy().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+    }
+
+    // A partial last line (no trailing newline) must not advance the saved
+    // offset past the last complete line.  If the writer later completes the
+    // line, the daemon re-reads from the correct position.
+    #[test]
+    fn partial_last_line_does_not_advance_offset() {
+        let log_file = NamedTempFile::new().unwrap();
+        let state_file = NamedTempFile::new().unwrap();
+        let state_db = open_state_db(state_file.path());
+        let mut sink = std::io::sink();
+
+        let complete = b"not-an-event\nnot-an-event\n";
+        let partial = b"incomplete";
+        std::fs::write(log_file.path(), [complete.as_ref(), partial.as_ref()].concat()).unwrap();
+
+        process_log_file(log_file.path(), &state_db, "/dev/null", &mut sink);
+
+        assert_eq!(
+            saved_offset(&state_db, log_file.path()),
+            complete.len() as i64
+        );
+    }
+
+    // After a partial last line is completed, the daemon re-reads from the
+    // saved offset and correctly processes the now-complete line.
+    #[test]
+    fn completed_partial_line_is_processed_on_next_poll() {
+        let log_file = NamedTempFile::new().unwrap();
+        let state_file = NamedTempFile::new().unwrap();
+        let state_db = open_state_db(state_file.path());
+        let mut sink = std::io::sink();
+
+        std::fs::write(log_file.path(), b"not-an-event\nincomplete").unwrap();
+        process_log_file(log_file.path(), &state_db, "/dev/null", &mut sink);
+        assert_eq!(
+            saved_offset(&state_db, log_file.path()),
+            b"not-an-event\n".len() as i64
+        );
+
+        std::fs::write(log_file.path(), b"not-an-event\nincomplete-now-done\n").unwrap();
+        process_log_file(log_file.path(), &state_db, "/dev/null", &mut sink);
+        assert_eq!(
+            saved_offset(&state_db, log_file.path()),
+            b"not-an-event\nincomplete-now-done\n".len() as i64
+        );
     }
 }
