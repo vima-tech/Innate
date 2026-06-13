@@ -14,8 +14,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Check source file size
         run: ./scripts/check-source-size.sh
+      - name: Clippy (deny warnings)
+        working-directory: core
+        run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         working-directory: core
         run: cargo test
+
+  python-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python SDK (with dev deps)
+        working-directory: sdks/python
+        run: pip install -e ".[dev]"
+      - name: Run Python tests
+        working-directory: sdks/python
+        run: python -m pytest -q
+
+  typescript-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install TypeScript SDK deps
+        working-directory: sdks/typescript
+        run: npm install
+      - name: Build TypeScript SDK
+        working-directory: sdks/typescript
+        run: npm run build

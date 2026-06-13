@@ -14,19 +14,20 @@ fn evolve_preserves_replayable_usage_facts_and_counts() {
         )
         .unwrap();
     let trace_id = attributed_trace(&kb, &chunk_id);
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        Some("completed"),
-        Some("ok"),
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: Some("completed"),
+        outcome: Some("ok"),
+        used: Some(std::slice::from_ref(&chunk_id)),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.storage
         .conn_execute(
@@ -70,19 +71,20 @@ fn feedback_can_be_corrected_after_successful_evolve() {
         .as_f64()
         .unwrap();
     let trace_id = attributed_trace(&kb, &chunk_id);
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: None,
+        feedback_down: Some(std::slice::from_ref(&chunk_id)),
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.storage
         .conn_execute(
@@ -92,19 +94,20 @@ fn feedback_can_be_corrected_after_successful_evolve() {
         .unwrap();
 
     kb.evolve("manual").unwrap();
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: Some(std::slice::from_ref(&chunk_id)),
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let chunk = kb.storage.get_chunk(&chunk_id).unwrap().unwrap();
@@ -125,25 +128,25 @@ fn feedback_can_be_corrected_after_successful_evolve() {
 fn completed_trace_without_outcome_reaches_a_terminal_distill_state() {
     let (kb, _file) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record_detailed(
-        &trace_id,
-        Some("completed without outcome"),
-        None,
-        Some("reusable material"),
-        None,
-        None,
-        "explicit",
-        true,
-        None,
-        None,
-        "user",
-        None,
-        None,
-        None,
-        0,
-        Some("completed"),
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("completed without outcome"),
+        output: None,
+        output_summary: Some("reusable material"),
+        outcome: None,
+        used: None,
+        used_attribution: "explicit",
+        used_complete: Some(true),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: None,
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: Some("completed"),
+        source: "sdk",
+    })
     .unwrap();
 
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
@@ -159,39 +162,40 @@ fn usage_annotation_rate_excludes_non_completed_traces() {
         .add("metric attribution", "note", None, None, "manual", None)
         .unwrap();
     let running_trace = attributed_trace(&kb, &chunk_id);
-    kb.record_detailed(
-        &running_trace,
-        None,
-        None,
-        None,
-        None,
-        Some(&[chunk_id]),
-        "explicit",
-        true,
-        None,
-        None,
-        "user",
-        None,
-        None,
-        None,
-        0,
-        Some("running"),
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &running_trace,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(&[chunk_id]),
+        used_attribution: "explicit",
+        used_complete: Some(true),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: None,
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: Some("running"),
+        source: "sdk",
+    })
     .unwrap();
-    kb.record(
-        &crate::utils::gen_uuid(),
-        Some("completed"),
-        None,
-        None,
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &crate::utils::gen_uuid(),
+        query: Some("completed"),
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let inspect = kb.inspect().unwrap();
@@ -290,19 +294,20 @@ fn migration_4_14_repairs_existing_4_13_baselines_and_cost_history() {
             .add("migration repair", "note", None, None, "manual", None)
             .unwrap();
         let trace_id = attributed_trace(&kb, &chunk_id);
-        kb.record(
-            &trace_id,
-            None,
-            None,
-            Some("repair material"),
-            Some("ok"),
-            Some(std::slice::from_ref(&chunk_id)),
-            None,
-            None,
-            None,
-            0,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &trace_id,
+            query: None,
+            output: None,
+            output_summary: Some("repair material"),
+            outcome: Some("ok"),
+            used: Some(std::slice::from_ref(&chunk_id)),
+            feedback_up: None,
+            feedback_down: None,
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap();
         kb.evolve("manual").unwrap();
         kb.storage

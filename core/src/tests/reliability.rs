@@ -114,19 +114,20 @@ fn record_rejects_chunk_not_attributed_to_trace() {
         .add("unattributed", "note", Some("u"), None, "manual", None)
         .unwrap();
     let error = kb
-        .record(
-            &crate::utils::gen_uuid(),
-            Some("q"),
-            None,
-            None,
-            Some("ok"),
-            Some(&[chunk_id]),
-            None,
-            None,
-            None,
-            0,
-            "sdk",
-        )
+        .record(RecordParams {
+            trace_id: &crate::utils::gen_uuid(),
+            query: Some("q"),
+            output: None,
+            output_summary: None,
+            outcome: Some("ok"),
+            used: Some(&[chunk_id]),
+            feedback_up: None,
+            feedback_down: None,
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap_err();
     assert!(matches!(error, InnateError::InvalidState(_)));
 }
@@ -142,19 +143,20 @@ fn outcome_before_used_closes_the_same_feedback_loop() {
         .as_f64()
         .unwrap();
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let after_outcome = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
         .as_f64()
@@ -164,19 +166,20 @@ fn outcome_before_used_closes_the_same_feedback_loop() {
         "unknown usage must not imply unused"
     );
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(std::slice::from_ref(&chunk_id)),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let after_used = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
         .as_f64()
@@ -201,33 +204,35 @@ fn corrected_used_declaration_replays_confidence_and_counts() {
         .unwrap();
     let trace_id = attributed_trace_many(&kb, &[first.clone(), second.clone()]);
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        Some("ok"),
-        Some(std::slice::from_ref(&first)),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: Some(std::slice::from_ref(&first)),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&second)),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(std::slice::from_ref(&second)),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.builtin_curate_impl(&CurateScope::default()).unwrap();
 
@@ -253,25 +258,25 @@ fn partial_used_declaration_does_not_penalize_omitted_chunks() {
         .unwrap();
     let trace_id = attributed_trace_many(&kb, &[used.clone(), omitted.clone()]);
 
-    kb.record_detailed(
-        &trace_id,
-        None,
-        None,
-        None,
-        Some("ok"),
-        Some(&[used]),
-        "explicit",
-        false,
-        None,
-        None,
-        "user",
-        None,
-        None,
-        None,
-        0,
-        None,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: Some(&[used]),
+        used_attribution: "explicit",
+        used_complete: Some(false),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: None,
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: None,
+        source: "sdk",
+    })
     .unwrap();
 
     let row = kb.storage.get_chunk(&omitted).unwrap().unwrap();
@@ -337,25 +342,25 @@ fn repeated_feedback_from_one_actor_is_capped_for_governance() {
         .unwrap();
     for _ in 0..5 {
         let trace_id = attributed_trace(&kb, &chunk_id);
-        kb.record_detailed(
-            &trace_id,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "explicit",
-            true,
-            None,
-            Some(std::slice::from_ref(&chunk_id)),
-            "user",
-            Some("same-user"),
-            None,
-            None,
-            0,
-            None,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &trace_id,
+            query: None,
+            output: None,
+            output_summary: None,
+            outcome: None,
+            used: None,
+            used_attribution: "explicit",
+            used_complete: Some(true),
+            feedback_up: None,
+            feedback_down: Some(std::slice::from_ref(&chunk_id)),
+            feedback_kind: "user",
+            feedback_actor: Some("same-user"),
+            feedback_reason: None,
+            nomination: None,
+            priority: 0,
+            task_state: None,
+            source: "sdk",
+        })
         .unwrap();
     }
     let pending = kb
@@ -384,25 +389,25 @@ fn repeated_curate_does_not_double_count_open_trace_facts() {
         .unwrap();
     let trace_id = attributed_trace(&kb, &chunk_id);
 
-    kb.record_detailed(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        "explicit",
-        false,
-        None,
-        None,
-        "user",
-        Some("actor"),
-        None,
-        None,
-        0,
-        Some("running"),
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(std::slice::from_ref(&chunk_id)),
+        used_attribution: "explicit",
+        used_complete: Some(false),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: Some("actor"),
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: Some("running"),
+        source: "sdk",
+    })
     .unwrap();
 
     kb.builtin_curate_impl(&CurateScope::default()).unwrap();
@@ -424,19 +429,20 @@ fn terminal_trace_usage_can_be_corrected_after_curate() {
         .unwrap();
     let trace_id = attributed_trace_many(&kb, &[first.clone(), second.clone()]);
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        Some("completed"),
-        Some("ok"),
-        Some(std::slice::from_ref(&first)),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: Some("completed"),
+        outcome: Some("ok"),
+        used: Some(std::slice::from_ref(&first)),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.storage
         .conn_execute(
@@ -446,19 +452,20 @@ fn terminal_trace_usage_can_be_corrected_after_curate() {
         .unwrap();
     kb.builtin_curate_impl(&CurateScope::default()).unwrap();
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&second)),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(std::slice::from_ref(&second)),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.builtin_curate_impl(&CurateScope::default()).unwrap();
 
@@ -491,25 +498,25 @@ fn partial_used_reports_merge_until_a_complete_report_replaces_them() {
     let trace_id = attributed_trace_many(&kb, &[first.clone(), second.clone()]);
 
     for chunk_id in [&first, &second] {
-        kb.record_detailed(
-            &trace_id,
-            None,
-            None,
-            None,
-            None,
-            Some(std::slice::from_ref(chunk_id)),
-            "explicit",
-            false,
-            None,
-            None,
-            "user",
-            None,
-            None,
-            None,
-            0,
-            Some("running"),
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &trace_id,
+            query: None,
+            output: None,
+            output_summary: None,
+            outcome: None,
+            used: Some(std::slice::from_ref(chunk_id)),
+            used_attribution: "explicit",
+            used_complete: Some(false),
+            feedback_up: None,
+            feedback_down: None,
+            feedback_kind: "user",
+            feedback_actor: None,
+            feedback_reason: None,
+            nomination: None,
+            priority: 0,
+            task_state: Some("running"),
+            source: "sdk",
+        })
         .unwrap();
     }
 
@@ -521,25 +528,25 @@ fn partial_used_reports_merge_until_a_complete_report_replaces_them() {
         std::collections::HashSet::from([first.clone(), second.clone()])
     );
 
-    kb.record_detailed(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&second)),
-        "explicit",
-        true,
-        None,
-        None,
-        "user",
-        None,
-        None,
-        None,
-        0,
-        Some("running"),
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(std::slice::from_ref(&second)),
+        used_attribution: "explicit",
+        used_complete: Some(true),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: None,
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: Some("running"),
+        source: "sdk",
+    })
     .unwrap();
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     let used: Vec<String> = serde_json::from_str(log["used_ids"].as_str().unwrap()).unwrap();
@@ -557,45 +564,45 @@ fn partial_used_reports_preserve_per_chunk_attribution() {
         .unwrap();
     let trace_id = attributed_trace_many(&kb, &[first.clone(), second.clone()]);
 
-    kb.record_detailed(
-        &trace_id,
-        None,
-        None,
-        None,
-        Some("ok"),
-        Some(std::slice::from_ref(&first)),
-        "explicit",
-        false,
-        None,
-        None,
-        "user",
-        None,
-        None,
-        None,
-        0,
-        Some("completed"),
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: Some(std::slice::from_ref(&first)),
+        used_attribution: "explicit",
+        used_complete: Some(false),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: None,
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: Some("completed"),
+        source: "sdk",
+    })
     .unwrap();
-    kb.record_detailed(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&second)),
-        "inferred",
-        false,
-        None,
-        None,
-        "user",
-        None,
-        None,
-        None,
-        0,
-        None,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(std::slice::from_ref(&second)),
+        used_attribution: "inferred",
+        used_complete: Some(false),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: None,
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: None,
+        source: "sdk",
+    })
     .unwrap();
 
     let rows = kb

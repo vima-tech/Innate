@@ -31,19 +31,20 @@ fn distill_failure_is_isolated_to_the_failing_log() {
     )
     .unwrap();
     for query in ["good", "bad"] {
-        kb.record(
-            &crate::utils::gen_uuid(),
-            Some(query),
-            None,
-            Some("material"),
-            Some("ok"),
-            None,
-            None,
-            None,
-            None,
-            0,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &crate::utils::gen_uuid(),
+            query: Some(query),
+            output: None,
+            output_summary: Some("material"),
+            outcome: Some("ok"),
+            used: None,
+            feedback_up: None,
+            feedback_down: None,
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap();
     }
 
@@ -63,19 +64,20 @@ fn distill_failure_is_isolated_to_the_failing_log() {
 fn outcome_without_reusable_material_is_not_queued_for_distillation() {
     let (kb, _file) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("query only"),
-        None,
-        None,
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("query only"),
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(log["distill_state"].as_str(), Some("discarded"));

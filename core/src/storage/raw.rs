@@ -27,7 +27,9 @@ impl Storage {
         let mut stmt = self.conn.prepare(sql)?;
         let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let rows = stmt.query_map(p, |r| row_to_json_with_names(r, &names))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        // Fail-closed: a row that fails to decode aborts the query rather than
+        // silently vanishing from the result set.
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Execute a parameterised statement (not batch); returns rows-affected count.

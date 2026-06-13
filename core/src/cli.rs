@@ -8,6 +8,7 @@ use serde_json::json;
 pub use crate::backup::BackupCommands;
 pub use crate::daemon::DaemonCommands;
 pub use crate::hook::HookCommands;
+use crate::{RecallParams, RecordParams};
 
 fn default_db() -> PathBuf {
     crate::paths::default_db_path()
@@ -99,6 +100,12 @@ pub enum Commands {
         source: String,
         #[arg(long)]
         skill_name: Option<String>,
+        /// Declare a dependency on another chunk id (repeatable).
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+        /// Dependency kind for --depends-on: hard (fail-closed) or soft (bonus).
+        #[arg(long, default_value = "hard")]
+        dep_kind: String,
     },
     /// Capture a spark (idea)
     Spark {
@@ -251,17 +258,17 @@ pub fn run() -> anyhow::Result<()> {
             refine_mode,
             source,
         } => {
-            let result = kb.recall(
-                &query,
+            let result = kb.recall(RecallParams {
+                query: &query,
                 budget,
-                true,
+                trace: true,
                 include_sparks,
                 top,
-                &source,
-                &expand_deps,
+                source: &source,
+                expand_deps: &expand_deps,
                 allow_trim,
-                &refine_mode,
-            )?;
+                refine_mode: &refine_mode,
+            })?;
             match format.as_str() {
                 "json" => println!(
                     "{}",
@@ -346,25 +353,25 @@ pub fn run() -> anyhow::Result<()> {
                 };
             let fb_up_ref = fb_up.as_deref();
             let fb_down_ref = fb_down.as_deref();
-            kb.record_detailed(
-                &trace_id,
-                query.as_deref(),
-                output.as_deref(),
-                output_summary.as_deref(),
-                outcome.as_deref(),
-                used_ref,
-                &used_attribution,
-                !used_partial,
-                fb_up_ref,
-                fb_down_ref,
-                &feedback_kind,
-                feedback_actor.as_deref(),
-                feedback_reason.as_deref(),
-                nomination.as_deref(),
+            kb.record(RecordParams {
+                trace_id: &trace_id,
+                query: query.as_deref(),
+                output: output.as_deref(),
+                output_summary: output_summary.as_deref(),
+                outcome: outcome.as_deref(),
+                used: used_ref,
+                used_attribution: &used_attribution,
+                used_complete: Some(!used_partial),
+                feedback_up: fb_up_ref,
+                feedback_down: fb_down_ref,
+                feedback_kind: &feedback_kind,
+                feedback_actor: feedback_actor.as_deref(),
+                feedback_reason: feedback_reason.as_deref(),
+                nomination: nomination.as_deref(),
                 priority,
-                task_state.as_deref(),
-                &source,
-            )?;
+                task_state: task_state.as_deref(),
+                source: &source,
+            })?;
             println!("recorded");
         }
         Commands::Add {
@@ -374,6 +381,8 @@ pub fn run() -> anyhow::Result<()> {
             anti_trigger,
             source,
             skill_name,
+            depends_on,
+            dep_kind,
         } => {
             // If kind=skill and content is a readable file path, load its content.
             let content = if kind == "skill" {
@@ -396,6 +405,9 @@ pub fn run() -> anyhow::Result<()> {
                 &source,
                 skill_name.as_deref(),
             )?;
+            for dep in &depends_on {
+                kb.add_dependency(&id, dep, &dep_kind)?;
+            }
             println!("{id}");
         }
         Commands::Spark { content, trigger } => {

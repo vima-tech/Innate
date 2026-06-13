@@ -225,13 +225,14 @@ impl Storage {
                     let blob: Vec<u8> = r.get(1)?;
                     Ok((id, blob))
                 })?
-                .filter_map(|r| r.ok())
-                .map(|(id, blob)| {
-                    let mut v = unpack_embedding(&blob);
-                    l2_normalize(&mut v);
-                    (id, v)
+                .map(|row| {
+                    row.map(|(id, blob)| {
+                        let mut v = unpack_embedding(&blob);
+                        l2_normalize(&mut v);
+                        (id, v)
+                    })
                 })
-                .collect();
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             *cache_cell.borrow_mut() = Some(entries);
         }
 
@@ -289,7 +290,8 @@ impl Storage {
             row_to_json_with_names(r, &names)
         })?;
         let mut map = HashMap::with_capacity(ids.len());
-        for row in rows.filter_map(|r| r.ok()) {
+        for row in rows {
+            let row = row?;
             if let Some(id) = row.get("id").and_then(Value::as_str) {
                 map.insert(id.to_string(), row);
             }
@@ -357,7 +359,7 @@ impl Storage {
                 r.get::<_, Option<String>>(2)?,
             ))
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Batch variant of `get_deps`: fetch outgoing edges for many sources in one
@@ -379,7 +381,8 @@ impl Storage {
             ))
         })?;
         let mut map: HashMap<String, Vec<(String, String, Option<String>)>> = HashMap::new();
-        for (src, dst, kind, lib) in rows.filter_map(|r| r.ok()) {
+        for row in rows {
+            let (src, dst, kind, lib) = row?;
             map.entry(src).or_default().push((dst, kind, lib));
         }
         Ok(map)
@@ -390,7 +393,7 @@ impl Storage {
             .conn
             .prepare_cached("SELECT src FROM deps WHERE dst=?")?;
         let rows = stmt.query_map([chunk_id], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn insert_dep(

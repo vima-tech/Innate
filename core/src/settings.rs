@@ -289,7 +289,21 @@ pub fn load_from(path: &Path) -> Settings {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Settings::default();
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    // A present-but-unparseable settings file must not silently degrade to
+    // defaults (which would drop the user's LLM/embedding config and fall back
+    // to the Dummy provider). Warn loudly so the misconfiguration is visible.
+    match serde_json::from_str(&text) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!(
+                "innate: WARNING — {} exists but could not be parsed ({e}); \
+                 ignoring it and using defaults. LLM/embedding/backup settings \
+                 will NOT take effect until the file is fixed.",
+                path.display()
+            );
+            Settings::default()
+        }
+    }
 }
 
 /// Write settings to `~/.innate/settings.json` with mode 0600.

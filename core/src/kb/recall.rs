@@ -1,19 +1,46 @@
 use super::*;
 
+/// Parameters for [`KnowledgeBase::recall`].
+///
+/// Borrowed, `Default`-able: construct with `RecallParams { query, budget, source, ..Default::default() }`.
+/// Empty-string defaults are normalized inside `recall`: `expand_deps` empty → `"false"`,
+/// `refine_mode` empty → `"off"`.
+#[derive(Debug, Clone, Default)]
+pub struct RecallParams<'a> {
+    pub query: &'a str,
+    pub budget: usize,
+    pub trace: bool,
+    pub include_sparks: bool,
+    pub top: Option<usize>,
+    pub source: &'a str,
+    pub expand_deps: &'a str, // "false" | "direct" | "closure"
+    pub allow_trim: bool,     // if true, invoke Refiner::trim when block doesn't fit
+    pub refine_mode: &'a str, // "off" | "trim" | "adapt" — recorded in trace
+}
+
 impl KnowledgeBase {
-    #[allow(clippy::too_many_arguments)]
-    pub fn recall(
-        &self,
-        query: &str,
-        budget: usize,
-        trace: bool,
-        include_sparks: bool,
-        top: Option<usize>,
-        source: &str,
-        expand_deps: &str, // "false" | "direct" | "closure"
-        allow_trim: bool,  // if true, invoke Refiner::trim when block doesn't fit
-        refine_mode: &str, // "off" | "trim" | "adapt" — recorded in trace
-    ) -> Result<RecallResult> {
+    pub fn recall(&self, params: RecallParams<'_>) -> Result<RecallResult> {
+        let RecallParams {
+            query,
+            budget,
+            trace,
+            include_sparks,
+            top,
+            source,
+            expand_deps,
+            allow_trim,
+            refine_mode,
+        } = params;
+        let expand_deps = if expand_deps.is_empty() {
+            "false"
+        } else {
+            expand_deps
+        };
+        let refine_mode = if refine_mode.is_empty() {
+            "off"
+        } else {
+            refine_mode
+        };
         validate_source(source)?;
         let trace_id = gen_uuid();
         let now = utc_now_iso();

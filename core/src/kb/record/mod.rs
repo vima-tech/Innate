@@ -2,64 +2,65 @@ use super::*;
 
 mod evidence;
 
+/// Parameters for [`KnowledgeBase::record`].
+///
+/// Borrowed, `Default`-able: construct with `RecordParams { trace_id, source, ..Default::default() }`
+/// and set only the fields you need. Behavioural defaults are applied inside `record`:
+/// `used_attribution` empty → `"explicit"`, `feedback_kind` empty → `"user"`,
+/// `used_complete` `None` → `true` (a complete snapshot).
+#[derive(Debug, Clone, Default)]
+pub struct RecordParams<'a> {
+    pub trace_id: &'a str,
+    pub query: Option<&'a str>,
+    pub output: Option<&'a str>,
+    pub output_summary: Option<&'a str>,
+    pub outcome: Option<&'a str>,
+    pub used: Option<&'a [String]>,
+    pub used_attribution: &'a str,
+    pub used_complete: Option<bool>,
+    pub feedback_up: Option<&'a [String]>,
+    pub feedback_down: Option<&'a [String]>,
+    pub feedback_kind: &'a str,
+    pub feedback_actor: Option<&'a str>,
+    pub feedback_reason: Option<&'a str>,
+    pub nomination: Option<&'a str>,
+    pub priority: i64,
+    pub task_state: Option<&'a str>,
+    pub source: &'a str,
+}
+
 impl KnowledgeBase {
-    #[allow(clippy::too_many_arguments)]
-    pub fn record(
-        &self,
-        trace_id: &str,
-        query: Option<&str>,
-        output: Option<&str>,
-        output_summary: Option<&str>,
-        outcome: Option<&str>,
-        used: Option<&[String]>,
-        feedback_up: Option<&[String]>,
-        feedback_down: Option<&[String]>,
-        nomination: Option<&str>,
-        priority: i64,
-        source: &str,
-    ) -> Result<()> {
-        self.record_detailed(
+    pub fn record(&self, params: RecordParams<'_>) -> Result<()> {
+        let RecordParams {
             trace_id,
             query,
             output,
             output_summary,
             outcome,
             used,
-            "explicit",
-            true,
+            used_attribution,
+            used_complete,
             feedback_up,
             feedback_down,
-            "user",
-            None,
-            None,
+            feedback_kind,
+            feedback_actor,
+            feedback_reason,
             nomination,
             priority,
-            None,
+            task_state,
             source,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_detailed(
-        &self,
-        trace_id: &str,
-        query: Option<&str>,
-        output: Option<&str>,
-        output_summary: Option<&str>,
-        outcome: Option<&str>,
-        used: Option<&[String]>,
-        used_attribution: &str,
-        used_complete: bool,
-        feedback_up: Option<&[String]>,
-        feedback_down: Option<&[String]>,
-        feedback_kind: &str,
-        feedback_actor: Option<&str>,
-        feedback_reason: Option<&str>,
-        nomination: Option<&str>,
-        priority: i64,
-        task_state: Option<&str>,
-        source: &str,
-    ) -> Result<()> {
+        } = params;
+        let used_attribution = if used_attribution.is_empty() {
+            "explicit"
+        } else {
+            used_attribution
+        };
+        let feedback_kind = if feedback_kind.is_empty() {
+            "user"
+        } else {
+            feedback_kind
+        };
+        let used_complete = used_complete.unwrap_or(true);
         let dedupe_ids = |ids: &[String]| {
             let mut seen = HashSet::new();
             ids.iter()

@@ -31,10 +31,17 @@ mod lifecycle;
 mod recall;
 mod record;
 
+pub use recall::RecallParams;
+pub use record::RecordParams;
+
 // ---------------------------------------------------------------------------
 // Tuning defaults
 // ---------------------------------------------------------------------------
 
+// Fused recall score weights. These intentionally sum to 1.05 (not 1.0): the
+// score is a relative ranking signal, not a calibrated probability, so the extra
+// 0.05 of headroom on content similarity is deliberate and the result is never
+// re-normalised. Keep this in mind before "fixing" the sum.
 const W_CONTENT: f64 = 0.55;
 const W_TRIGGER: f64 = 0.25;
 const W_CONFIDENCE: f64 = 0.10;

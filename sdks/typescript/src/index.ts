@@ -388,12 +388,20 @@ export class McpClient {
 
   async recall(query: string, options: {
     budget?: number; top?: number; source?: string;
+    includeSparks?: boolean;
+    expandDeps?: "false" | "direct" | "closure";
+    allowTrim?: boolean;
+    refineMode?: "off" | "trim" | "adapt";
   } = {}): Promise<RecallResult> {
     return this.toolCall("innate_recall", {
       query,
       budget: options.budget ?? 6000,
       ...(options.top != null ? { top: options.top } : {}),
       source: options.source ?? "sdk",
+      ...(options.includeSparks != null ? { include_sparks: options.includeSparks } : {}),
+      ...(options.expandDeps != null ? { expand_deps: options.expandDeps } : {}),
+      ...(options.allowTrim != null ? { allow_trim: options.allowTrim } : {}),
+      ...(options.refineMode != null ? { refine_mode: options.refineMode } : {}),
     }) as Promise<RecallResult>;
   }
 

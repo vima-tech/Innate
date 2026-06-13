@@ -266,7 +266,7 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 | `innate record <trace_id>` | 写 | `--outcome ok\|fail\|unknown` · `--used` · `--output-summary` · `--nomination` · `--source` |
 | `innate evolve` | 成长 | `--trigger manual\|scheduled\|threshold` |
 | `innate inspect` | 调试 | 库体检: 5 个健康信号 + 当前参数 |
-| `innate add <content>` | 写入 | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source` |
+| `innate add <content>` | 写入 | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source` · `--depends-on <id>`（可重复）· `--dep-kind hard\|soft` |
 | `innate spark <content>` | 灵感 | `--trigger` |
 | `innate mature-spark <id> <to>` | 治理 | to: `sprouting\|incubating` (只允许前向) |
 | `innate promote-spark <id>` | 治理 | `--to note\|skill` |
@@ -293,7 +293,7 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 |---|---|
 | `innate_recall` | 召回知识——任务开始时首先调用 |
 | `innate_record` | 记录 trace 结果——任务完成后最后调用 |
-| `innate_add` | 写入知识块 |
+| `innate_add` | 写入知识块（可选 `depends_on[]` + `dep_kind` 声明 hard/soft 依赖） |
 | `innate_spark` | 创建灵感（想法/假设） |
 | `innate_evolve` | 触发成长——会话结束时调用 |
 | `innate_inspect` | 库体检 |

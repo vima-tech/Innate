@@ -14,17 +14,17 @@ fn pending_chunks_receive_a_recall_penalty() {
         )
         .unwrap();
     let active = kb
-        .recall(
-            "pending recall quality boundary",
-            6000,
-            false,
-            false,
-            None,
-            "sdk",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "pending recall quality boundary",
+            budget: 6000,
+            trace: false,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     let active_score = active
         .knowledge
@@ -39,17 +39,17 @@ fn pending_chunks_receive_a_recall_penalty() {
         )
         .unwrap();
     let pending = kb
-        .recall(
-            "pending recall quality boundary",
-            6000,
-            false,
-            false,
-            None,
-            "sdk",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "pending recall quality boundary",
+            budget: 6000,
+            trace: false,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     let pending_score = pending
         .knowledge
@@ -206,25 +206,25 @@ fn anonymous_feedback_does_not_create_governance_consensus() {
         .unwrap();
     for _ in 0..5 {
         let trace_id = attributed_trace(&kb, &chunk_id);
-        kb.record_detailed(
-            &trace_id,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "explicit",
-            true,
-            None,
-            Some(std::slice::from_ref(&chunk_id)),
-            "user",
-            None,
-            None,
-            None,
-            0,
-            None,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &trace_id,
+            query: None,
+            output: None,
+            output_summary: None,
+            outcome: None,
+            used: None,
+            used_attribution: "explicit",
+            used_complete: Some(true),
+            feedback_up: None,
+            feedback_down: Some(std::slice::from_ref(&chunk_id)),
+            feedback_kind: "user",
+            feedback_actor: None,
+            feedback_reason: None,
+            nomination: None,
+            priority: 0,
+            task_state: None,
+            source: "sdk",
+        })
         .unwrap();
     }
 
@@ -289,25 +289,25 @@ fn record_rejects_retrieved_but_unselected_attribution() {
         .unwrap();
 
     let error = kb
-        .record_detailed(
-            &trace_id,
-            None,
-            None,
-            None,
-            None,
-            Some(&[chunk_id]),
-            "explicit",
-            true,
-            None,
-            None,
-            "user",
-            None,
-            None,
-            None,
-            0,
-            None,
-            "sdk",
-        )
+        .record(RecordParams {
+            trace_id: &trace_id,
+            query: None,
+            output: None,
+            output_summary: None,
+            outcome: None,
+            used: Some(&[chunk_id]),
+            used_attribution: "explicit",
+            used_complete: Some(true),
+            feedback_up: None,
+            feedback_down: None,
+            feedback_kind: "user",
+            feedback_actor: None,
+            feedback_reason: None,
+            nomination: None,
+            priority: 0,
+            task_state: None,
+            source: "sdk",
+        })
         .unwrap_err();
     assert!(matches!(error, InnateError::InvalidState(_)));
 }
@@ -316,53 +316,56 @@ fn record_rejects_retrieved_but_unselected_attribution() {
 fn final_outcome_can_be_corrected_and_replayed() {
     let (kb, _file) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("outcome"),
-        None,
-        Some("provisional"),
-        Some("unknown"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("outcome"),
+        output: None,
+        output_summary: Some("provisional"),
+        outcome: Some("unknown"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let provisional = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(provisional["task_state"].as_str(), Some("running"));
     assert_eq!(provisional["distill_state"].as_str(), Some("open"));
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(log["outcome"].as_str(), Some("ok"));
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        Some("fail"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: Some("fail"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let corrected = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(corrected["outcome"].as_str(), Some("fail"));
@@ -393,25 +396,25 @@ fn record_rejects_conflicting_feedback_for_same_chunk() {
         .unwrap();
     let trace_id = attributed_trace(&kb, &chunk_id);
     let error = kb
-        .record_detailed(
-            &trace_id,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "explicit",
-            true,
-            Some(std::slice::from_ref(&chunk_id)),
-            Some(std::slice::from_ref(&chunk_id)),
-            "user",
-            None,
-            None,
-            None,
-            0,
-            None,
-            "sdk",
-        )
+        .record(RecordParams {
+            trace_id: &trace_id,
+            query: None,
+            output: None,
+            output_summary: None,
+            outcome: None,
+            used: None,
+            used_attribution: "explicit",
+            used_complete: Some(true),
+            feedback_up: Some(std::slice::from_ref(&chunk_id)),
+            feedback_down: Some(std::slice::from_ref(&chunk_id)),
+            feedback_kind: "user",
+            feedback_actor: None,
+            feedback_reason: None,
+            nomination: None,
+            priority: 0,
+            task_state: None,
+            source: "sdk",
+        })
         .unwrap_err();
     assert!(matches!(error, InnateError::InvalidState(_)));
 }
@@ -462,25 +465,25 @@ fn complete_usage_without_outcome_records_selected_unused() {
         .unwrap();
     let trace_id = attributed_trace(&kb, &chunk_id);
 
-    kb.record_detailed(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        Some(&[]),
-        "explicit",
-        true,
-        None,
-        None,
-        "user",
-        None,
-        None,
-        None,
-        0,
-        Some("running"),
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(&[]),
+        used_attribution: "explicit",
+        used_complete: Some(true),
+        feedback_up: None,
+        feedback_down: None,
+        feedback_kind: "user",
+        feedback_actor: None,
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: Some("running"),
+        source: "sdk",
+    })
     .unwrap();
 
     let evidence = kb
@@ -509,33 +512,35 @@ fn opposite_feedback_replaces_previous_signal_for_same_trace() {
         .unwrap();
     let trace_id = attributed_trace(&kb, &chunk_id);
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: None,
+        feedback_down: Some(std::slice::from_ref(&chunk_id)),
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: Some(std::slice::from_ref(&chunk_id)),
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let rows = kb

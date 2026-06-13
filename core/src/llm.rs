@@ -395,8 +395,26 @@ mod tests {
 
     use super::{
         backoff_delay, build_distill_prompt, distill_entry_with, distill_with,
-        parse_distill_response, status_is_retryable,
+        parse_distill_response, parse_embedding_response, status_is_retryable,
     };
+
+    #[test]
+    fn embedding_response_is_parsed_fail_closed() {
+        // Happy path: correct dimension parses.
+        let resp = json!({"data": [{"embedding": [0.1, 0.2, 0.3]}]});
+        assert_eq!(parse_embedding_response(&resp, 3).unwrap(), vec![0.1f32, 0.2, 0.3]);
+
+        // Wrong dimension is rejected, not silently accepted.
+        assert!(parse_embedding_response(&resp, 4).is_err());
+
+        // A non-numeric element fails the whole parse (no silent drop).
+        let bad = json!({"data": [{"embedding": [0.1, "oops", 0.3]}]});
+        assert!(parse_embedding_response(&bad, 3).is_err());
+
+        // Missing embedding field is rejected.
+        let shape = json!({"data": []});
+        assert!(parse_embedding_response(&shape, 3).is_err());
+    }
 
     #[test]
     fn only_rate_limit_and_5xx_are_retryable() {
@@ -513,17 +531,35 @@ impl LlmEmbeddingProvider {
             "Embedding",
         )?;
 
-        let embedding = resp_json
-            .pointer("/data/0/embedding")
-            .and_then(Value::as_array)
-            .ok_or_else(|| InnateError::Other("unexpected embedding response shape".into()))?;
-
-        Ok(embedding
-            .iter()
-            .filter_map(Value::as_f64)
-            .map(|x| x as f32)
-            .collect())
+        parse_embedding_response(&resp_json, self.config.dim)
     }
+}
+
+/// Parse an OpenAI-compatible embedding response, fail-closed.
+///
+/// Every element must be numeric (bad entries are not silently dropped) and the
+/// resulting length must equal `expected_dim`, so a malformed or wrong-dimension
+/// vector never reaches cosine similarity.
+fn parse_embedding_response(resp_json: &Value, expected_dim: usize) -> Result<Vec<f32>> {
+    let embedding = resp_json
+        .pointer("/data/0/embedding")
+        .and_then(Value::as_array)
+        .ok_or_else(|| InnateError::Other("unexpected embedding response shape".into()))?;
+    let vec: Vec<f32> = embedding
+        .iter()
+        .map(|v| {
+            v.as_f64().map(|x| x as f32).ok_or_else(|| {
+                InnateError::Other("embedding response contains a non-numeric element".into())
+            })
+        })
+        .collect::<Result<Vec<f32>>>()?;
+    if vec.len() != expected_dim {
+        return Err(InnateError::Other(format!(
+            "embedding dimension mismatch: provider returned {}, expected {expected_dim} (check embedding.dim)",
+            vec.len(),
+        )));
+    }
+    Ok(vec)
 }
 
 impl EmbeddingProvider for LlmEmbeddingProvider {

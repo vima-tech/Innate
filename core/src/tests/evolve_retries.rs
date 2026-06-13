@@ -97,19 +97,20 @@ fn scheduled_evolve_recovers_retryable_failed_log_without_existing_request() {
     )
     .unwrap();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("automatic retry"),
-        None,
-        Some("retryable material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("automatic retry"),
+        output: None,
+        output_summary: Some("retryable material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.evolve("manual").unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -145,19 +146,20 @@ fn distill_retry_cost_is_cumulative() {
     )
     .unwrap();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("cost retry"),
-        None,
-        Some("cost material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("cost retry"),
+        output: None,
+        output_summary: Some("cost material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.evolve("manual").unwrap();
     kb.storage
@@ -203,19 +205,20 @@ fn distill_retries_are_bounded_and_failures_remain_observable() {
     )
     .unwrap();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("persistent failure"),
-        None,
-        Some("reusable material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("persistent failure"),
+        output: None,
+        output_summary: Some("reusable material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     for attempt in 0..3 {

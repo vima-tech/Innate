@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use crate::kb::KnowledgeBase;
+use crate::kb::{KnowledgeBase, RecallParams, RecordParams};
 
 #[cfg(target_os = "linux")]
 use libc;
@@ -230,17 +230,17 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             } else {
                 s("refine_mode")
             };
-            let result = kb.recall(
-                &query,
+            let result = kb.recall(RecallParams {
+                query: &query,
                 budget,
-                true,
+                trace: true,
                 include_sparks,
                 top,
-                &source,
-                &expand_deps,
+                source: &source,
+                expand_deps: &expand_deps,
                 allow_trim,
-                &refine_mode,
-            )?;
+                refine_mode: &refine_mode,
+            })?;
             Ok(json!({
                 "trace_id": result.trace_id,
                 "knowledge": result.knowledge,
@@ -279,25 +279,32 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             } else {
                 s("feedback_kind")
             };
-            kb.record_detailed(
-                &trace_id,
-                so("query").as_deref(),
-                so("output").as_deref(),
-                so("output_summary").as_deref(),
-                outcome.as_deref(),
-                used_ref,
-                &used_attribution,
-                b("used_complete", true),
-                fb_up_ref,
-                fb_down_ref,
-                &feedback_kind,
-                so("feedback_actor").as_deref(),
-                so("feedback_reason").as_deref(),
-                so("nomination").as_deref(),
-                n("priority", 0),
-                so("task_state").as_deref(),
-                &source,
-            )?;
+            let query = so("query");
+            let output = so("output");
+            let output_summary = so("output_summary");
+            let feedback_actor = so("feedback_actor");
+            let feedback_reason = so("feedback_reason");
+            let nomination = so("nomination");
+            let task_state = so("task_state");
+            kb.record(RecordParams {
+                trace_id: &trace_id,
+                query: query.as_deref(),
+                output: output.as_deref(),
+                output_summary: output_summary.as_deref(),
+                outcome: outcome.as_deref(),
+                used: used_ref,
+                used_attribution: &used_attribution,
+                used_complete: Some(b("used_complete", true)),
+                feedback_up: fb_up_ref,
+                feedback_down: fb_down_ref,
+                feedback_kind: &feedback_kind,
+                feedback_actor: feedback_actor.as_deref(),
+                feedback_reason: feedback_reason.as_deref(),
+                nomination: nomination.as_deref(),
+                priority: n("priority", 0),
+                task_state: task_state.as_deref(),
+                source: &source,
+            })?;
             Ok(json!({"ok": true}))
         }
         "innate_add" => {
@@ -320,6 +327,14 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 &source,
                 so("skill_name").as_deref(),
             )?;
+            let dep_kind = if s("dep_kind").is_empty() {
+                "hard".to_string()
+            } else {
+                s("dep_kind")
+            };
+            for dep in arr("depends_on") {
+                kb.add_dependency(&id, &dep, &dep_kind)?;
+            }
             Ok(json!({"chunk_id": id}))
         }
         "innate_spark" => {
@@ -435,7 +450,9 @@ fn tool_schema(name: &str) -> Value {
                 "trigger_desc": {"type": "string"},
                 "anti_trigger_desc": {"type": "string"},
                 "source": {"type": "string", "enum": ["chat","manual","doc","agent"]},
-                "skill_name": {"type": "string"}
+                "skill_name": {"type": "string"},
+                "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Chunk ids this chunk depends on"},
+                "dep_kind": {"type": "string", "enum": ["hard","soft"], "description": "Dependency kind for depends_on (default hard)"}
             },
             "required": ["content"]
         }),

@@ -145,6 +145,31 @@ impl KnowledgeBase {
         Ok(chunk_id)
     }
 
+    /// Declare that chunk `src` depends on chunk `dst`.
+    ///
+    /// `kind` is `"hard"` (fail-closed: if `dst` is unavailable or archived at
+    /// recall time the whole seed is dropped) or `"soft"` (a recall-time
+    /// ranking bonus). Both chunks must exist. Idempotent — re-declaring the
+    /// same edge is a no-op (`INSERT OR IGNORE`).
+    pub fn add_dependency(&self, src: &str, dst: &str, kind: &str) -> Result<()> {
+        if !matches!(kind, "soft" | "hard") {
+            return Err(InnateError::InvalidState(format!(
+                "invalid dependency kind: {kind} (expected soft|hard)"
+            )));
+        }
+        if self.storage.get_chunk(src)?.is_none() {
+            return Err(InnateError::ChunkNotFound(format!(
+                "dependency source not found: {src}"
+            )));
+        }
+        if self.storage.get_chunk(dst)?.is_none() {
+            return Err(InnateError::ChunkNotFound(format!(
+                "dependency target not found: {dst}"
+            )));
+        }
+        self.storage.insert_dep(src, dst, kind, None)
+    }
+
     // ------------------------------------------------------------------
     // Public API 4: spark
     // ------------------------------------------------------------------
@@ -186,17 +211,13 @@ impl KnowledgeBase {
 
         // Quick related recall (trace=false, no recursion risk)
         let related: Vec<String> = self
-            .recall(
-                &content,
-                2000,
-                false,
-                false,
-                Some(5),
-                "sdk",
-                "false",
-                false,
-                "off",
-            )
+            .recall(RecallParams {
+                query: &content,
+                budget: 2000,
+                top: Some(5),
+                source: "sdk",
+                ..Default::default()
+            })
             .map(|r| {
                 r.knowledge
                     .iter()

@@ -16,17 +16,17 @@ fn add_and_recall() {
     assert!(!id.is_empty());
 
     let result = kb
-        .recall(
-            "validate input",
-            6000,
-            false,
-            false,
-            None,
-            "sdk",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "validate input",
+            budget: 6000,
+            trace: false,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     assert!(!result.trace_id.is_empty());
 }
@@ -39,12 +39,29 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
     let (kb, _f) = tmp_kb();
 
     let id_a = kb
-        .add("First fact about caching", "note", Some("caching"), None, "manual", None)
+        .add(
+            "First fact about caching",
+            "note",
+            Some("caching"),
+            None,
+            "manual",
+            None,
+        )
         .unwrap();
 
     // Warm the cache.
     let first = kb
-        .recall("caching", 6000, false, false, None, "sdk", "false", false, "off")
+        .recall(RecallParams {
+            query: "caching",
+            budget: 6000,
+            trace: false,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     assert!(first
         .knowledge
@@ -53,11 +70,28 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
 
     // Write after the cache is warm — must land in the in-memory cache.
     let id_b = kb
-        .add("Second fact added later", "note", Some("later"), None, "manual", None)
+        .add(
+            "Second fact added later",
+            "note",
+            Some("later"),
+            None,
+            "manual",
+            None,
+        )
         .unwrap();
 
     let second = kb
-        .recall("later", 6000, false, false, None, "sdk", "false", false, "off")
+        .recall(RecallParams {
+            query: "later",
+            budget: 6000,
+            trace: false,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     assert!(
         second
@@ -139,36 +173,38 @@ fn spark_and_promote() {
 fn record_state_machine() {
     let (kb, _f) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("test query"),
-        None,
-        Some("summary"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "cli",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("test query"),
+        output: None,
+        output_summary: Some("summary"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "cli",
+        ..Default::default()
+    })
     .unwrap();
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(log["distill_state"].as_str().unwrap(), "new");
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        None,
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "cli",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "cli",
+        ..Default::default()
+    })
     .unwrap();
     let log2 = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(log2["distill_state"].as_str().unwrap(), "new");
@@ -178,19 +214,20 @@ fn record_state_machine() {
 fn late_material_reopens_insufficient_material_log() {
     let (kb, _f) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("late material"),
-        None,
-        None,
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("late material"),
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let discarded = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     assert_eq!(discarded["distill_state"].as_str(), Some("discarded"));
@@ -199,19 +236,20 @@ fn late_material_reopens_insufficient_material_log() {
         Some("insufficient_material")
     );
 
-    kb.record(
-        &trace_id,
-        None,
-        None,
-        Some("material arrived after completion"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: None,
+        output: None,
+        output_summary: Some("material arrived after completion"),
+        outcome: None,
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let reopened = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
@@ -223,31 +261,32 @@ fn late_material_reopens_insufficient_material_log() {
 fn mcp_is_a_valid_event_source() {
     let (kb, _f) = tmp_kb();
     let result = kb
-        .recall(
-            "mcp source",
-            6000,
-            true,
-            false,
-            None,
-            "mcp",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "mcp source",
+            budget: 6000,
+            trace: true,
+            include_sparks: false,
+            top: None,
+            source: "mcp",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
-    kb.record(
-        &result.trace_id,
-        None,
-        None,
-        Some("closed through MCP"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "mcp",
-    )
+    kb.record(RecordParams {
+        trace_id: &result.trace_id,
+        query: None,
+        output: None,
+        output_summary: Some("closed through MCP"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "mcp",
+        ..Default::default()
+    })
     .unwrap();
 }
 
@@ -265,34 +304,35 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
         )
         .unwrap();
     let first = kb
-        .recall(
-            "bounded retries",
-            6000,
-            true,
-            false,
-            None,
-            "sdk",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "bounded retries",
+            budget: 6000,
+            trace: true,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     let before = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
         .as_f64()
         .unwrap();
-    kb.record(
-        &first.trace_id,
-        None,
-        None,
-        Some("completed without usage attribution"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &first.trace_id,
+        query: None,
+        output: None,
+        output_summary: Some("completed without usage attribution"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let after_unknown = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
         .as_f64()
@@ -300,32 +340,33 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
     assert_eq!(before, after_unknown);
 
     let second = kb
-        .recall(
-            "bounded retries",
-            6000,
-            true,
-            false,
-            None,
-            "sdk",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "bounded retries",
+            budget: 6000,
+            trace: true,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     let explicitly_unused: Vec<String> = vec![];
-    kb.record(
-        &second.trace_id,
-        None,
-        None,
-        Some("completed and explicitly used no recalled chunks"),
-        Some("ok"),
-        Some(&explicitly_unused),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &second.trace_id,
+        query: None,
+        output: None,
+        output_summary: Some("completed and explicitly used no recalled chunks"),
+        outcome: Some("ok"),
+        used: Some(&explicitly_unused),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let after_known_none = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
         .as_f64()
@@ -349,39 +390,39 @@ fn feedback_is_auditable_and_builds_contextual_governance_evidence() {
 
     for i in 0..2 {
         let recall = kb
-            .recall(
-                "retry policy",
-                6000,
-                true,
-                false,
-                None,
-                "sdk",
-                "false",
-                false,
-                "off",
-            )
+            .recall(RecallParams {
+                query: "retry policy",
+                budget: 6000,
+                trace: true,
+                include_sparks: false,
+                top: None,
+                source: "sdk",
+                expand_deps: "false",
+                allow_trim: false,
+                refine_mode: "off",
+            })
             .unwrap();
         let used = vec![chunk_id.clone()];
         let actor = format!("tester-{i}");
-        kb.record_detailed(
-            &recall.trace_id,
-            None,
-            None,
-            Some("retry policy was unsuitable"),
-            Some("fail"),
-            Some(&used),
-            "explicit",
-            true,
-            None,
-            Some(&used),
-            "user",
-            Some(&actor),
-            Some("unbounded retry is unsafe"),
-            None,
-            0,
-            None,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &recall.trace_id,
+            query: None,
+            output: None,
+            output_summary: Some("retry policy was unsuitable"),
+            outcome: Some("fail"),
+            used: Some(&used),
+            used_attribution: "explicit",
+            used_complete: Some(true),
+            feedback_up: None,
+            feedback_down: Some(&used),
+            feedback_kind: "user",
+            feedback_actor: Some(&actor),
+            feedback_reason: Some("unbounded retry is unsafe"),
+            nomination: None,
+            priority: 0,
+            task_state: None,
+            source: "sdk",
+        })
         .unwrap();
     }
 
@@ -419,19 +460,20 @@ fn record_requests_evolve_and_inspect_reports_feedback_metrics() {
     }
     let kb = KnowledgeBase::open(file.path()).unwrap();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("queue evolve"),
-        None,
-        Some("reusable material"),
-        Some("ok"),
-        Some(&[]),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("queue evolve"),
+        output: None,
+        output_summary: Some("reusable material"),
+        outcome: Some("ok"),
+        used: Some(&[]),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let requests = kb
@@ -507,31 +549,31 @@ fn refine_runs_only_in_adapt_mode() {
     kb.add("Refiner mode test", "note", None, None, "manual", None)
         .unwrap();
 
-    kb.recall(
-        "Refiner mode test",
-        6000,
-        false,
-        false,
-        None,
-        "sdk",
-        "false",
-        false,
-        "off",
-    )
+    kb.recall(RecallParams {
+        query: "Refiner mode test",
+        budget: 6000,
+        trace: false,
+        include_sparks: false,
+        top: None,
+        source: "sdk",
+        expand_deps: "false",
+        allow_trim: false,
+        refine_mode: "off",
+    })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-    kb.recall(
-        "Refiner mode test",
-        6000,
-        false,
-        false,
-        None,
-        "sdk",
-        "false",
-        false,
-        "adapt",
-    )
+    kb.recall(RecallParams {
+        query: "Refiner mode test",
+        budget: 6000,
+        trace: false,
+        include_sparks: false,
+        top: None,
+        source: "sdk",
+        expand_deps: "false",
+        allow_trim: false,
+        refine_mode: "adapt",
+    })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

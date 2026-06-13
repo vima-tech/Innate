@@ -93,7 +93,7 @@ impl Storage {
                 let attr: Option<String> = r.get(1)?;
                 Ok((id, attr.unwrap_or_else(|| "inferred".to_string())))
             })?;
-            rows.filter_map(|r| r.ok()).collect()
+            rows.collect::<rusqlite::Result<HashMap<_, _>>>()?
         };
 
         for chunk_id in used_ids {
@@ -529,7 +529,8 @@ impl Storage {
             ))
         })?;
         let mut map = HashMap::new();
-        for (id, success, failure, positive, negative) in rows.filter_map(|r| r.ok()) {
+        for row in rows {
+            let (id, success, failure, positive, negative) = row?;
             map.insert(
                 id,
                 context_score_from_counts(success, failure, positive, negative),

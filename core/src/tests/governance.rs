@@ -170,19 +170,20 @@ fn selected_unused_always_decreases_confidence() {
     // record() with a used declaration that excludes chunk_id proves it was selected but unused.
     let trace = attributed_trace(&kb, &chunk_id);
     // An explicit complete empty declaration proves the selected chunk was unused.
-    kb.record(
-        &trace,
-        Some("query"),
-        None,
-        None,
-        Some("ok"),
-        Some(&[]),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace,
+        query: Some("query"),
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: Some(&[]),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let chunk = kb.storage.get_chunk(&chunk_id).unwrap().unwrap();
@@ -232,19 +233,20 @@ fn distilled_chunk_can_auto_promote_via_implicit_signals() {
 
     // Produce a distilled chunk: record → evolve → chunk in pending state.
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("test query"),
-        None,
-        Some("test summary"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("test query"),
+        output: None,
+        output_summary: Some("test summary"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.evolve("manual").unwrap();
 
@@ -268,19 +270,20 @@ fn distilled_chunk_can_auto_promote_via_implicit_signals() {
     for i in 0..5 {
         let t = attributed_trace(&kb, &chunk_id);
         // Record usage: used=[chunk_id], outcome=ok — triggers implicit confidence nudge.
-        kb.record(
-            &t,
-            Some(&format!("query variant {i}")),
-            None,
-            None,
-            Some("ok"),
-            Some(std::slice::from_ref(&chunk_id)),
-            None,
-            None,
-            None,
-            0,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &t,
+            query: Some(&format!("query variant {i}")),
+            output: None,
+            output_summary: None,
+            outcome: Some("ok"),
+            used: Some(std::slice::from_ref(&chunk_id)),
+            feedback_up: None,
+            feedback_down: None,
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap();
     }
 
@@ -385,33 +388,35 @@ fn feedback_events_are_idempotent() {
     let trace_id = attributed_trace(&kb, &chunk_id);
 
     // Two record() calls with the same trace_id, same chunk, same signal.
-    kb.record(
-        &trace_id,
-        Some("q"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: None,
+        feedback_down: Some(std::slice::from_ref(&chunk_id)),
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
-    kb.record(
-        &trace_id,
-        Some("q"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: None,
+        feedback_down: Some(std::slice::from_ref(&chunk_id)),
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let count = kb
@@ -447,36 +452,38 @@ fn positive_feedback_offsets_governance_proposal() {
     // Two downs.
     for _ in 0..2 {
         let t = attributed_trace(&kb, &chunk_id);
-        kb.record(
-            &t,
-            Some("q"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(std::slice::from_ref(&chunk_id)),
-            None,
-            0,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &t,
+            query: Some("q"),
+            output: None,
+            output_summary: None,
+            outcome: None,
+            used: None,
+            feedback_up: None,
+            feedback_down: Some(std::slice::from_ref(&chunk_id)),
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap();
     }
     // One up — offsets one down, net = 1 < 2.
     let t = attributed_trace(&kb, &chunk_id);
-    kb.record(
-        &t,
-        Some("q"),
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &t,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: Some(std::slice::from_ref(&chunk_id)),
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let proposals = kb
@@ -573,19 +580,20 @@ fn feedback_derived_updates_skipped_on_duplicate() {
 
     let trace_id = attributed_trace(&kb, &chunk_id);
     // Two down calls with the same trace_id — only first should update confidence.
-    kb.record(
-        &trace_id,
-        Some("q"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: None,
+        feedback_down: Some(std::slice::from_ref(&chunk_id)),
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let conf_after_first = kb
         .storage
@@ -601,19 +609,20 @@ fn feedback_derived_updates_skipped_on_duplicate() {
         "first down must lower confidence"
     );
 
-    kb.record(
-        &trace_id,
-        Some("q"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        feedback_up: None,
+        feedback_down: Some(std::slice::from_ref(&chunk_id)),
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let conf_after_second = kb
         .storage
@@ -641,19 +650,20 @@ fn outcome_without_used_falls_back_to_saved_used_ids() {
     let trace_id = attributed_trace(&kb, &chunk_id);
 
     // Step 1: report used, no outcome.
-    kb.record(
-        &trace_id,
-        Some("q"),
-        None,
-        None,
-        None,
-        Some(std::slice::from_ref(&chunk_id)),
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: Some(std::slice::from_ref(&chunk_id)),
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let conf_before = kb
         .storage
@@ -666,19 +676,20 @@ fn outcome_without_used_falls_back_to_saved_used_ids() {
         .unwrap();
 
     // Step 2: report outcome, no used — should still update confidence for the saved chunk.
-    kb.record(
-        &trace_id,
-        Some("q"),
-        None,
-        None,
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let conf_after = kb
         .storage

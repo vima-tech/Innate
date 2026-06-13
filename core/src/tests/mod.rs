@@ -15,7 +15,7 @@ mod restoration;
 
 use crate::embedding::{DummyEmbeddingProvider, EmbeddingProvider};
 use crate::errors::{InnateError, Result};
-use crate::kb::{CurateScope, KnowledgeBase};
+use crate::kb::{CurateScope, KnowledgeBase, RecallParams, RecordParams};
 use crate::refine::{DistilledChunk, Distiller, Refiner};
 
 fn tmp_kb() -> (KnowledgeBase, NamedTempFile) {
@@ -71,24 +71,24 @@ fn attributed_trace_many(kb: &KnowledgeBase, chunk_ids: &[String]) -> String {
 
 fn record_down_as(kb: &KnowledgeBase, chunk_id: &str, actor: &str) {
     let trace_id = attributed_trace(kb, chunk_id);
-    kb.record_detailed(
-        &trace_id,
-        Some("q"),
-        None,
-        None,
-        None,
-        None,
-        "explicit",
-        true,
-        None,
-        Some(&[chunk_id.to_string()]),
-        "user",
-        Some(actor),
-        None,
-        None,
-        0,
-        None,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("q"),
+        output: None,
+        output_summary: None,
+        outcome: None,
+        used: None,
+        used_attribution: "explicit",
+        used_complete: Some(true),
+        feedback_up: None,
+        feedback_down: Some(&[chunk_id.to_string()]),
+        feedback_kind: "user",
+        feedback_actor: Some(actor),
+        feedback_reason: None,
+        nomination: None,
+        priority: 0,
+        task_state: None,
+        source: "sdk",
+    })
     .unwrap();
 }

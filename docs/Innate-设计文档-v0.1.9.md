@@ -390,6 +390,7 @@ Curate ：归档知识并接受 proposal
 `kb/lifecycle.rs` 提供（对应 CLI/MCP 治理动作）：
 
 - `add`：写入 captured 知识。`tvec = embed_trigger(trigger_desc or content)` 始终生成，绝不回退到截断 `cvec`。
+- `add_dependency(src, dst, kind)`：声明知识依赖边并写入 `deps` 表（`INSERT OR IGNORE`，幂等）。`kind` 为 `hard`（recall 时 fail-closed，dst 不可用则整 seed 丢弃）或 `soft`（recall 排序加分）；校验 kind 合法且 src/dst 均存在，避免悬空边。这是 §5 依赖读路径（soft 加分 / hard 扩展 / 环检测）的公共写入入口，由 `innate add --depends-on <id> --dep-kind hard|soft` 与 MCP `innate_add` 的 `depends_on[]` / `dep_kind` 调用。
 - `spark` / `mature_spark` / `promote_spark` / `drop_spark`：想法的快速捕获与成熟晋升，Curate 豁免。
 - `approve`：pending → active（标 `confidence_reason='manual_set'`）。
 - `archive`：手动归档。
@@ -453,6 +454,14 @@ Curate ：归档知识并接受 proposal
 - Outcome 冲突显式报错，不做最后写入覆盖。
 - Sanitizer 在知识持久化前执行。
 - Migration 逐步原子。
+
+### 16.1 Fail-closed 数据完整性
+
+- **Storage 查询 fail-closed**：行解码失败时整条查询返回错误并中止，不再 `filter_map(|r| r.ok())` 静默丢行（`storage/raw.rs`、`storage/chunks.rs`、`storage/traces.rs`）。损坏数据可见而非被悄悄跳过。
+- **Embedding 响应严格校验**：远程返回的向量逐元素要求数值（非法元素使整次解析失败，不静默丢弃），且最终长度必须等于配置 `embedding.dim`，否则报维度不匹配——错误维度的向量绝不进入余弦相似度（`llm.rs::parse_embedding_response`，含单测）。
+- **配置损坏显式告警**：`settings.json` 存在但解析失败时，`load_from` 向 stderr 打印显著 WARNING 并回退默认，而非静默吞掉——避免用户的 LLM/embedding 配置被悄悄忽略、降级到 Dummy provider（`settings.rs`）。
+
+> 注：Recall 仍对 embedding 服务硬依赖（先做远程 embedding，失败则整次 Recall 失败）；离线/降级检索（如词法回退）属未实现的架构项，见 §21。
 
 ## 17. 接口边界
 
@@ -534,6 +543,15 @@ MCP 直接调用 Rust Core。配置 daemon `auto_start` 且存在 watch dirs 时
 2. 增加 chunk 级任务贡献权重，提高多知识任务因果归因精度。
 3. 带 checkpoint 的长期事实压缩，在可重放/修正窗口与体积间平衡。
 4. 治理 actor 绑定宿主认证身份，防伪造多 actor。
+
+架构级债务（已识别，待单独设计，本版本未实现）：
+
+5. **统一操作契约 Module**：当前 CLI / MCP / SDK 各自拼装参数已出现漂移（如 TS recall 历史上缺 `include_sparks`/`expand_deps`/`refine_mode`，本版已补齐）。应抽出单一“操作契约”定义，CLI/MCP/SDK 仅作 Adapter，并加入跨 Adapter 契约测试，提高 leverage 与 locality。
+6. **离线/降级检索**：Recall 当前对 embedding 服务硬依赖，远程失败即整次失败。需定义离线行为（如词法回退）、由 `inspect` 暴露 provider 健康状态。
+7. **MCP 子进程失败收敛**：TS MCP client 在子进程退出/异常/响应损坏时，待处理 Promise 缺少超时与失败收敛，需补超时与拒绝路径。
+8. **向量存储规模化**：content/trigger 两份完整缓存做 O(N×D) 全扫描；当 provider 对二者返回同一向量时存在重复存储（10 万×1536 维约 1.14 GiB 原始缓存）。应先建立规模基准与切换阈值，再考虑共享向量存储或 ANN Adapter（HNSW 仍按 §3.3 规模定位暂缓）。
+9. **Record Module 深化**：参数结构体化解决了函数参数数量，但调用方仍需理解归因/反馈/任务状态机；可继续将这些状态转换收拢进更深的 Module。
+10. **Storage 强类型行模型**：以强类型 row model + 外键完整性检查替代 `row_to_json` 动态投影中未知 SQLite 类型→null 的隐式降级，进一步集中完整性约束。
 
 ---
 

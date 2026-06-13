@@ -266,7 +266,7 @@ The CLI is a thin wrapper over the SDK public API — it adds no knowledge-layer
 | `innate record <trace_id>` | Write | `--outcome ok\|fail\|unknown` · `--used` · `--output-summary` · `--nomination` · `--source` |
 | `innate evolve` | Grow | `--trigger manual\|scheduled\|threshold` |
 | `innate inspect` | Debug | Health check: 5 signals + current parameters |
-| `innate add <content>` | Write | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source` |
+| `innate add <content>` | Write | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source` · `--depends-on <id>` (repeatable) · `--dep-kind hard\|soft` |
 | `innate spark <content>` | Spark | `--trigger` |
 | `innate mature-spark <id> <to>` | Govern | to: `sprouting\|incubating` (forward only) |
 | `innate promote-spark <id>` | Govern | `--to note\|skill` |
@@ -293,7 +293,7 @@ The CLI is a thin wrapper over the SDK public API — it adds no knowledge-layer
 |---|---|
 | `innate_recall` | Recall knowledge — call FIRST at task start |
 | `innate_record` | Record trace outcome — call LAST after task completion |
-| `innate_add` | Write a knowledge chunk |
+| `innate_add` | Write a knowledge chunk (optional `depends_on[]` + `dep_kind` to declare hard/soft deps) |
 | `innate_spark` | Create a spark (idea / hypothesis) |
 | `innate_evolve` | Trigger growth — call at session end |
 | `innate_inspect` | Health check |

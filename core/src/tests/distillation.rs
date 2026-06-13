@@ -97,19 +97,20 @@ fn distiller_error_marks_log_failed() {
     )
     .unwrap();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("query"),
-        None,
-        Some("material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("query"),
+        output: None,
+        output_summary: Some("material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     // evolve() now returns Ok even when distillation fails; failures are
@@ -139,19 +140,20 @@ fn distillation_only_receives_same_context_related_logs() {
     )
     .unwrap();
     for query in ["first pattern", "second pattern"] {
-        kb.record(
-            &crate::utils::gen_uuid(),
-            Some(query),
-            None,
-            Some("reusable material"),
-            Some("ok"),
-            None,
-            None,
-            None,
-            None,
-            0,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &crate::utils::gen_uuid(),
+            query: Some(query),
+            output: None,
+            output_summary: Some("reusable material"),
+            outcome: Some("ok"),
+            used: None,
+            feedback_up: None,
+            feedback_down: None,
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap();
     }
 
@@ -176,19 +178,20 @@ fn multi_chunk_distiller_produces_multiple_chunks() {
     )
     .unwrap();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("query"),
-        None,
-        Some("material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("query"),
+        output: None,
+        output_summary: Some("material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let result = kb.evolve("manual").unwrap();
@@ -218,19 +221,20 @@ fn multiple_chunks_can_share_same_distilled_from() {
     // multi-chunk distillation. Verify multiple chunks can coexist with the same source log.
     let (kb, _file) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("query"),
-        None,
-        Some("material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("query"),
+        output: None,
+        output_summary: Some("material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
     let log_id = log["id"].as_str().unwrap().to_string();
@@ -270,19 +274,20 @@ fn multiple_chunks_can_share_same_distilled_from() {
 fn distill_records_prompt_and_completion_token_estimates() {
     let (kb, _file) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("How should retries be bounded?"),
-        None,
-        Some("Use bounded exponential backoff with jitter."),
-        Some("ok"),
-        None,
-        None,
-        None,
-        Some("Reusable retry guidance"),
-        1,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("How should retries be bounded?"),
+        output: None,
+        output_summary: Some("Use bounded exponential backoff with jitter."),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: Some("Reusable retry guidance"),
+        priority: 1,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     kb.evolve("manual").unwrap();
@@ -297,19 +302,20 @@ fn threshold_evolve_respects_distill_token_limit() {
     let first_trace = crate::utils::gen_uuid();
     {
         let kb = KnowledgeBase::open(file.path()).unwrap();
-        kb.record(
-            &first_trace,
-            Some("first query"),
-            None,
-            Some("first reusable material"),
-            Some("ok"),
-            None,
-            None,
-            None,
-            None,
-            0,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &first_trace,
+            query: Some("first query"),
+            output: None,
+            output_summary: Some("first reusable material"),
+            outcome: Some("ok"),
+            used: None,
+            feedback_up: None,
+            feedback_down: None,
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap();
         kb.evolve("manual").unwrap();
         let first_log = kb.storage.get_episodic_log(&first_trace).unwrap().unwrap();
@@ -326,19 +332,20 @@ fn threshold_evolve_respects_distill_token_limit() {
 
     let kb = KnowledgeBase::open(file.path()).unwrap();
     let second_trace = crate::utils::gen_uuid();
-    kb.record(
-        &second_trace,
-        Some("second query"),
-        None,
-        Some("second reusable material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &second_trace,
+        query: Some("second query"),
+        output: None,
+        output_summary: Some("second reusable material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let result = kb.evolve("threshold").unwrap();
@@ -363,19 +370,20 @@ fn distill_token_window_uses_actual_distill_time_not_log_creation_time() {
     let file = NamedTempFile::new().unwrap();
     let kb = KnowledgeBase::open(file.path()).unwrap();
     let first_trace = crate::utils::gen_uuid();
-    kb.record(
-        &first_trace,
-        Some("old queued query"),
-        None,
-        Some("material distilled today"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &first_trace,
+        query: Some("old queued query"),
+        output: None,
+        output_summary: Some("material distilled today"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     let queued_at = (chrono::Utc::now() - chrono::Duration::hours(48))
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
@@ -403,19 +411,20 @@ fn distill_token_window_uses_actual_distill_time_not_log_creation_time() {
 
     let kb = KnowledgeBase::open(file.path()).unwrap();
     let second_trace = crate::utils::gen_uuid();
-    kb.record(
-        &second_trace,
-        Some("new query"),
-        None,
-        Some("new material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &second_trace,
+        query: Some("new query"),
+        output: None,
+        output_summary: Some("new material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let result = kb.evolve("threshold").unwrap();
@@ -430,19 +439,20 @@ fn scheduled_evolve_respects_distill_token_limit() {
     let first_trace = crate::utils::gen_uuid();
     {
         let kb = KnowledgeBase::open(file.path()).unwrap();
-        kb.record(
-            &first_trace,
-            Some("first scheduled budget query"),
-            None,
-            Some("first scheduled budget material"),
-            Some("ok"),
-            None,
-            None,
-            None,
-            None,
-            0,
-            "sdk",
-        )
+        kb.record(RecordParams {
+            trace_id: &first_trace,
+            query: Some("first scheduled budget query"),
+            output: None,
+            output_summary: Some("first scheduled budget material"),
+            outcome: Some("ok"),
+            used: None,
+            feedback_up: None,
+            feedback_down: None,
+            nomination: None,
+            priority: 0,
+            source: "sdk",
+            ..Default::default()
+        })
         .unwrap();
         kb.evolve("manual").unwrap();
         let first_log = kb.storage.get_episodic_log(&first_trace).unwrap().unwrap();
@@ -458,19 +468,20 @@ fn scheduled_evolve_respects_distill_token_limit() {
 
     let kb = KnowledgeBase::open(file.path()).unwrap();
     let second_trace = crate::utils::gen_uuid();
-    kb.record(
-        &second_trace,
-        Some("second scheduled budget query"),
-        None,
-        Some("second scheduled budget material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &second_trace,
+        query: Some("second scheduled budget query"),
+        output: None,
+        output_summary: Some("second scheduled budget material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
 
     let result = kb.evolve("scheduled").unwrap();
@@ -590,19 +601,20 @@ fn migration_4_5_1_adds_distill_accounting_time() {
 fn stale_screening_is_reported_as_recovered() {
     let (kb, _file) = tmp_kb();
     let trace_id = crate::utils::gen_uuid();
-    kb.record(
-        &trace_id,
-        Some("query"),
-        None,
-        Some("material"),
-        Some("ok"),
-        None,
-        None,
-        None,
-        None,
-        0,
-        "sdk",
-    )
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        query: Some("query"),
+        output: None,
+        output_summary: Some("material"),
+        outcome: Some("ok"),
+        used: None,
+        feedback_up: None,
+        feedback_down: None,
+        nomination: None,
+        priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
     .unwrap();
     kb.storage
         .conn_execute(
@@ -701,6 +713,45 @@ fn curate_reports_missing_hard_dependency_as_orphan() {
 }
 
 #[test]
+fn add_dependency_wires_public_dep_edges() {
+    let (kb, _file) = tmp_kb();
+    let a = kb
+        .add("depends", "note", Some("a"), None, "manual", None)
+        .unwrap();
+    let b = kb
+        .add("dependency", "note", Some("b"), None, "manual", None)
+        .unwrap();
+
+    // A valid hard dependency declared via the public API is persisted and
+    // visible to the recall-time read path.
+    kb.add_dependency(&a, &b, "hard").unwrap();
+    let deps = kb.storage.get_deps(&a).unwrap();
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].0, b);
+    assert_eq!(deps[0].1, "hard");
+
+    // Idempotent: re-declaring the same edge is a no-op.
+    kb.add_dependency(&a, &b, "hard").unwrap();
+    assert_eq!(kb.storage.get_deps(&a).unwrap().len(), 1);
+
+    // Invalid kind is rejected.
+    assert!(matches!(
+        kb.add_dependency(&a, &b, "weak").unwrap_err(),
+        InnateError::InvalidState(_)
+    ));
+
+    // Missing source or target is rejected so no dangling edge is written.
+    assert!(matches!(
+        kb.add_dependency(&a, "nope", "hard").unwrap_err(),
+        InnateError::ChunkNotFound(_)
+    ));
+    assert!(matches!(
+        kb.add_dependency("nope", &b, "hard").unwrap_err(),
+        InnateError::ChunkNotFound(_)
+    ));
+}
+
+#[test]
 fn recall_refreshes_vector_cache_after_external_write() {
     let file = NamedTempFile::new().unwrap();
     let reader = KnowledgeBase::open(file.path()).unwrap();
@@ -708,17 +759,17 @@ fn recall_refreshes_vector_cache_after_external_write() {
         .add("cache warmup", "note", None, None, "manual", None)
         .unwrap();
     reader
-        .recall(
-            "cache warmup",
-            6000,
-            false,
-            false,
-            None,
-            "sdk",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "cache warmup",
+            budget: 6000,
+            trace: false,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
 
     let writer = KnowledgeBase::open(file.path()).unwrap();
@@ -734,17 +785,17 @@ fn recall_refreshes_vector_cache_after_external_write() {
         .unwrap();
 
     let result = reader
-        .recall(
-            "knowledge written by another process",
-            6000,
-            false,
-            false,
-            None,
-            "sdk",
-            "false",
-            false,
-            "off",
-        )
+        .recall(RecallParams {
+            query: "knowledge written by another process",
+            budget: 6000,
+            trace: false,
+            include_sparks: false,
+            top: None,
+            source: "sdk",
+            expand_deps: "false",
+            allow_trim: false,
+            refine_mode: "off",
+        })
         .unwrap();
     assert!(result
         .knowledge
