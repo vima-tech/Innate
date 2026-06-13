@@ -1,6 +1,6 @@
 {
   "name": "@innate/sdk",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Innate — self-growing knowledge layer (TypeScript SDK)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

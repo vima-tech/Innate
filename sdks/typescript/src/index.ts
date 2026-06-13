@@ -386,7 +386,7 @@ export class McpClient {
   async initialize(): Promise<void> {
     await this.call("initialize", {
       protocolVersion: "2024-11-05",
-      clientInfo: { name: "innate-ts", version: "0.1.9" },
+      clientInfo: { name: "innate-ts", version: "0.1.10" },
     });
     this.send({ jsonrpc: "2.0", id: 0, method: "notifications/initialized" });
   }
