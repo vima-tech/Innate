@@ -93,7 +93,10 @@ Bad examples (too vague to reuse):
 - `The problem was timing`
 
 The output_summary becomes the reusable knowledge chunk. If it reads like a story, rewrite it
-as a principle. **If you cannot write a useful summary, set output="unknown" and skip recording.**
+as a principle. **Prefer the general, transferable form** — strip repo/file/function names and
+one-off identifiers, and phrase the lesson so it helps on the next project too; keep
+project-specific detail only when the lesson cannot be generalized without losing its meaning.
+**If you cannot write a useful summary, set output="unknown" and skip recording.**
 
 Call: `innate_record(trace_id=<id>, outcome=<ok|fail|unknown>, used=[<chunk_ids>], output_summary=<sentence>)`
 
@@ -147,7 +150,9 @@ innate_record(..., nomination="SQLite UNIQUE index on partial WHERE clause requi
 Before ending a long session, run this checklist silently:
 
 1. Was a non-obvious solution found? (workaround, hidden constraint, subtle bug pattern)
-2. Was a project-specific rule established? ("always do X in this codebase")
+2. Was a general, transferable skill, method, or technique surfaced? (prefer these — abstract
+   project-specific lessons into reusable form; keep a project-specific rule only when it
+   genuinely can't be generalized)
 3. Did the user correct a wrong assumption of mine that I'd likely repeat?
 4. Was a hard-won insight reached after multiple failed attempts?
 5. Did a recalled chunk actively help? (record feedback_up)
@@ -167,6 +172,21 @@ Raw conversation text must never be stored. Always distil to the reusable princi
 |---|---|
 | "The user told me to use WAL mode and I fixed it by changing the pragma" | "SQLite WAL mode must be verified via PRAGMA response, not assumed — triggers on any db open in write-heavy multi-process setups" |
 | "We spent 2 hours debugging auth because of clock skew" | "JWT validation must account for clock skew tolerance (≥30s) — triggers on distributed auth between services with independent system clocks" |
+
+## Prefer General Over Project-Specific
+
+Innate is biased toward **general, transferable skills, methods, and techniques** — knowledge
+that pays off across projects, not just the current codebase. When a lesson is project-specific:
+
+1. Try to abstract it — drop repo/file/function/path names and one-off identifiers, and rephrase
+   as a principle the next project could reuse.
+2. Save the abstracted form. Keep concrete project-specific detail only when the lesson genuinely
+   cannot be generalized without losing its meaning.
+
+| ❌ Project-bound | ✅ Generalized |
+|---|---|
+| "In this repo, `record()` must run inside BEGIN IMMEDIATE" | "Multi-step state mutations that must be atomic belong in one exclusive transaction, not per-step commits — applies to any SQLite writer with concurrent processes" |
+| "Set `recall.budget=4000` in the meta table" | "Expose retrieval budget as a tunable parameter instead of hardcoding it — lets recall scale with the context window without code changes" |
 
 ## Sparks vs. Notes
 

@@ -10,7 +10,7 @@ use crate::settings::{EmbeddingConfig, LlmConfig};
 // Prompt for distillation
 // ---------------------------------------------------------------------------
 
-const DISTILL_PROMPT_VERSION: &str = "2";
+const DISTILL_PROMPT_VERSION: &str = "3";
 
 fn safe_prompt_field(value: Option<&str>) -> String {
     let value = value.unwrap_or("");
@@ -50,7 +50,8 @@ fn build_distill_prompt(log: &Value) -> String {
 
     format!(
         r#"You are a knowledge distillation assistant. Given an agent interaction log, \
-extract zero or more independent reusable procedural principles.
+extract zero or more independent reusable procedural principles. Favor GENERAL, \
+transferable skills, methods, and techniques over project-specific facts.
 
 Agent interaction:
 {context}
@@ -65,7 +66,14 @@ Return [] if nothing is worth keeping.
 
 Rules:
 - content must be self-contained and actionable for a future agent reading cold
-- trigger_desc must match the vocabulary a future agent would use in a search query
+- Prefer transferable methods and techniques; a principle that helps across many
+  projects is worth far more than one tied to this codebase
+- Abstract away project-specific detail: strip repo/file/function/path/variable names
+  and one-off identifiers, and rephrase the lesson as a general principle whoever the
+  next project is. Keep concrete project-specific detail ONLY when the lesson genuinely
+  cannot be generalized without losing its meaning
+- trigger_desc must match the vocabulary a future agent would use in a search query;
+  prefer general, technology- or domain-level phrasing over project-name phrasing
 - Never store conversation text verbatim; always distil to reusable principle form
 - If outcome is "fail", focus on what to avoid
 - Keep principles independent; do not combine unrelated lessons"#
