@@ -1,6 +1,6 @@
 // ── LLM configuration step ────────────────────────────────────────────────────
 
-use super::{ui::*, *};
+use super::ui::*;
 
 pub(super) fn configure_llm_interactive() {
     use crate::settings::{self, EmbeddingConfig, LlmConfig};
@@ -169,7 +169,7 @@ pub(super) fn configure_daemon_interactive() {
     use crate::settings::{self, DaemonConfig};
 
     // Auto-create the default hooks directory.
-    let hooks_dir = home_dir().join(".innate").join("sessions");
+    let hooks_dir = crate::paths::sessions_dir();
     let _ = std::fs::create_dir_all(&hooks_dir);
     let default_watch = "~/.innate/sessions".to_string();
 

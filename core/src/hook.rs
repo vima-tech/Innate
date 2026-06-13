@@ -62,11 +62,7 @@ fn run_hook_stop() -> anyhow::Result<()> {
     }
     events.push(json!({"event_type": "session_end"}));
 
-    let log_path = dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".innate")
-        .join("sessions")
-        .join("session.log");
+    let log_path = crate::paths::session_log_path();
 
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -89,7 +85,5 @@ pub(crate) fn run_command(action: &HookCommands) -> anyhow::Result<()> {
         HookCommands::Stop => run_hook_stop(),
     }
 }
-use std::path::PathBuf;
-
 use clap::Subcommand;
 use serde_json::json;

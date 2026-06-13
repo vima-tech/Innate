@@ -559,7 +559,7 @@ impl KnowledgeBase {
         // The compact row keeps attribution corrections and audit joins possible without
         // retaining potentially large raw outputs indefinitely.
         self.storage.begin_immediate()?;
-        let purge_cutoff = days_ago(&now_iso, 30);
+        let purge_cutoff = days_ago(&now_iso, self.log_compact_days);
         let purge_result = self
             .storage
             .conn_execute(

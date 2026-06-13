@@ -256,6 +256,24 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// In-place L2 normalisation. Zero vectors are left unchanged (all zeros).
+/// Pre-normalising stored vectors lets vector search reduce cosine similarity
+/// to a plain dot product in its O(N) inner loop.
+pub fn l2_normalize(v: &mut [f32]) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Dot product of two equal-length slices. For unit vectors this equals the
+/// cosine similarity.
+pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

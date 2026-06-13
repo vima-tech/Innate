@@ -10,6 +10,14 @@ pub trait EmbeddingProvider: Send + Sync {
     fn trigger_dim(&self) -> usize;
     fn embed_content(&self, text: &str) -> Result<Vec<f32>>;
     fn embed_trigger(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Embed `text` for both the content and trigger spaces. Default issues two
+    /// separate calls. Providers backed by a single shared model (e.g. a remote
+    /// embedding endpoint) should override this to make one request and avoid the
+    /// duplicate round trip on the recall hot path.
+    fn embed_both(&self, text: &str) -> Result<(Vec<f32>, Vec<f32>)> {
+        Ok((self.embed_content(text)?, self.embed_trigger(text)?))
+    }
 }
 
 /// Hash-based deterministic embeddings — no model needed, good for tests.

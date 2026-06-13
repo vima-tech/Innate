@@ -25,24 +25,15 @@ pub enum DaemonCommands {
     },
 }
 fn default_pid_file() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".innate")
-        .join("daemon.pid")
+    crate::paths::daemon_pid_path()
 }
 
 fn default_state_db() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".innate")
-        .join("daemon_state.sqlite")
+    crate::paths::daemon_state_path()
 }
 
 fn default_log_file() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".innate")
-        .join("daemon.log")
+    crate::paths::daemon_log_path()
 }
 
 pub(crate) fn run_command(action: &DaemonCommands, db_path: &Path) -> anyhow::Result<()> {

@@ -21,10 +21,7 @@ type HmacSha256 = Hmac<Sha256>;
 // ── Backup state (local cache of last backup time) ───────────────────────────
 
 fn backup_state_path() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".innate")
-        .join("backup_state.json")
+    crate::paths::backup_state_path()
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -264,10 +261,7 @@ impl R2BackupService {
         min_backups: usize,
     ) -> anyhow::Result<BackupResult> {
         // Temporary file for the VACUUM copy.
-        let tmp_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".innate")
-            .join("tmp");
+        let tmp_dir = crate::paths::tmp_dir();
         std::fs::create_dir_all(&tmp_dir)?;
         let ts_str = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let tmp_path = tmp_dir.join(format!("innate-backup-{ts_str}.db"));

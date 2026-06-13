@@ -32,6 +32,94 @@ fn add_and_recall() {
 }
 
 #[test]
+fn warm_cache_reflects_writes_made_after_first_recall() {
+    // Locks the incremental vector-cache invariant: a recall warms the in-memory
+    // cache, and a chunk added afterwards must still be retrievable by the next
+    // recall on the same long-lived KnowledgeBase (no stale-cache miss).
+    let (kb, _f) = tmp_kb();
+
+    let id_a = kb
+        .add("First fact about caching", "note", Some("caching"), None, "manual", None)
+        .unwrap();
+
+    // Warm the cache.
+    let first = kb
+        .recall("caching", 6000, false, false, None, "sdk", "false", false, "off")
+        .unwrap();
+    assert!(first
+        .knowledge
+        .iter()
+        .any(|c| c["id"].as_str() == Some(id_a.as_str())));
+
+    // Write after the cache is warm — must land in the in-memory cache.
+    let id_b = kb
+        .add("Second fact added later", "note", Some("later"), None, "manual", None)
+        .unwrap();
+
+    let second = kb
+        .recall("later", 6000, false, false, None, "sdk", "false", false, "off")
+        .unwrap();
+    assert!(
+        second
+            .knowledge
+            .iter()
+            .any(|c| c["id"].as_str() == Some(id_b.as_str())),
+        "chunk added after cache warm-up was not retrievable"
+    );
+}
+
+#[test]
+fn curate_compacts_old_terminal_logs_and_keeps_recent() {
+    // Step 8 of curate compacts terminal episodic_log rows older than the
+    // configurable window, NULLing heavy payload while preserving the row.
+    let (kb, _f) = tmp_kb();
+    let lib = kb.storage.lib_id().unwrap();
+
+    let mk = |trace: &str, ts: &str| crate::storage::EpisodicLogRow {
+        id: crate::utils::gen_uuid(),
+        trace_id: trace.to_string(),
+        lib_id: lib.clone(),
+        ts: ts.to_string(),
+        output_summary: Some("heavy payload to be compacted".to_string()),
+        event_source: "sdk".to_string(),
+        task_state: "completed".to_string(),
+        usage_state: "unknown".to_string(),
+        distill_state: "distilled".to_string(),
+        ..Default::default()
+    };
+
+    // One ancient terminal log (well before the 30-day window) and one fresh one.
+    kb.storage
+        .upsert_episodic_log(&mk("old-trace", "2020-01-01T00:00:00.000Z"))
+        .unwrap();
+    kb.storage
+        .upsert_episodic_log(&mk("new-trace", &crate::utils::utc_now_iso()))
+        .unwrap();
+
+    kb.evolve("manual").unwrap();
+
+    let old = kb.storage.get_episodic_log("old-trace").unwrap().unwrap();
+    let new = kb.storage.get_episodic_log("new-trace").unwrap().unwrap();
+    assert!(
+        old["output_summary"].is_null(),
+        "old terminal log should have been compacted"
+    );
+    assert_eq!(
+        new["output_summary"].as_str(),
+        Some("heavy payload to be compacted"),
+        "recent terminal log must be preserved"
+    );
+}
+
+#[test]
+fn vacuum_runs_and_reports_size() {
+    let (kb, _f) = tmp_kb();
+    let (before, after) = kb.storage.vacuum().unwrap();
+    assert!(before > 0 && after > 0);
+    assert!(after <= before, "vacuum must not grow the file");
+}
+
+#[test]
 fn spark_and_promote() {
     let (kb, _f) = tmp_kb();
     let sid = kb

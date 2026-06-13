@@ -93,6 +93,32 @@ Daemon ────── CLI ─┘         │
 
 通过统一入口打开知识库时，会按设置注入远程模型；直接调用 `KnowledgeBase::open` 时使用本地 Dummy Embedding 和启发式 Distiller。
 
+### 3.4 文件系统布局
+
+所有本地状态位于 `~/.innate/`，按用途分为三个子目录，根目录只保留配置文件：
+
+```text
+~/.innate/
+  settings.json            ← 用户配置（LLM / Embedding / Daemon / Backup）
+  settings.schema.jsonc    ← settings.json 的 JSON Schema
+  data/                    ← 数据库与运行时状态
+    personal.db (+ -shm, -wal)   知识库主库
+    daemon_state.sqlite          Daemon 私有状态（偏移量/inode/去重）
+    daemon.pid                   Daemon 进程号
+    backup_state.json            上次备份时间缓存
+    tmp/                         备份 VACUUM 临时副本等临时文件
+  logs/                    ← 运行日志
+    daemon.log
+    mcp.log
+  sessions/                ← Agent 会话轨迹（Daemon 监听目录）
+    session.log
+```
+
+- 路径由 `core/src/paths.rs` 统一定义，是唯一真相源；其他模块不得自行拼接 `~/.innate` 路径。
+- `paths::ensure_layout()` 在 CLI 与 MCP 启动时执行：创建上述子目录，并把旧版扁平布局（`~/.innate/<file>`）中的文件迁移到对应子目录。迁移幂等、best-effort（单个移动失败不中断启动），且仅当目标不存在时才搬，数据库随其 `-shm`/`-wal` 一并迁移以保持 SQLite 一致性。
+- 默认知识库路径为 `~/.innate/data/personal.db`；可用 `--db` 覆盖。
+- `innate vacuum` 在 Curate 压缩与 trace 清理后回收磁盘空间（checkpoint WAL + VACUUM）。
+
 ## 4. 核心数据模型
 
 ### 4.1 知识块 `chunks`

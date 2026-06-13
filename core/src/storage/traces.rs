@@ -16,10 +16,12 @@ impl Storage {
         source: &str,
         ts: &str,
     ) -> Result<usize> {
-        Ok(self.conn.execute(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT OR IGNORE INTO usage_trace
              (trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts)
              VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        )?;
+        Ok(stmt.execute(
             params![trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts],
         )?)
     }
@@ -64,48 +66,63 @@ impl Storage {
         source: &str,
         ts: &str,
     ) -> Result<()> {
+        if used_ids.is_empty() {
+            return Ok(());
+        }
         let attribution_rank = |value: &str| match value {
             "explicit" => 3,
             "cited" => 2,
             "inferred" => 1,
             _ => 0,
         };
+
+        // Batch-fetch all existing 'used' rows for this trace in one query
+        // instead of one SELECT per chunk id.
+        let placeholders = used_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT chunk_id, attribution FROM usage_trace
+             WHERE trace_id=? AND event='used' AND chunk_id IN ({placeholders})"
+        );
+        let mut qparams: Vec<&str> = Vec::with_capacity(used_ids.len() + 1);
+        qparams.push(trace_id);
+        qparams.extend(used_ids.iter().map(String::as_str));
+        let existing: HashMap<String, String> = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(qparams.iter()), |r| {
+                let id: String = r.get(0)?;
+                let attr: Option<String> = r.get(1)?;
+                Ok((id, attr.unwrap_or_else(|| "inferred".to_string())))
+            })?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
         for chunk_id in used_ids {
-            let existing = self
-                .query_chunks_params(
-                    "SELECT attribution, strength FROM usage_trace
-                     WHERE trace_id=? AND chunk_id=? AND event='used'",
-                    params![trace_id, chunk_id],
-                )?
-                .into_iter()
-                .next();
-            if let Some(row) = existing {
-                let existing_attribution = row
-                    .get("attribution")
-                    .and_then(Value::as_str)
-                    .unwrap_or("inferred");
-                if attribution_rank(attribution) > attribution_rank(existing_attribution) {
-                    self.conn.execute(
-                        "UPDATE usage_trace
-                         SET strength=?, attribution=?, source=?, ts=?
-                         WHERE trace_id=? AND chunk_id=? AND event='used'",
-                        params![strength, attribution, source, ts, trace_id, chunk_id],
+            match existing.get(chunk_id) {
+                Some(existing_attribution) => {
+                    if attribution_rank(attribution) > attribution_rank(existing_attribution) {
+                        self.conn.execute(
+                            "UPDATE usage_trace
+                             SET strength=?, attribution=?, source=?, ts=?
+                             WHERE trace_id=? AND chunk_id=? AND event='used'",
+                            params![strength, attribution, source, ts, trace_id, chunk_id],
+                        )?;
+                    }
+                }
+                None => {
+                    self.insert_usage_trace(
+                        trace_id,
+                        Some(chunk_id),
+                        "used",
+                        strength,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(attribution),
+                        source,
+                        ts,
                     )?;
                 }
-            } else {
-                self.insert_usage_trace(
-                    trace_id,
-                    Some(chunk_id),
-                    "used",
-                    strength,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(attribution),
-                    source,
-                    ts,
-                )?;
             }
         }
         Ok(())
@@ -324,12 +341,18 @@ impl Storage {
     }
 
     pub fn delete_trace_confidence_evidence(&self, trace_id: &str, kinds: &[&str]) -> Result<()> {
-        for kind in kinds {
-            self.conn.execute(
-                "DELETE FROM confidence_evidence WHERE trace_id=? AND kind=?",
-                params![trace_id, kind],
-            )?;
+        if kinds.is_empty() {
+            return Ok(());
         }
+        let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM confidence_evidence WHERE trace_id=? AND kind IN ({placeholders})"
+        );
+        let mut params: Vec<&str> = Vec::with_capacity(kinds.len() + 1);
+        params.push(trace_id);
+        params.extend_from_slice(kinds);
+        self.conn
+            .execute(&sql, rusqlite::params_from_iter(params.iter()))?;
         Ok(())
     }
 
@@ -456,30 +479,72 @@ impl Storage {
     }
 
     pub fn context_score(&self, chunk_id: &str, context_key: &str) -> Result<f64> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT success_count, failure_count, positive_feedback, negative_feedback
-                 FROM chunk_context_stats WHERE chunk_id=? AND context_key=?",
-                params![chunk_id, context_key],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT success_count, failure_count, positive_feedback, negative_feedback
+             FROM chunk_context_stats WHERE chunk_id=? AND context_key=?",
+        )?;
+        let row = stmt
+            .query_row(params![chunk_id, context_key], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
             .optional()?;
         let Some((success, failure, positive, negative)) = row else {
             return Ok(0.0);
         };
-        let wins = success as f64 + positive as f64 * 2.0;
-        let losses = failure as f64 + negative as f64 * 2.0;
-        let evidence = wins + losses;
-        let posterior = (wins + 1.0) / (evidence + 2.0);
-        let evidence_weight = (evidence / 5.0).min(1.0);
-        Ok((posterior - 0.5) * 2.0 * evidence_weight)
+        Ok(context_score_from_counts(success, failure, positive, negative))
     }
+
+    /// Batch variant of `context_score`: one query for many chunk ids under a
+    /// single context key. Chunks with no stats are absent from the map (score 0).
+    pub fn context_scores_batch(
+        &self,
+        chunk_ids: &[&str],
+        context_key: &str,
+    ) -> Result<HashMap<String, f64>> {
+        if chunk_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT chunk_id, success_count, failure_count, positive_feedback, negative_feedback
+             FROM chunk_context_stats
+             WHERE context_key=? AND chunk_id IN ({placeholders})"
+        );
+        let mut params: Vec<&str> = Vec::with_capacity(chunk_ids.len() + 1);
+        params.push(context_key);
+        params.extend_from_slice(chunk_ids);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for (id, success, failure, positive, negative) in rows.filter_map(|r| r.ok()) {
+            map.insert(
+                id,
+                context_score_from_counts(success, failure, positive, negative),
+            );
+        }
+        Ok(map)
+    }
+}
+
+/// Shared scoring math for `context_score` / `context_scores_batch`.
+fn context_score_from_counts(success: i64, failure: i64, positive: i64, negative: i64) -> f64 {
+    let wins = success as f64 + positive as f64 * 2.0;
+    let losses = failure as f64 + negative as f64 * 2.0;
+    let evidence = wins + losses;
+    let posterior = (wins + 1.0) / (evidence + 2.0);
+    let evidence_weight = (evidence / 5.0).min(1.0);
+    (posterior - 0.5) * 2.0 * evidence_weight
 }

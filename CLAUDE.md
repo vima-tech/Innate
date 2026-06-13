@@ -84,7 +84,24 @@ MCP and CLI call `KnowledgeBase` directly (in-process). SDKs and Daemon never op
 | `mcp.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
 | `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
 | `daemon.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
+| `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
 | `schema.sql` | Embedded schema (v4.13); `include_str!` at compile time |
+
+### Filesystem layout (`~/.innate/`)
+
+All local state lives under `~/.innate/`, split into three subdirectories with only config at the root:
+
+```text
+~/.innate/
+  settings.json  settings.schema.jsonc   ← config (root)
+  data/      personal.db (+ -shm/-wal), daemon_state.sqlite, daemon.pid, backup_state.json, tmp/
+  logs/      daemon.log, mcp.log
+  sessions/  session.log   (watched by the daemon)
+```
+
+- **`paths.rs` is the only place that derives `~/.innate` paths** — never re-join `.innate` elsewhere; add a helper there instead.
+- `paths::ensure_layout()` runs at CLI and MCP startup: creates the subdirs and relocates files from the old flat layout (`~/.innate/<file>`). Idempotent, best-effort, moves only when the target is absent; the db moves together with its `-shm`/`-wal` sidecars.
+- Default db is `~/.innate/data/personal.db` (override with `--db`). `innate vacuum` checkpoints the WAL and VACUUMs to reclaim space after curate compaction.
 
 ### The 8 Public APIs (on `KnowledgeBase`)
 

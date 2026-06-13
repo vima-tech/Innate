@@ -10,10 +10,7 @@ pub use crate::daemon::DaemonCommands;
 pub use crate::hook::HookCommands;
 
 fn default_db() -> PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".innate")
-        .join("personal.db")
+    crate::paths::default_db_path()
 }
 
 #[derive(Parser)]
@@ -167,6 +164,8 @@ pub enum Commands {
     },
     /// Upgrade database schema to current version
     Migrate,
+    /// Reclaim disk space: checkpoint the WAL and VACUUM the database
+    Vacuum,
     /// Upgrade the innate binary to the latest (or specified) release
     Upgrade {
         /// Install this specific version, e.g. 0.3.0 or v0.3.0 (default: latest)
@@ -192,6 +191,9 @@ pub enum Commands {
 
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Create the ~/.innate subdirectory layout and migrate any legacy flat files
+    // before any path is resolved.
+    crate::paths::ensure_layout();
     let db_path = cli.db.unwrap_or_else(default_db);
 
     if let Commands::Mcp = &cli.command {
@@ -456,6 +458,16 @@ pub fn run() -> anyhow::Result<()> {
         Commands::DropSpark { spark_id, reason } => {
             kb.drop_spark(&spark_id, &reason)?;
             println!("dropped");
+        }
+        Commands::Vacuum => {
+            let (before, after) = kb.storage.vacuum()?;
+            let mb = |b: i64| b as f64 / 1_048_576.0;
+            println!(
+                "vacuumed: {:.2} MB → {:.2} MB (reclaimed {:.2} MB)",
+                mb(before),
+                mb(after),
+                mb(before - after)
+            );
         }
         Commands::Mcp
         | Commands::Install

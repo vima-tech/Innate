@@ -18,13 +18,9 @@ impl KnowledgeBase {
         let trace_id = gen_uuid();
         let now = utc_now_iso();
 
-        let q_content = self
+        let (q_content, q_trigger) = self
             .embedding
-            .embed_content(query)
-            .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))?;
-        let q_trigger = self
-            .embedding
-            .embed_trigger(query)
+            .embed_both(query)
             .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))?;
 
         // ANN candidates (non-spark)
@@ -156,32 +152,63 @@ impl KnowledgeBase {
     }
 
     fn apply_soft_dep_bonus(&self, candidates: &mut HashMap<String, CandidateInfo>) -> Result<()> {
-        let ids: Vec<String> = candidates.keys().cloned().collect();
-        for cid in ids {
-            if candidates[&cid].chunk.get("origin").and_then(Value::as_str) == Some("spark") {
-                continue;
+        // Collect non-spark candidate ids and batch-fetch their outgoing deps
+        // in a single query (was one get_deps per candidate).
+        let src_ids: Vec<String> = candidates
+            .iter()
+            .filter(|(_, info)| {
+                info.chunk.get("origin").and_then(Value::as_str) != Some("spark")
+            })
+            .map(|(cid, _)| cid.clone())
+            .collect();
+        if src_ids.is_empty() {
+            return Ok(());
+        }
+        let src_refs: Vec<&str> = src_ids.iter().map(String::as_str).collect();
+        let deps_map = self.storage.get_deps_batch(&src_refs)?;
+
+        // Gather distinct soft-dep targets and batch-fetch them in one query
+        // (was one get_chunk per soft edge).
+        let mut target_ids: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for deps in deps_map.values() {
+            for (dst, kind, _) in deps {
+                if kind == "soft" && seen.insert(dst.clone()) {
+                    target_ids.push(dst.clone());
+                }
             }
-            let deps = self.storage.get_deps(&cid)?;
-            for (dst, kind, _) in &deps {
+        }
+        if target_ids.is_empty() {
+            return Ok(());
+        }
+        let target_refs: Vec<&str> = target_ids.iter().map(String::as_str).collect();
+        let targets = self.storage.get_chunks_by_ids(&target_refs)?;
+
+        for src in &src_ids {
+            let Some(deps) = deps_map.get(src) else {
+                continue;
+            };
+            for (dst, kind, _) in deps {
                 if kind != "soft" {
                     continue;
                 }
-                if let Some(target) = self.storage.get_chunk(dst)? {
-                    if target.get("state").and_then(Value::as_str) == Some("archived") {
-                        continue;
-                    }
-                    if target.get("origin").and_then(Value::as_str) == Some("spark") {
-                        continue;
-                    }
-                    let e = candidates
-                        .entry(dst.clone())
-                        .or_insert_with(|| CandidateInfo {
-                            chunk: target,
-                            sim_content: 0.0,
-                            sim_trigger: 0.0,
-                        });
-                    e.sim_content = (e.sim_content + 0.05).min(1.0);
+                let Some(target) = targets.get(dst) else {
+                    continue;
+                };
+                if target.get("state").and_then(Value::as_str) == Some("archived") {
+                    continue;
                 }
+                if target.get("origin").and_then(Value::as_str) == Some("spark") {
+                    continue;
+                }
+                let e = candidates
+                    .entry(dst.clone())
+                    .or_insert_with(|| CandidateInfo {
+                        chunk: target.clone(),
+                        sim_content: 0.0,
+                        sim_trigger: 0.0,
+                    });
+                e.sim_content = (e.sim_content + 0.05).min(1.0);
             }
         }
         Ok(())
@@ -193,6 +220,15 @@ impl KnowledgeBase {
         query: &str,
     ) -> Result<Vec<(f64, Value)>> {
         let context_key = content_hash(&normalize_query(query));
+        // Batch-fetch context scores for all candidates in one query
+        // (was one context_score lookup per candidate).
+        let cand_ids: Vec<String> = candidates
+            .values()
+            .filter_map(|info| info.chunk.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        let cand_refs: Vec<&str> = cand_ids.iter().map(String::as_str).collect();
+        let ctx_scores = self.storage.context_scores_batch(&cand_refs, &context_key)?;
+
         let mut scored: Vec<(f64, Value)> = Vec::with_capacity(candidates.len());
         for info in candidates.into_values() {
             let conf = info
@@ -201,7 +237,7 @@ impl KnowledgeBase {
                 .and_then(Value::as_f64)
                 .unwrap_or(0.5);
             let chunk_id = info.chunk.get("id").and_then(Value::as_str).unwrap_or("");
-            let context_score = self.storage.context_score(chunk_id, &context_key)?;
+            let context_score = ctx_scores.get(chunk_id).copied().unwrap_or(0.0);
             let mut fused = self.w_content * info.sim_content as f64
                 + self.w_trigger * info.sim_trigger as f64
                 + self.w_confidence * conf

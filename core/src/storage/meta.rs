@@ -2,10 +2,10 @@ use super::*;
 
 impl Storage {
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
-        Ok(self
+        let mut stmt = self
             .conn
-            .query_row("SELECT value FROM meta WHERE key=?", [key], |r| r.get(0))
-            .optional()?)
+            .prepare_cached("SELECT value FROM meta WHERE key=?")?;
+        Ok(stmt.query_row([key], |r| r.get(0)).optional()?)
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {

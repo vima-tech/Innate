@@ -39,4 +39,25 @@ impl Storage {
     pub(crate) fn conn_execute_count<P: rusqlite::Params>(&self, sql: &str, p: P) -> Result<usize> {
         Ok(self.conn.execute(sql, p)?)
     }
+
+    /// On-disk size of the main database file in bytes (`page_count * page_size`).
+    pub fn db_size_bytes(&self) -> Result<i64> {
+        let page_count: i64 = self.conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok(page_count * page_size)
+    }
+
+    /// Reclaim space freed by curate's log compaction and trace purges: checkpoint
+    /// and truncate the WAL, then VACUUM to return free pages to the OS. Returns
+    /// `(before_bytes, after_bytes)`. Must run outside any transaction.
+    pub fn vacuum(&self) -> Result<(i64, i64)> {
+        let before = self.db_size_bytes()?;
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        self.conn.execute_batch("VACUUM;")?;
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        // VACUUM rebuilds the file but preserves all rows; in-memory vector caches
+        // stay valid (same data), so they are intentionally left untouched.
+        let after = self.db_size_bytes()?;
+        Ok((before, after))
+    }
 }

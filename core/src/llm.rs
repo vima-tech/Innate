@@ -100,6 +100,74 @@ fn build_distill_prompt_with_related(log: &Value, logs: &[Value]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Shared HTTP transport with retry/backoff
+// ---------------------------------------------------------------------------
+
+/// Max total attempts (initial try + retries) for a single LLM/embedding call.
+const HTTP_MAX_ATTEMPTS: u32 = 3;
+/// Per-request socket timeout. Each retry gets a fresh timeout window.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// POST `body` as JSON to `url` with the given extra headers, retrying transient
+/// failures (network/timeout errors, HTTP 429, and 5xx) with exponential backoff.
+/// `Content-Type: application/json` is set automatically. `label` names the call
+/// site in error messages (e.g. "LLM", "Anthropic", "Embedding").
+fn post_json_retry(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &Value,
+    label: &str,
+) -> Result<Value> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let mut req = ureq::post(url)
+            .timeout(HTTP_TIMEOUT)
+            .set("Content-Type", "application/json");
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        match req.send_json(body) {
+            Ok(response) => {
+                return response
+                    .into_json()
+                    .map_err(|e| InnateError::Other(format!("{label} response parse error: {e}")));
+            }
+            Err(err) => {
+                let (retryable, retry_after) = match &err {
+                    ureq::Error::Status(code, resp) => (
+                        status_is_retryable(*code),
+                        resp.header("retry-after")
+                            .and_then(|s| s.trim().parse::<u64>().ok()),
+                    ),
+                    ureq::Error::Transport(_) => (true, None),
+                };
+                if retryable && attempt < HTTP_MAX_ATTEMPTS {
+                    std::thread::sleep(backoff_delay(attempt, retry_after));
+                    continue;
+                }
+                return Err(InnateError::Other(format!("{label} HTTP error: {err}")));
+            }
+        }
+    }
+}
+
+/// Transient HTTP statuses worth retrying: rate limits and server-side errors.
+fn status_is_retryable(code: u16) -> bool {
+    code == 429 || (500..=599).contains(&code)
+}
+
+/// Backoff before the next attempt. Honors a server `Retry-After` (seconds, capped
+/// at 30s) when present, otherwise exponential: 250ms, 500ms, 1s, ...
+fn backoff_delay(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
+    if let Some(secs) = retry_after_secs {
+        return Duration::from_secs(secs.min(30));
+    }
+    let shift = (attempt - 1).min(6);
+    Duration::from_millis(250u64.saturating_mul(1 << shift))
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI-compatible distiller  (works for GPT, DeepSeek, local Ollama, etc.)
 // ---------------------------------------------------------------------------
 
@@ -128,16 +196,13 @@ impl OpenAiDistiller {
             "temperature": 0.2,
         });
 
-        let response = ureq::post(&url)
-            .timeout(Duration::from_secs(30))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Content-Type", "application/json")
-            .send_json(&body)
-            .map_err(|e| InnateError::Other(format!("LLM HTTP error: {e}")))?;
-
-        let resp_json: Value = response
-            .into_json()
-            .map_err(|e| InnateError::Other(format!("LLM response parse error: {e}")))?;
+        let auth = format!("Bearer {api_key}");
+        let resp_json = post_json_retry(
+            &url,
+            &[("Authorization", &auth)],
+            &body,
+            "LLM",
+        )?;
 
         resp_json
             .pointer("/choices/0/message/content")
@@ -197,17 +262,15 @@ impl AnthropicDistiller {
             "messages": [{"role": "user", "content": prompt}],
         });
 
-        let response = ureq::post(&url)
-            .timeout(Duration::from_secs(30))
-            .set("x-api-key", &api_key)
-            .set("anthropic-version", "2023-06-01")
-            .set("Content-Type", "application/json")
-            .send_json(&body)
-            .map_err(|e| InnateError::Other(format!("Anthropic HTTP error: {e}")))?;
-
-        let resp_json: Value = response
-            .into_json()
-            .map_err(|e| InnateError::Other(format!("Anthropic response parse error: {e}")))?;
+        let resp_json = post_json_retry(
+            &url,
+            &[
+                ("x-api-key", &api_key),
+                ("anthropic-version", "2023-06-01"),
+            ],
+            &body,
+            "Anthropic",
+        )?;
 
         resp_json
             .pointer("/content/0/text")
@@ -364,7 +427,35 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{build_distill_prompt, distill_entry_with, distill_with, parse_distill_response};
+    use std::time::Duration;
+
+    use super::{
+        backoff_delay, build_distill_prompt, distill_entry_with, distill_with,
+        parse_distill_response, status_is_retryable,
+    };
+
+    #[test]
+    fn only_rate_limit_and_5xx_are_retryable() {
+        assert!(status_is_retryable(429));
+        assert!(status_is_retryable(500));
+        assert!(status_is_retryable(503));
+        assert!(status_is_retryable(599));
+        assert!(!status_is_retryable(400));
+        assert!(!status_is_retryable(401));
+        assert!(!status_is_retryable(404));
+        assert!(!status_is_retryable(200));
+    }
+
+    #[test]
+    fn backoff_is_exponential_and_honors_retry_after() {
+        // Exponential schedule: 250ms, 500ms, 1s for attempts 1..3.
+        assert_eq!(backoff_delay(1, None), Duration::from_millis(250));
+        assert_eq!(backoff_delay(2, None), Duration::from_millis(500));
+        assert_eq!(backoff_delay(3, None), Duration::from_millis(1000));
+        // Retry-After overrides the schedule and is capped at 30s.
+        assert_eq!(backoff_delay(1, Some(5)), Duration::from_secs(5));
+        assert_eq!(backoff_delay(1, Some(120)), Duration::from_secs(30));
+    }
 
     #[test]
     fn prompt_redacts_secrets_before_external_llm_call() {
@@ -450,16 +541,13 @@ impl LlmEmbeddingProvider {
             "model": self.config.model_id,
         });
 
-        let response = ureq::post(&url)
-            .timeout(Duration::from_secs(30))
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Content-Type", "application/json")
-            .send_json(&body)
-            .map_err(|e| InnateError::Other(format!("Embedding HTTP error: {e}")))?;
-
-        let resp_json: Value = response
-            .into_json()
-            .map_err(|e| InnateError::Other(format!("Embedding response parse: {e}")))?;
+        let auth = format!("Bearer {api_key}");
+        let resp_json = post_json_retry(
+            &url,
+            &[("Authorization", &auth)],
+            &body,
+            "Embedding",
+        )?;
 
         let embedding = resp_json
             .pointer("/data/0/embedding")
@@ -493,6 +581,13 @@ impl EmbeddingProvider for LlmEmbeddingProvider {
 
     fn embed_trigger(&self, text: &str) -> Result<Vec<f32>> {
         self.embed(text)
+    }
+
+    /// Content and trigger share the same model and dimension here, so a single
+    /// HTTP request serves both spaces — half the round trips per recall.
+    fn embed_both(&self, text: &str) -> Result<(Vec<f32>, Vec<f32>)> {
+        let v = self.embed(text)?;
+        Ok((v.clone(), v))
     }
 }
 

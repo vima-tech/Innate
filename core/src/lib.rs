@@ -9,6 +9,7 @@ pub mod kb;
 pub mod llm;
 pub mod mcp;
 pub mod migrate;
+pub mod paths;
 pub mod refine;
 pub mod settings;
 pub mod storage;

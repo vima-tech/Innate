@@ -276,10 +276,7 @@ fn default_min_backups() -> usize {
 
 /// Returns `~/.innate/settings.json`.
 pub fn settings_path() -> PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".innate")
-        .join("settings.json")
+    crate::paths::settings_path()
 }
 
 /// Load settings from `~/.innate/settings.json`. Returns `Settings::default()` if absent.

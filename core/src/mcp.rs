@@ -35,10 +35,7 @@ const TOOLS: &[(&str, &str)] = &[
 ];
 
 fn default_mcp_log() -> PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".innate")
-        .join("mcp.log")
+    crate::paths::mcp_log_path()
 }
 
 fn mcp_log(log: &Mutex<Box<dyn io::Write + Send>>, msg: &str) {
@@ -49,6 +46,7 @@ fn mcp_log(log: &Mutex<Box<dyn io::Write + Send>>, msg: &str) {
 }
 
 pub fn run_server(db_path: PathBuf) -> anyhow::Result<()> {
+    crate::paths::ensure_layout();
     maybe_auto_start_daemon(&db_path);
 
     let log_path = default_mcp_log();
@@ -608,10 +606,7 @@ fn dispatch_backup(
 // ---------------------------------------------------------------------------
 
 fn default_pid_file() -> PathBuf {
-    dirs_next::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".innate")
-        .join("daemon.pid")
+    crate::paths::daemon_pid_path()
 }
 
 /// If `settings.daemon.auto_start` is true and watch_dirs are configured, start the

@@ -63,8 +63,7 @@ impl Storage {
             "INSERT OR REPLACE INTO vec_content(chunk_id, embedding) VALUES (?,?)",
             params![chunk_id, emb],
         )?;
-        *self.vec_content_cache.borrow_mut() = None;
-        Ok(())
+        self.note_vector_write(&self.vec_content_cache, chunk_id, emb)
     }
 
     pub fn insert_vec_trigger(&self, chunk_id: &str, emb: &[u8]) -> Result<()> {
@@ -72,19 +71,66 @@ impl Storage {
             "INSERT OR REPLACE INTO vec_trigger(chunk_id, embedding) VALUES (?,?)",
             params![chunk_id, emb],
         )?;
+        self.note_vector_write(&self.vec_trigger_cache, chunk_id, emb)
+    }
+
+    /// Record a single vector write: bump the shared revision (so *other*
+    /// processes drop their caches), upsert the one entry into the warm cache
+    /// in place (so *this* long-lived process keeps its cache instead of
+    /// reloading the whole corpus), then re-sync the local revision tracker so
+    /// our own bump does not trip `refresh_vector_caches_if_changed`.
+    ///
+    /// A cold cache (None) is left cold — the next search loads everything,
+    /// including this row. This keeps bulk paths (e.g. full re-embed) O(N) by
+    /// invalidating once up front rather than upserting per write.
+    fn note_vector_write(&self, cache: &VectorCache, chunk_id: &str, emb: &[u8]) -> Result<()> {
+        self.bump_vector_revision()?;
+        if let Some(entries) = cache.borrow_mut().as_mut() {
+            let mut v = unpack_embedding(emb);
+            l2_normalize(&mut v);
+            match entries.iter_mut().find(|(id, _)| id == chunk_id) {
+                Some(slot) => slot.1 = v,
+                None => entries.push((chunk_id.to_string(), v)),
+            }
+        }
+        self.sync_vector_revision()
+    }
+
+    /// Monotonically advance `meta.vector_revision`. Any vector write must call
+    /// this so that other processes detect the change and drop their in-memory
+    /// caches on the next search (see `refresh_vector_caches_if_changed`).
+    fn bump_vector_revision(&self) -> Result<()> {
         self.conn.execute(
             "INSERT INTO meta(key, value) VALUES ('vector_revision', '1')
              ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
             [],
         )?;
-        *self.vec_trigger_cache.borrow_mut() = None;
         Ok(())
     }
 
+    /// Align the local revision tracker with the persisted value so an in-place
+    /// cache update performed by this process is not discarded on the next search.
+    fn sync_vector_revision(&self) -> Result<()> {
+        let current = self
+            .get_meta("vector_revision")?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        self.vector_cache_revision.set(Some(current));
+        Ok(())
+    }
+
+    /// Drop both in-memory vector caches and reset the revision tracker. Used on
+    /// transaction rollback (in-place upserts may not have persisted) and before
+    /// bulk re-embed loops (to avoid O(N²) in-place upserts on a warm cache).
+    pub(crate) fn invalidate_vector_caches(&self) {
+        *self.vec_content_cache.borrow_mut() = None;
+        *self.vec_trigger_cache.borrow_mut() = None;
+        self.vector_cache_revision.set(None);
+    }
+
     pub fn get_chunk(&self, id: &str) -> Result<Option<Value>> {
-        let row = self
-            .conn
-            .query_row("SELECT * FROM chunks WHERE id=?", [id], row_to_json);
+        let mut stmt = self.conn.prepare_cached("SELECT * FROM chunks WHERE id=?")?;
+        let row = stmt.query_row([id], row_to_json);
         match row {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -168,6 +214,8 @@ impl Storage {
         self.refresh_vector_caches_if_changed()?;
 
         // Populate cache on first access after open or invalidation.
+        // Stored vectors are L2-normalised here so the search inner loop can use
+        // a plain dot product instead of recomputing norms on every comparison.
         if cache_cell.borrow().is_none() {
             let sql = format!("SELECT chunk_id, embedding FROM {table}");
             let mut stmt = self.conn.prepare(&sql)?;
@@ -178,7 +226,11 @@ impl Storage {
                     Ok((id, blob))
                 })?
                 .filter_map(|r| r.ok())
-                .map(|(id, blob)| (id, unpack_embedding(&blob)))
+                .map(|(id, blob)| {
+                    let mut v = unpack_embedding(&blob);
+                    l2_normalize(&mut v);
+                    (id, v)
+                })
                 .collect();
             *cache_cell.borrow_mut() = Some(entries);
         }
@@ -186,19 +238,29 @@ impl Storage {
         let cache = cache_cell.borrow();
         let entries = cache.as_ref().unwrap();
 
-        // Compute similarities, then partial-sort to bring top-limit to the front (O(N log K)).
-        let mut results: Vec<(String, f32)> = entries
+        // Normalise the query once; cached vectors are already unit-length, so
+        // cosine similarity reduces to a dot product over each entry.
+        let mut q = query.to_vec();
+        l2_normalize(&mut q);
+
+        // Score by (index, similarity) without cloning ids; partial-sort the top
+        // `limit` to the front (O(N) select), then clone ids for the winners only.
+        let mut scored: Vec<(usize, f32)> = entries
             .iter()
-            .map(|(id, v)| (id.clone(), cosine_similarity(query, v)))
+            .enumerate()
+            .map(|(i, (_, v))| (i, dot_product(&q, v)))
             .collect();
-        if results.len() > limit {
-            results.select_nth_unstable_by(limit - 1, |a, b| {
+        if scored.len() > limit {
+            scored.select_nth_unstable_by(limit - 1, |a, b| {
                 b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             });
-            results.truncate(limit);
+            scored.truncate(limit);
         }
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(results)
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored
+            .into_iter()
+            .map(|(i, sim)| (entries[i].0.clone(), sim))
+            .collect())
     }
 
     fn refresh_vector_caches_if_changed(&self) -> Result<()> {
@@ -284,10 +346,10 @@ impl Storage {
     // Deps
     // ------------------------------------------------------------------
 
-    pub fn get_deps(&self, chunk_id: &str) -> Result<Vec<(String, String, Option<String>)>> {
+    pub fn get_deps(&self, chunk_id: &str) -> Result<Vec<DepEdge>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT dst, kind, dst_lib FROM deps WHERE src=?")?;
+            .prepare_cached("SELECT dst, kind, dst_lib FROM deps WHERE src=?")?;
         let rows = stmt.query_map([chunk_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -298,8 +360,35 @@ impl Storage {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// Batch variant of `get_deps`: fetch outgoing edges for many sources in one
+    /// query. Returns `src` → `[(dst, kind, dst_lib)]`. Sources with no edges are
+    /// simply absent from the map.
+    pub fn get_deps_batch(&self, srcs: &[&str]) -> Result<HashMap<String, Vec<DepEdge>>> {
+        if srcs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = srcs.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT src, dst, kind, dst_lib FROM deps WHERE src IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(srcs.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut map: HashMap<String, Vec<(String, String, Option<String>)>> = HashMap::new();
+        for (src, dst, kind, lib) in rows.filter_map(|r| r.ok()) {
+            map.entry(src).or_default().push((dst, kind, lib));
+        }
+        Ok(map)
+    }
+
     pub fn get_reverse_deps(&self, chunk_id: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT src FROM deps WHERE dst=?")?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT src FROM deps WHERE dst=?")?;
         let rows = stmt.query_map([chunk_id], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }

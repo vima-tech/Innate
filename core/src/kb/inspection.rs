@@ -262,6 +262,15 @@ impl KnowledgeBase {
             }));
         }
 
+        // Storage growth metrics — trace/log bloat is driven by recall/record
+        // activity over time, independent of chunk count, so it is surfaced here
+        // for monitoring before it becomes a problem.
+        let usage_trace_total = count_query(&self.storage, "SELECT COUNT(*) FROM usage_trace")?;
+        let episodic_log_total = count_query(&self.storage, "SELECT COUNT(*) FROM episodic_log")?;
+        let page_count = count_query(&self.storage, "PRAGMA page_count")?;
+        let page_size = count_query(&self.storage, "PRAGMA page_size")?;
+        let db_size_bytes = page_count * page_size;
+
         Ok(json!({
             "schema_version": schema_version,
             "lib_id": lib_id,
@@ -269,6 +278,12 @@ impl KnowledgeBase {
             "chunks": {
                 "total": total, "active": active, "pending": pending, "archived": archived,
                 "pending_oldest_ts": pending_oldest_ts,
+            },
+            "storage": {
+                "usage_trace_rows": usage_trace_total,
+                "episodic_log_rows": episodic_log_total,
+                "db_size_bytes": db_size_bytes,
+                "db_size_mb": (db_size_bytes as f64 / 1_048_576.0 * 100.0).round() / 100.0,
             },
             "sparks": sparks,
             "episodic_log": {"open": open_logs, "new": new_logs},
@@ -311,6 +326,7 @@ impl KnowledgeBase {
                 "curate.promote_confidence_min": self.promote_confidence_min,
                 "curate.screening_timeout_minutes": self.screening_timeout_minutes,
                 "curate.open_ttl_days": self.open_ttl_days,
+                "curate.log_compact_days": self.log_compact_days,
                 "evolve.schedule_interval_hours": self.evolve_schedule_interval_hours,
             },
             "suggestions": suggestions
@@ -333,6 +349,10 @@ impl KnowledgeBase {
              WHERE embed_version = 0 OR embed_version < ?",
             rusqlite::params![meta_version],
         )?;
+        // Bulk re-embed: drop the warm cache once so the per-row in-place upserts
+        // stay no-ops (cold) and the loop runs O(N) instead of O(N²). The next
+        // search reloads the rebuilt vectors from disk.
+        self.storage.invalidate_vector_caches();
         let mut count = 0;
         for row in &stale {
             let id = match row.get("id").and_then(Value::as_str) {

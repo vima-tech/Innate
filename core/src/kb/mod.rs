@@ -62,6 +62,7 @@ const GOVERNANCE_EVOLVE_THRESHOLD: i64 = 3;
 const FAILURE_MIN_USES: i64 = 5;
 const FAILURE_MAX_SUCCESS_RATE: f64 = 0.20;
 const FAILURE_CONFIDENCE_MAX: f64 = 0.35;
+const LOG_COMPACT_DAYS: i64 = 30;
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -162,6 +163,7 @@ pub struct KnowledgeBase {
     failure_min_uses: i64,
     failure_max_success_rate: f64,
     failure_confidence_max: f64,
+    log_compact_days: i64,
 }
 
 impl KnowledgeBase {
@@ -219,6 +221,7 @@ impl KnowledgeBase {
             failure_min_uses: FAILURE_MIN_USES,
             failure_max_success_rate: FAILURE_MAX_SUCCESS_RATE,
             failure_confidence_max: FAILURE_CONFIDENCE_MAX,
+            log_compact_days: LOG_COMPACT_DAYS,
         };
         kb.init_meta()?;
         kb.load_params()?;
@@ -286,6 +289,7 @@ impl KnowledgeBase {
             ("curate.failure_min_uses", "5"),
             ("curate.failure_max_success_rate", "0.20"),
             ("curate.failure_confidence_max", "0.35"),
+            ("curate.log_compact_days", "30"),
         ];
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
@@ -375,6 +379,7 @@ impl KnowledgeBase {
             f("curate.failure_max_success_rate", FAILURE_MAX_SUCCESS_RATE).clamp(0.0, 1.0);
         self.failure_confidence_max =
             f("curate.failure_confidence_max", FAILURE_CONFIDENCE_MAX).clamp(0.0, 1.0);
+        self.log_compact_days = i("curate.log_compact_days", LOG_COMPACT_DAYS).max(1);
         Ok(())
     }
 }

@@ -11,7 +11,7 @@ use rusqlite::{params, Connection, Row};
 use serde_json::Value;
 
 use crate::errors::{InnateError, Result};
-use crate::utils::{cosine_similarity, unpack_embedding};
+use crate::utils::{dot_product, l2_normalize, unpack_embedding};
 
 mod chunks;
 mod evolution;
@@ -26,6 +26,9 @@ const SCHEMA_SQL: &str = include_str!("../schema.sql");
 
 type VectorEntries = Vec<(String, Vec<f32>)>;
 type VectorCache = RefCell<Option<VectorEntries>>;
+
+/// A single dependency edge: `(dst, kind, dst_lib)`.
+pub type DepEdge = (String, String, Option<String>);
 
 pub struct Storage {
     pub db_path: PathBuf,
@@ -157,6 +160,9 @@ impl Storage {
 
     pub fn rollback(&self) -> Result<()> {
         self.conn.execute_batch("ROLLBACK")?;
+        // In-place cache upserts from the aborted transaction may not have
+        // persisted; drop caches so the next search reloads committed state.
+        self.invalidate_vector_caches();
         Ok(())
     }
 
