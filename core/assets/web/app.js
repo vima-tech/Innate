@@ -3,7 +3,7 @@
 // ════════════════════════════════════════════════════════════════════════
 // Innate Console — localhost governance console for the procedural KB.
 // Vanilla JS, no framework. Strict-CSP safe: no inline scripts/styles/handlers;
-// dynamic geometry (bar widths, legend colors) is set via the CSSOM (element
+// dynamic geometry (meter widths, bar colors) is set via the CSSOM (element
 // .style), which CSP style-src does not block.
 // ════════════════════════════════════════════════════════════════════════
 
@@ -56,7 +56,8 @@ const I18N = {
     prev: "‹ Prev", next: "Next ›", reload: "Reload",
     detail_placeholder: "Select an item to view its detail.",
     trace_placeholder: "Select a call to view its request & response.",
-    theme_light_title: "Light theme", theme_dark_title: "Dark theme",
+    empty_title: "No item selected",
+    theme_toggle_title: "Toggle light / dark theme",
     inspect_failed: "inspect failed",
     gov_empty: "No chunks flagged for review.",
     flagged: (n) => `${n} flagged`, score: "score", actors: (n) => `${n} actors`,
@@ -65,7 +66,7 @@ const I18N = {
     governance: "governance",
     act_approve: "Approve", act_restore: "Restore", act_archive: "Archive…", act_invalidate: "Invalidate…",
     k_id: "id", k_origin: "origin", k_confidence: "confidence", k_created: "created",
-    k_last_used: "last used", k_used_selected: "used / selected",
+    k_last_used: "last used", k_used_selected: "used / selected", hit_rate: "hit rate",
     h_content: "content", show_raw: "Show raw JSON", hide_raw: "Hide raw JSON",
     reason_label: "Reason", cancel: "Cancel",
     confirm_archive: "Archive chunk", confirm_invalidate: "Invalidate chunk",
@@ -96,7 +97,8 @@ const I18N = {
     prev: "‹ 上一页", next: "下一页 ›", reload: "刷新",
     detail_placeholder: "选择一个条目查看详情。",
     trace_placeholder: "选择一次调用查看其请求与响应。",
-    theme_light_title: "明亮主题", theme_dark_title: "暗黑主题",
+    empty_title: "未选择条目",
+    theme_toggle_title: "切换 明亮 / 暗黑 主题",
     inspect_failed: "巡检失败",
     gov_empty: "没有待复审的知识块。",
     flagged: (n) => `${n} 项待复审`, score: "评分", actors: (n) => `${n} 个来源`,
@@ -105,7 +107,7 @@ const I18N = {
     governance: "治理",
     act_approve: "批准", act_restore: "恢复", act_archive: "归档…", act_invalidate: "作废…",
     k_id: "ID", k_origin: "来源", k_confidence: "置信度", k_created: "创建于",
-    k_last_used: "最近使用", k_used_selected: "使用 / 选中",
+    k_last_used: "最近使用", k_used_selected: "使用 / 选中", hit_rate: "命中率",
     h_content: "内容", show_raw: "显示原始 JSON", hide_raw: "隐藏原始 JSON",
     reason_label: "原因", cancel: "取消",
     confirm_archive: "归档知识块", confirm_invalidate: "作废知识块",
@@ -148,11 +150,14 @@ function applyStatic() {
   updateToggles();
 }
 
+// Single-button toggles: each shows the state it switches *to*.
 function updateToggles() {
-  $("lang-en").classList.toggle("active", LANG === "en");
-  $("lang-zh").classList.toggle("active", LANG === "zh");
-  $("theme-light").classList.toggle("active", THEME === "light");
-  $("theme-dark").classList.toggle("active", THEME === "dark");
+  const lt = $("lang-toggle");
+  lt.textContent = LANG === "en" ? "中" : "EN";
+  lt.title = LANG === "en" ? "切换到中文" : "Switch to English";
+  const tt = $("theme-toggle");
+  tt.textContent = THEME === "dark" ? "☀" : "☾";
+  tt.title = t("theme_toggle_title");
 }
 
 function setLang(lang) {
@@ -202,20 +207,21 @@ async function api(path, opts) {
   return data;
 }
 
-// ── Toasts ──────────────────────────────────────────────────────────────────
+// ── Toasts (status disc + message) ───────────────────────────────────────────
 function toast(msg, kind) {
   const wrap = $("toast-wrap");
   const el = document.createElement("div");
   el.className = "toast " + (kind === "err" ? "err" : "");
-  const dot = document.createElement("span");
-  dot.className = "toast-dot";
-  el.appendChild(dot);
+  const icon = document.createElement("span");
+  icon.className = "toast-icon";
+  icon.textContent = kind === "err" ? "!" : "✓";
+  el.appendChild(icon);
   el.appendChild(document.createTextNode(msg));
   wrap.appendChild(el);
   setTimeout(() => { el.remove(); }, 3200);
 }
 
-// ── Time helpers ────────────────────────────────────────────────────────────
+// ── Time / format helpers ─────────────────────────────────────────────────
 // Days between an ISO timestamp and now, floored. Returns null on bad input.
 function ageDays(iso) {
   if (!iso) return null;
@@ -224,8 +230,7 @@ function ageDays(iso) {
   return Math.max(0, Math.floor((Date.now() - ts) / 86400000));
 }
 
-// Render an ISO-8601 UTC timestamp as a local "YYYY-MM-DD HH:MM:SS" string —
-// drops the millisecond / T / Z noise. Falls back to the raw string on bad input.
+// Render an ISO-8601 UTC timestamp as a local "YYYY-MM-DD HH:MM:SS" string.
 function fmtTime(iso) {
   if (!iso) return "—";
   const ts = Date.parse(iso);
@@ -248,12 +253,16 @@ function escapeHtml(s) {
 
 function onTraces() { return !$("trace-view").classList.contains("hidden"); }
 
+// Color by health, shared by the signal meters.
+function healthColor(level) {
+  return level === "ok" ? "var(--ok)" : level === "warn" ? "var(--warn)" : level === "muted" ? "var(--muted)" : "var(--danger)";
+}
+
 // ── Health strip + overview dashboard ───────────────────────────────────────
 async function loadHealth() {
   try {
     const h = await api("/api/inspect");
     lastInspect = h;
-    // Field names track the real inspect() shape (kb/inspection.rs).
     const chunks = h.chunks || {};
     const total = chunks.total ?? "—";
     const pending = chunks.pending ?? 0;
@@ -284,6 +293,8 @@ function updateReviewBtn() {
   const b = $("review-btn");
   b.classList.toggle("on", govMode);
   b.classList.toggle("warn", !govMode && lastGovPending > 0);
+  const dot = b.querySelector(".review-dot");
+  if (dot) dot.classList.toggle("pulse", lastGovPending > 0);
 }
 
 function toggleOverview() {
@@ -329,10 +340,10 @@ function renderOverview(h) {
       `<div class="ov-card">` +
         `<div class="ov-card-head"><span class="ov-eyebrow">${t("ov_composition")}</span><span class="ov-big">${total}</span></div>` +
         `<div class="ov-bar">` +
-          segs.map(([k, n, c]) => `<div class="ov-bar-fill" data-w="${(n / segTotal * 100).toFixed(1)}" data-c="${c}" title="${escapeHtml(t("st_" + k))}"></div>`).join("") +
+          segs.map(([k, n, c]) => `<div class="ov-bar-fill" data-w="${(n / segTotal * 100).toFixed(1)}" data-bg="${c}" title="${escapeHtml(t("st_" + k))}"></div>`).join("") +
         `</div>` +
         `<div class="ov-legend">` +
-          segs.map(([k, n, c]) => `<span class="ov-legend-item"><span class="ov-legend-dot" data-c="${c}"></span>${escapeHtml(t("st_" + k))} <b>${n}</b></span>`).join("") +
+          segs.map(([k, n, c]) => `<span class="ov-legend-item"><span class="ov-legend-dot" data-bg="${c}"></span>${escapeHtml(t("st_" + k))} <b>${n}</b></span>`).join("") +
         `</div>` +
       `</div>` +
       stat(t("ov_debt"), debt != null ? Number(debt).toFixed(2) : "—", t("ov_debt_sub"), debtCls) +
@@ -340,13 +351,12 @@ function renderOverview(h) {
       stat(t("ov_distill"), costTokens ? fmtNum(costTokens) + " tok" : "—", t("ov_distill_sub", newLogs), "ok") +
     `</div>`;
   // CSP-safe: geometry/colour applied via the CSSOM (not inline style attributes).
-  ov.querySelectorAll("[data-w]").forEach((e) => { e.style.width = e.dataset.w + "%"; });
-  ov.querySelectorAll("[data-c]").forEach((e) => { e.style.background = e.dataset.c; });
+  ov.querySelectorAll(".ov-bar-fill").forEach((e) => { e.style.width = e.dataset.w + "%"; e.style.background = e.dataset.bg; });
+  ov.querySelectorAll(".ov-legend-dot").forEach((e) => { e.style.background = e.dataset.bg; });
 }
 
 // ── Review queue ────────────────────────────────────────────────────────────
 function toggleReview() {
-  // Review mode lives inside the Knowledge view; switch tabs first if needed.
   if (onTraces()) {
     $("trace-view").classList.add("hidden");
     $("kb-view").classList.remove("hidden");
@@ -503,22 +513,43 @@ function renderDetail(d) {
   selChunkState = c.state;
   const el = $("detail");
   el.className = "detail";
-  el.removeAttribute("data-i18n");
 
   const acts = actionsFor(c);
+
+  // Signal meters: the two most telling signals as live gauges.
+  const conf = c.confidence != null ? Number(c.confidence) : null;
+  const used = Number(c.used_count ?? 0);
+  const selected = Number(c.selected_count ?? 0);
+  const rate = used > 0 ? selected / used : 0;
+  const confLevel = conf == null ? "muted" : conf >= 0.7 ? "ok" : conf >= 0.45 ? "warn" : "danger";
+  const hitLevel = used === 0 ? "muted" : rate >= 0.6 ? "ok" : rate >= 0.3 ? "warn" : "danger";
+  const confColor = healthColor(confLevel);
+  const hitColor = healthColor(hitLevel);
+  const confVal = conf == null ? "—" : conf.toFixed(2);
+  const confW = conf == null ? "0%" : Math.round(conf * 100) + "%";
+  const hitVal = used > 0 ? Math.round(rate * 100) + "%" : "—";
+  const hitW = used > 0 ? Math.round(rate * 100) + "%" : "0%";
+
+  // KV grid slimmed to identity facts — confidence + usage now live as meters.
   const kvRows = [
     [t("k_id"), c.id],
     [t("k_origin"), c.origin],
-    [t("k_confidence"), c.confidence != null ? Number(c.confidence).toFixed(2) : "—"],
     [t("k_created"), fmtTime(c.created_at)],
     [t("k_last_used"), fmtTime(c.last_used_at)],
-    [t("k_used_selected"), (c.used_count ?? 0) + " / " + (c.selected_count ?? 0)],
   ];
 
   el.innerHTML =
     `<div class="detail-title"><h1>${escapeHtml(c.skill_name || "")} <span class="seq">#${escapeHtml(String(c.seq ?? ""))}</span></h1>${badge(c.state)}</div>` +
     `<div class="actions"><span class="actions-label">${t("governance")}</span>` +
       acts.map((a) => `<button class="act ${a.cls}" data-act="${a.act}">${escapeHtml(a.label)}${a.kbd ? `<span class="kbd">${a.kbd}</span>` : ""}</button>`).join("") +
+    `</div>` +
+    `<div class="signals">` +
+      `<div class="meter"><div class="meter-head"><span class="meter-label">${t("k_confidence")}</span>` +
+        `<span class="meter-val" data-fg="${confColor}">${confVal}</span></div>` +
+        `<div class="meter-track"><div class="meter-fill" data-w="${confW}" data-bg="${confColor}"></div></div></div>` +
+      `<div class="meter"><div class="meter-head"><span class="meter-label">${t("hit_rate")}</span>` +
+        `<span class="meter-figs"><span class="meter-sub">${selected} / ${used}</span><span class="meter-val" data-fg="${hitColor}">${hitVal}</span></span></div>` +
+        `<div class="meter-track"><div class="meter-fill" data-w="${hitW}" data-bg="${hitColor}"></div></div></div>` +
     `</div>` +
     `<div class="kv">` +
       kvRows.map(([k, v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v ?? "—"))}</div>`).join("") +
@@ -528,6 +559,13 @@ function renderDetail(d) {
     `<div class="section"><button class="raw-toggle" id="raw-toggle"><span class="chev">${showRaw ? "▾" : "▸"}</span>${showRaw ? t("hide_raw") : t("show_raw")}</button>` +
       (showRaw ? `<pre class="raw-json">${escapeHtml(JSON.stringify(d, null, 2))}</pre>` : "") +
     `</div>`;
+
+  // CSP-safe: meter geometry + colour via the CSSOM. A reflow read between the
+  // 0-width markup and the real width lets the fill animate its sweep.
+  const fills = el.querySelectorAll(".meter-fill");
+  void el.offsetWidth;
+  fills.forEach((e) => { e.style.background = e.dataset.bg; e.style.width = e.dataset.w; });
+  el.querySelectorAll(".meter-val").forEach((e) => { e.style.color = e.dataset.fg; });
 
   el.querySelectorAll("button[data-act]").forEach((b) => { b.onclick = () => govern(c.id, b.dataset.act); });
   const rt = $("raw-toggle");
@@ -552,9 +590,9 @@ async function postGovern(id, action, reason) {
       body: JSON.stringify({ reason }),
     });
     toast(t("action_ok", label), "ok");
-    await selectChunk(id);          // refresh detail (new state + actions)
-    if (govMode) loadGovernance(); else loadChunks();  // refresh list badge
-    loadHealth();                   // refresh health + review backlog
+    await selectChunk(id);
+    if (govMode) loadGovernance(); else loadChunks();
+    loadHealth();
   } catch (e) {
     toast(t("action_failed", label, e.message), "err");
   }
@@ -598,7 +636,7 @@ function confirmDialog() {
 // ── LLM trace view ──────────────────────────────────────────────────────────
 function showView(which) {
   const traces = which === "traces";
-  if (traces && govMode) {  // leaving review mode when switching to traces
+  if (traces && govMode) {
     govMode = false;
     $("queue-banner").classList.add("hidden");
     $("kb-filters").classList.remove("hidden");
@@ -669,7 +707,6 @@ function renderTraceDetail(tr) {
   if (!tr) return;
   const el = $("trace-detail");
   el.className = "detail";
-  el.removeAttribute("data-i18n");
   const pretty = (s) => { try { return JSON.stringify(JSON.parse(s), null, 2); } catch (_) { return s; } };
   const kvRows = [
     [t("k_time"), fmtTime(tr.ts)],
@@ -727,10 +764,8 @@ $("tab-traces").onclick = () => showView("traces");
 $("health").onclick = toggleOverview;
 $("review-btn").onclick = toggleReview;
 $("queue-exit").onclick = toggleReview;
-$("lang-en").onclick = () => setLang("en");
-$("lang-zh").onclick = () => setLang("zh");
-$("theme-light").onclick = () => setTheme("light");
-$("theme-dark").onclick = () => setTheme("dark");
+$("lang-toggle").onclick = () => setLang(LANG === "en" ? "zh" : "en");
+$("theme-toggle").onclick = () => setTheme(THEME === "dark" ? "light" : "dark");
 
 $("reload").onclick = () => { offset = 0; if (govMode) loadGovernance(); else loadChunks(); };
 $("f-state").onchange = () => { offset = 0; loadChunks(); };

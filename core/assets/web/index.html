@@ -14,7 +14,7 @@
   <!-- ════════════ HEADER ════════════ -->
   <header>
     <div class="brand">
-      <span class="brand-dot" aria-hidden="true"></span>
+      <span class="brand-mark" aria-hidden="true"><span class="brand-mark-dot"></span></span>
       <span class="brand-name">Innate</span>
       <span class="muted brand-sub" data-i18n="subtitle">knowledge base</span>
     </div>
@@ -34,14 +34,8 @@
     </button>
 
     <div class="header-toggles">
-      <div class="seg seg-sm" role="group" aria-label="language">
-        <button id="lang-en" class="seg-btn">EN</button>
-        <button id="lang-zh" class="seg-btn">中</button>
-      </div>
-      <div class="seg seg-sm" role="group" aria-label="theme">
-        <button id="theme-light" class="seg-btn" data-i18n-title="theme_light_title" title="Light">☀</button>
-        <button id="theme-dark" class="seg-btn" data-i18n-title="theme_dark_title" title="Dark">☾</button>
-      </div>
+      <button id="lang-toggle" class="toggle-btn toggle-btn-text"></button>
+      <button id="theme-toggle" class="toggle-btn"></button>
     </div>
   </header>
 
@@ -92,7 +86,15 @@
     </aside>
 
     <section class="detail-pane scroll">
-      <div id="detail" class="detail-empty" data-i18n="detail_placeholder">Select an item to view its detail.</div>
+      <div id="detail" class="detail-empty">
+        <div class="empty-icon" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="2.5"></rect><line x1="7" y1="9" x2="14" y2="9"></line><line x1="7" y1="13" x2="16" y2="13"></line><line x1="7" y1="16.5" x2="11" y2="16.5"></line></svg>
+        </div>
+        <div class="empty-text">
+          <span class="empty-title" data-i18n="empty_title">No item selected</span>
+          <span class="empty-hint" data-i18n="detail_placeholder">Select an item to view its detail.</span>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -129,7 +131,15 @@
     </aside>
 
     <section class="detail-pane scroll">
-      <div id="trace-detail" class="detail-empty" data-i18n="trace_placeholder">Select a call to view its request &amp; response.</div>
+      <div id="trace-detail" class="detail-empty">
+        <div class="empty-icon" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"></path></svg>
+        </div>
+        <div class="empty-text">
+          <span class="empty-title" data-i18n="empty_title">No item selected</span>
+          <span class="empty-hint" data-i18n="trace_placeholder">Select a call to view its request &amp; response.</span>
+        </div>
+      </div>
     </section>
   </main>
 
