@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -11,77 +11,150 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <!-- ════════════ HEADER ════════════ -->
   <header>
-    <h1>Innate <span class="muted">knowledge base</span></h1>
-    <nav class="tabs">
-      <button id="tab-knowledge" class="tab active">Knowledge</button>
-      <button id="tab-traces" class="tab">LLM Traces</button>
+    <div class="brand">
+      <span class="brand-dot" aria-hidden="true"></span>
+      <span class="brand-name">Innate</span>
+      <span class="muted brand-sub" data-i18n="subtitle">knowledge base</span>
+    </div>
+
+    <nav class="seg tabs" aria-label="view">
+      <button id="tab-knowledge" class="seg-btn active" data-i18n="tab_knowledge">Knowledge</button>
+      <button id="tab-traces" class="seg-btn" data-i18n="tab_traces">LLM Traces</button>
     </nav>
-    <div id="health" class="health"></div>
+
+    <!-- Health strip doubles as the overview-dashboard toggle (weak-spot #2). -->
+    <button id="health" class="health" aria-expanded="false" aria-controls="overview"></button>
+
+    <!-- Review-queue surfaced as a first-class control (weak-spot #7). -->
+    <button id="review-btn" class="review-btn">
+      <span class="review-dot" aria-hidden="true"></span>
+      <span data-i18n="health_review">review queue</span> <b id="review-count">0</b>
+    </button>
+
+    <div class="header-toggles">
+      <div class="seg seg-sm" role="group" aria-label="language">
+        <button id="lang-en" class="seg-btn">EN</button>
+        <button id="lang-zh" class="seg-btn">中</button>
+      </div>
+      <div class="seg seg-sm" role="group" aria-label="theme">
+        <button id="theme-light" class="seg-btn" data-i18n-title="theme_light_title" title="Light">☀</button>
+        <button id="theme-dark" class="seg-btn" data-i18n-title="theme_dark_title" title="Dark">☾</button>
+      </div>
+    </div>
   </header>
 
-  <main id="kb-view">
-    <section class="list-pane">
-      <div class="filters">
-        <select id="f-state">
-          <option value="">state: all</option>
-          <option value="pending">pending</option>
-          <option value="active">active</option>
-          <option value="archived">archived</option>
-          <option value="invalidated">invalidated</option>
-        </select>
-        <select id="f-origin">
-          <option value="">origin: all</option>
-          <option value="captured">captured</option>
-          <option value="distilled">distilled</option>
-          <option value="spark">spark</option>
-        </select>
-        <button id="reload">Reload</button>
-      </div>
+  <!-- ════════════ OVERVIEW DASHBOARD (expandable) ════════════ -->
+  <section id="overview" class="overview hidden" aria-hidden="true"></section>
+
+  <!-- ════════════ KNOWLEDGE VIEW ════════════ -->
+  <main id="kb-view" class="two-pane">
+    <aside class="list-pane">
       <div id="queue-banner" class="queue-banner hidden">
-        ⚠ Review queue — chunks flagged by repeated negative feedback. Filters disabled; click an item to adjudicate.
+        <div class="queue-banner-head">
+          <span class="queue-banner-title"><span aria-hidden="true">⚠</span> <span data-i18n="review_title">Review queue</span></span>
+          <button id="queue-exit" class="btn-ghost-sm" data-i18n="exit">Exit</button>
+        </div>
+        <p class="queue-banner-body" data-i18n="review_banner">Chunks flagged by repeated negative feedback. Filters are disabled — click an item to adjudicate.</p>
       </div>
-      <ul id="chunks" class="chunks"></ul>
+
+      <div id="kb-filters" class="filters">
+        <label class="field">
+          <span class="field-label" data-i18n="f_state">state</span>
+          <select id="f-state" class="select">
+            <option value="" data-i18n="opt_all">all</option>
+            <option value="pending">pending</option>
+            <option value="active">active</option>
+            <option value="archived">archived</option>
+            <option value="invalidated">invalidated</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label" data-i18n="f_origin">origin</span>
+          <select id="f-origin" class="select">
+            <option value="" data-i18n="opt_all">all</option>
+            <option value="captured">captured</option>
+            <option value="distilled">distilled</option>
+            <option value="spark">spark</option>
+          </select>
+        </label>
+        <button id="reload" class="icon-btn" data-i18n-title="reload" title="Reload">⟳</button>
+      </div>
+
+      <ul id="chunks" class="rows scroll"></ul>
+
       <div class="pager">
-        <button id="prev">‹ Prev</button>
-        <span id="page-info"></span>
-        <button id="next">Next ›</button>
+        <button id="prev" class="pager-btn" data-i18n="prev">‹ Prev</button>
+        <span id="page-info" class="pager-info"></span>
+        <button id="next" class="pager-btn" data-i18n="next">Next ›</button>
       </div>
-    </section>
+    </aside>
 
-    <section class="detail-pane">
-      <div id="detail" class="detail muted">Select a chunk to view details.</div>
+    <section class="detail-pane scroll">
+      <div id="detail" class="detail-empty" data-i18n="detail_placeholder">Select an item to view its detail.</div>
     </section>
   </main>
 
-  <main id="trace-view" class="hidden">
-    <section class="list-pane">
+  <!-- ════════════ LLM TRACES VIEW ════════════ -->
+  <main id="trace-view" class="two-pane hidden">
+    <aside class="list-pane">
       <div class="filters">
-        <select id="t-kind">
-          <option value="">kind: all</option>
-          <option value="chat">chat</option>
-          <option value="embedding">embedding</option>
-        </select>
-        <select id="t-status">
-          <option value="">status: all</option>
-          <option value="ok">ok</option>
-          <option value="http_4xx">http_4xx</option>
-          <option value="http_5xx">http_5xx</option>
-          <option value="rate_limited">rate_limited</option>
-          <option value="transport">transport</option>
-          <option value="error">error</option>
-        </select>
-        <button id="t-reload">Reload</button>
+        <label class="field">
+          <span class="field-label" data-i18n="f_kind">kind</span>
+          <select id="t-kind" class="select">
+            <option value="" data-i18n="opt_all">all</option>
+            <option value="chat">chat</option>
+            <option value="embedding">embedding</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label" data-i18n="f_status">status</span>
+          <select id="t-status" class="select">
+            <option value="" data-i18n="opt_all">all</option>
+            <option value="ok">ok</option>
+            <option value="http_4xx">http_4xx</option>
+            <option value="http_5xx">http_5xx</option>
+            <option value="rate_limited">rate_limited</option>
+            <option value="transport">transport</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+        <button id="t-reload" class="icon-btn" data-i18n-title="reload" title="Reload">⟳</button>
       </div>
-      <ul id="traces" class="chunks"></ul>
-      <div class="pager"><span id="trace-info"></span></div>
-    </section>
-    <section class="detail-pane">
-      <div id="trace-detail" class="detail muted">Select a call to view its request &amp; response.</div>
+
+      <ul id="traces" class="rows scroll"></ul>
+
+      <div class="pager pager-center"><span id="trace-info" class="pager-info"></span></div>
+    </aside>
+
+    <section class="detail-pane scroll">
+      <div id="trace-detail" class="detail-empty" data-i18n="trace_placeholder">Select a call to view its request &amp; response.</div>
     </section>
   </main>
 
-  <div id="toast" class="toast hidden"></div>
+  <!-- ════════════ DIALOG (archive / invalidate) ════════════ -->
+  <div id="dialog-overlay" class="overlay hidden">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <span id="dialog-icon" class="sheet-icon" aria-hidden="true"></span>
+          <h2 id="dialog-title"></h2>
+        </div>
+        <p id="dialog-desc" class="sheet-desc"></p>
+        <label for="dialog-reason" class="sheet-label" data-i18n="reason_label">Reason</label>
+        <textarea id="dialog-reason" class="sheet-input" rows="3"></textarea>
+      </div>
+      <div class="sheet-foot">
+        <button id="dialog-cancel" class="btn-ghost" data-i18n="cancel">Cancel</button>
+        <button id="dialog-confirm" class="btn-primary" disabled></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════ TOASTS ════════════ -->
+  <div id="toast-wrap" class="toast-wrap" aria-live="polite"></div>
+
   <script src="/app.js"></script>
 </body>
 </html>

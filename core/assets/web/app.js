@@ -1,5 +1,12 @@
 "use strict";
 
+// ════════════════════════════════════════════════════════════════════════
+// Innate Console — localhost governance console for the procedural KB.
+// Vanilla JS, no framework. Strict-CSP safe: no inline scripts/styles/handlers;
+// dynamic geometry (bar widths, legend colors) is set via the CSSOM (element
+// .style), which CSP style-src does not block.
+// ════════════════════════════════════════════════════════════════════════
+
 // Token arrives in the URL *fragment* (#token=…), not the query string: the
 // fragment is never sent to the server, never written to access logs, and never
 // leaks via the Referer header. We read it once, keep it only in memory, and
@@ -13,13 +20,175 @@ function takeToken() {
 }
 const TOKEN = takeToken();
 
-let offset = 0;
-const LIMIT = 50;
-let lastCount = 0; // rows returned by the most recent chunk page (drives the pager)
-let selectedId = null;
-
 const $ = (id) => document.getElementById(id);
 
+// ── App state ───────────────────────────────────────────────────────────────
+const LIMIT = 50;
+let offset = 0;
+let lastCount = 0;          // rows in the most recent chunk page (drives the pager)
+let selectedId = null;      // selected chunk id
+let selChunkState = null;   // state of the currently-displayed chunk (for the `A` shortcut)
+let lastDetail = null;      // last chunk detail payload, so the raw-JSON toggle can re-render
+let showRaw = false;        // chunk detail: raw-JSON section expanded?
+let govMode = false;        // review-queue mode (replaces the chunk list)
+let overviewOpen = false;   // expandable health dashboard open?
+let lastInspect = null;     // last /api/inspect payload (feeds health strip + overview)
+let lastGovPending = 0;     // review-queue backlog count
+let dialog = null;          // { id, action } when the archive/invalidate sheet is open
+let currentChunkIds = [];   // ids in current list order (arrow-key navigation)
+let currentTraces = [];     // traces in current list order
+let selectedTraceIdx = -1;  // selected trace index
+
+// ── i18n ──────────────────────────────────────────────────────────────────
+// String values are plain text; function values take args (counts, names). The
+// `data-i18n` / `data-i18n-title` DOM attributes cover static chrome; t() covers
+// everything rendered from JS. Technical enum values (pending, http_4xx, …) stay
+// literal in filters — they mirror API data, not prose.
+const I18N = {
+  en: {
+    subtitle: "knowledge base",
+    tab_knowledge: "Knowledge", tab_traces: "LLM Traces",
+    health_chunks: "chunks", health_debt: "debt", health_pending: "pending",
+    health_oldest: (d) => `oldest ${d}d`, health_review: "review queue",
+    review_title: "Review queue", exit: "Exit",
+    review_banner: "Chunks flagged by repeated negative feedback. Filters are disabled — click an item to adjudicate.",
+    f_state: "state", f_origin: "origin", f_kind: "kind", f_status: "status", opt_all: "all",
+    prev: "‹ Prev", next: "Next ›", reload: "Reload",
+    detail_placeholder: "Select an item to view its detail.",
+    trace_placeholder: "Select a call to view its request & response.",
+    theme_light_title: "Light theme", theme_dark_title: "Dark theme",
+    inspect_failed: "inspect failed",
+    gov_empty: "No chunks flagged for review.",
+    flagged: (n) => `${n} flagged`, score: "score", actors: (n) => `${n} actors`,
+    chunk_missing: "(chunk missing)",
+    no_results: "no results", no_more: "no more results",
+    governance: "governance",
+    act_approve: "Approve", act_restore: "Restore", act_archive: "Archive…", act_invalidate: "Invalidate…",
+    k_id: "id", k_origin: "origin", k_confidence: "confidence", k_created: "created",
+    k_last_used: "last used", k_used_selected: "used / selected",
+    h_content: "content", show_raw: "Show raw JSON", hide_raw: "Hide raw JSON",
+    reason_label: "Reason", cancel: "Cancel",
+    confirm_archive: "Archive chunk", confirm_invalidate: "Invalidate chunk",
+    archive_desc: "Move this chunk out of active retrieval. It stays restorable. A reason is required for the audit log.",
+    invalidate_desc: "Mark this chunk as wrong and exclude it permanently. It stays restorable. A reason is required.",
+    reason_placeholder: "e.g. superseded by distill #2; low retrieval quality",
+    action_ok: (a) => `${a} ok`, action_failed: (a, e) => `${a} failed: ${e}`,
+    load_failed: "load failed", traces_failed: "traces failed", queue_failed: "review queue failed",
+    detail_failed: "detail failed",
+    trace_empty: "No LLM calls traced yet. Trigger a recall / evolve, then reload.",
+    calls: (n) => `${n} calls`, tries: (n) => `${n} try`, tok: (n) => `${n} tok`,
+    k_time: "time", k_model: "model", k_host: "host", k_latency: "latency",
+    k_attempts: "attempts", k_tokens: "tokens",
+    h_error: "error", h_request: "request", h_response: "response", none: "(none)",
+    ov_composition: "composition", ov_debt: "knowledge debt", ov_debt_sub: "(pending+archived)/active",
+    ov_rebuild: "rebuild queue", ov_rebuild_sub: "re-embed jobs",
+    ov_distill: "distill cost (est.)", ov_distill_sub: (n) => `next batch · ${n} entries`,
+    st_active: "active", st_pending: "pending", st_archived: "archived", st_invalidated: "invalidated",
+  },
+  zh: {
+    subtitle: "知识库",
+    tab_knowledge: "知识", tab_traces: "LLM 调用",
+    health_chunks: "知识块", health_debt: "债务", health_pending: "待审核",
+    health_oldest: (d) => `最久 ${d} 天`, health_review: "复审队列",
+    review_title: "复审队列", exit: "退出",
+    review_banner: "被反复负反馈标记的知识块。筛选已禁用 —— 点击条目进行裁决。",
+    f_state: "状态", f_origin: "来源", f_kind: "类型", f_status: "状态", opt_all: "全部",
+    prev: "‹ 上一页", next: "下一页 ›", reload: "刷新",
+    detail_placeholder: "选择一个条目查看详情。",
+    trace_placeholder: "选择一次调用查看其请求与响应。",
+    theme_light_title: "明亮主题", theme_dark_title: "暗黑主题",
+    inspect_failed: "巡检失败",
+    gov_empty: "没有待复审的知识块。",
+    flagged: (n) => `${n} 项待复审`, score: "评分", actors: (n) => `${n} 个来源`,
+    chunk_missing: "(知识块缺失)",
+    no_results: "无结果", no_more: "没有更多了",
+    governance: "治理",
+    act_approve: "批准", act_restore: "恢复", act_archive: "归档…", act_invalidate: "作废…",
+    k_id: "ID", k_origin: "来源", k_confidence: "置信度", k_created: "创建于",
+    k_last_used: "最近使用", k_used_selected: "使用 / 选中",
+    h_content: "内容", show_raw: "显示原始 JSON", hide_raw: "隐藏原始 JSON",
+    reason_label: "原因", cancel: "取消",
+    confirm_archive: "归档知识块", confirm_invalidate: "作废知识块",
+    archive_desc: "将此知识块移出活跃检索，可随时恢复。审计日志要求填写原因。",
+    invalidate_desc: "将此知识块标记为错误并永久排除，可随时恢复。必须填写原因。",
+    reason_placeholder: "例如：已被 distill #2 取代；检索质量低",
+    action_ok: (a) => `${a} 成功`, action_failed: (a, e) => `${a} 失败:${e}`,
+    load_failed: "加载失败", traces_failed: "调用记录加载失败", queue_failed: "复审队列加载失败",
+    detail_failed: "详情加载失败",
+    trace_empty: "暂无 LLM 调用记录。触发一次 recall / evolve 后再刷新。",
+    calls: (n) => `${n} 次调用`, tries: (n) => `${n} 次尝试`, tok: (n) => `${n} tok`,
+    k_time: "时间", k_model: "模型", k_host: "主机", k_latency: "延迟",
+    k_attempts: "尝试次数", k_tokens: "token",
+    h_error: "错误", h_request: "请求", h_response: "响应", none: "(无)",
+    ov_composition: "构成", ov_debt: "知识债务", ov_debt_sub: "(待审+归档)/活跃",
+    ov_rebuild: "重建队列", ov_rebuild_sub: "重嵌入任务",
+    ov_distill: "蒸馏成本（估）", ov_distill_sub: (n) => `下一批 · ${n} 条`,
+    st_active: "活跃", st_pending: "待审核", st_archived: "已归档", st_invalidated: "已失效",
+  },
+};
+
+let LANG = localStorage.getItem("innate-lang");
+if (LANG !== "zh" && LANG !== "en") {
+  LANG = (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function t(key, ...args) {
+  const dict = I18N[LANG] || I18N.en;
+  let v = dict[key];
+  if (v == null) v = I18N.en[key];
+  if (v == null) return key;
+  return typeof v === "function" ? v(...args) : v;
+}
+
+// Translate all static markup carrying data-i18n / data-i18n-title attributes.
+function applyStatic() {
+  document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => { el.title = t(el.dataset.i18nTitle); });
+  updateToggles();
+}
+
+function updateToggles() {
+  $("lang-en").classList.toggle("active", LANG === "en");
+  $("lang-zh").classList.toggle("active", LANG === "zh");
+  $("theme-light").classList.toggle("active", THEME === "light");
+  $("theme-dark").classList.toggle("active", THEME === "dark");
+}
+
+function setLang(lang) {
+  if (lang === LANG) return;
+  LANG = lang;
+  localStorage.setItem("innate-lang", lang);
+  applyStatic();
+  loadHealth();
+  if (onTraces()) {
+    loadTraces();
+    if (selectedTraceIdx >= 0 && currentTraces[selectedTraceIdx]) renderTraceDetail(currentTraces[selectedTraceIdx]);
+  } else if (govMode) {
+    loadGovernance();
+    if (lastDetail) renderDetail(lastDetail);
+  } else {
+    loadChunks();
+    if (lastDetail) renderDetail(lastDetail);
+  }
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────
+let THEME = localStorage.getItem("innate-theme");
+if (THEME !== "light" && THEME !== "dark") THEME = "dark";
+
+function applyTheme() {
+  document.documentElement.setAttribute("data-theme", THEME);
+  updateToggles();
+}
+function setTheme(theme) {
+  if (theme === THEME) return;
+  THEME = theme;
+  localStorage.setItem("innate-theme", theme);
+  applyTheme();
+}
+
+// ── Networking ──────────────────────────────────────────────────────────────
 async function api(path, opts) {
   // Always attach the token header. On a loopback bind the server ignores it
   // for reads; on a network-exposed bind it is required for every endpoint.
@@ -33,74 +202,163 @@ async function api(path, opts) {
   return data;
 }
 
+// ── Toasts ──────────────────────────────────────────────────────────────────
 function toast(msg, kind) {
-  const t = $("toast");
-  t.textContent = msg;
-  t.className = "toast " + (kind || "");
-  setTimeout(() => t.classList.add("hidden"), 3200);
+  const wrap = $("toast-wrap");
+  const el = document.createElement("div");
+  el.className = "toast " + (kind === "err" ? "err" : "");
+  const dot = document.createElement("span");
+  dot.className = "toast-dot";
+  el.appendChild(dot);
+  el.appendChild(document.createTextNode(msg));
+  wrap.appendChild(el);
+  setTimeout(() => { el.remove(); }, 3200);
 }
 
+// ── Time helpers ────────────────────────────────────────────────────────────
 // Days between an ISO timestamp and now, floored. Returns null on bad input.
 function ageDays(iso) {
   if (!iso) return null;
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return null;
-  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return null;
+  return Math.max(0, Math.floor((Date.now() - ts) / 86400000));
 }
 
-// Render an ISO-8601 UTC timestamp (e.g. 2026-06-13T12:47:52.506Z) as a local
-// "YYYY-MM-DD HH:MM:SS" string — drops the millisecond / T / Z noise. Falls back
-// to the raw string on unparseable input.
+// Render an ISO-8601 UTC timestamp as a local "YYYY-MM-DD HH:MM:SS" string —
+// drops the millisecond / T / Z noise. Falls back to the raw string on bad input.
 function fmtTime(iso) {
   if (!iso) return "—";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return iso;
-  const d = new Date(t);
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return iso;
+  const d = new Date(ts);
   const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
          `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+function fmtNum(n) {
+  n = Number(n) || 0;
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (m) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+}
+
+function onTraces() { return !$("trace-view").classList.contains("hidden"); }
+
+// ── Health strip + overview dashboard ───────────────────────────────────────
 async function loadHealth() {
   try {
     const h = await api("/api/inspect");
-    // Field names must track the real inspect() shape (kb/inspection.rs):
-    // chunks.{total,pending,pending_oldest_ts}, knowledge_debt_ratio,
-    // feedback_loop.pending_governance_proposals.
+    lastInspect = h;
+    // Field names track the real inspect() shape (kb/inspection.rs).
     const chunks = h.chunks || {};
     const total = chunks.total ?? "—";
     const pending = chunks.pending ?? 0;
     const debt = h.knowledge_debt_ratio;
     const govPending = h.feedback_loop?.pending_governance_proposals ?? 0;
     const oldest = ageDays(chunks.pending_oldest_ts);
+    lastGovPending = govPending;
 
-    let html =
-      `chunks <b>${total}</b>` +
-      (debt != null ? ` · debt <b>${Number(debt).toFixed(2)}</b>` : "");
-    // Pending review backlog + how long the oldest item has waited (review SLA).
-    const pendCls = pending > 0 ? "warn" : "";
-    let pendTxt = `pending <b>${pending}</b>`;
-    if (oldest != null && pending > 0) pendTxt += ` <span class="muted">(oldest ${oldest}d)</span>`;
-    html += ` · <span class="${pendCls}">${pendTxt}</span>`;
-    // Auto-flagged review queue (governance proposals) — click to inspect.
-    const govCls = govPending > 0 ? "warn" : "";
-    html += ` · <a href="#" id="gov-link" class="${govCls}">review queue <b>${govPending}</b></a>`;
-
+    let html = `<span class="hgroup"><span class="hlabel">${t("health_chunks")}</span><b>${escapeHtml(String(total))}</b></span>`;
+    if (debt != null) {
+      html += `<span class="hsep"></span><span class="hgroup"><span class="hlabel">${t("health_debt")}</span><b>${Number(debt).toFixed(2)}</b></span>`;
+    }
+    const ageTxt = (oldest != null && pending > 0) ? `<span class="hage">(${t("health_oldest", oldest)})</span>` : "";
+    html += `<span class="hsep"></span><span class="hgroup ${pending > 0 ? "hwarn" : ""}">` +
+            `<span class="hlabel">${t("health_pending")}</span><b>${pending}</b>${ageTxt}</span>`;
+    html += `<span class="hchevron">${overviewOpen ? "▴" : "▾"}</span>`;
     $("health").innerHTML = html;
-    const link = $("gov-link");
-    if (link) link.onclick = (e) => { e.preventDefault(); toggleGovernance(); };
+
+    $("review-count").textContent = govPending;
+    updateReviewBtn();
+    if (overviewOpen) renderOverview(h);
   } catch (e) {
-    $("health").textContent = "inspect failed: " + e.message;
+    $("health").textContent = t("inspect_failed") + ": " + e.message;
   }
 }
 
-// Toggle between the normal chunk list and the flagged review queue.
-let govMode = false;
-async function toggleGovernance() {
+function updateReviewBtn() {
+  const b = $("review-btn");
+  b.classList.toggle("on", govMode);
+  b.classList.toggle("warn", !govMode && lastGovPending > 0);
+}
+
+function toggleOverview() {
+  overviewOpen = !overviewOpen;
+  $("overview").classList.toggle("hidden", !overviewOpen);
+  $("overview").setAttribute("aria-hidden", String(!overviewOpen));
+  $("health").setAttribute("aria-expanded", String(overviewOpen));
+  const ch = $("health").querySelector(".hchevron");
+  if (ch) ch.textContent = overviewOpen ? "▴" : "▾";
+  if (overviewOpen) { if (lastInspect) renderOverview(lastInspect); else loadHealth(); }
+}
+
+function renderOverview(h) {
+  const chunks = h.chunks || {};
+  const total = Number(chunks.total ?? 0);
+  const active = Number(chunks.active ?? 0);
+  const pending = Number(chunks.pending ?? 0);
+  const archived = Number(chunks.archived ?? 0);
+  const invalidated = Math.max(0, total - active - pending - archived);
+  const segs = [
+    ["active", active, "var(--ok)"],
+    ["pending", pending, "var(--warn)"],
+    ["archived", archived, "var(--muted)"],
+    ["invalidated", invalidated, "var(--danger)"],
+  ];
+  const segTotal = (active + pending + archived + invalidated) || 1;
+
+  const debt = h.knowledge_debt_ratio;
+  const rebuild = h.embed_rebuild_queue ?? 0;
+  const cost = h.distill_cost_estimate || {};
+  const costTokens = (Number(cost.prompt_tokens || 0) + Number(cost.completion_tokens || 0));
+  const newLogs = h.episodic_log?.new ?? 0;
+
+  const stat = (label, value, sub, cls) =>
+    `<div class="ov-card stat"><span class="ov-eyebrow">${escapeHtml(label)}</span>` +
+    `<span class="ov-val ${cls || ""}">${escapeHtml(value)}</span>` +
+    `<span class="ov-sub">${escapeHtml(sub)}</span></div>`;
+
+  const debtCls = (debt != null && Number(debt) >= 0.2) ? "warn" : "";
+  const ov = $("overview");
+  ov.innerHTML =
+    `<div class="overview-grid">` +
+      `<div class="ov-card">` +
+        `<div class="ov-card-head"><span class="ov-eyebrow">${t("ov_composition")}</span><span class="ov-big">${total}</span></div>` +
+        `<div class="ov-bar">` +
+          segs.map(([k, n, c]) => `<div class="ov-bar-fill" data-w="${(n / segTotal * 100).toFixed(1)}" data-c="${c}" title="${escapeHtml(t("st_" + k))}"></div>`).join("") +
+        `</div>` +
+        `<div class="ov-legend">` +
+          segs.map(([k, n, c]) => `<span class="ov-legend-item"><span class="ov-legend-dot" data-c="${c}"></span>${escapeHtml(t("st_" + k))} <b>${n}</b></span>`).join("") +
+        `</div>` +
+      `</div>` +
+      stat(t("ov_debt"), debt != null ? Number(debt).toFixed(2) : "—", t("ov_debt_sub"), debtCls) +
+      stat(t("ov_rebuild"), String(rebuild), t("ov_rebuild_sub"), "") +
+      stat(t("ov_distill"), costTokens ? fmtNum(costTokens) + " tok" : "—", t("ov_distill_sub", newLogs), "ok") +
+    `</div>`;
+  // CSP-safe: geometry/colour applied via the CSSOM (not inline style attributes).
+  ov.querySelectorAll("[data-w]").forEach((e) => { e.style.width = e.dataset.w + "%"; });
+  ov.querySelectorAll("[data-c]").forEach((e) => { e.style.background = e.dataset.c; });
+}
+
+// ── Review queue ────────────────────────────────────────────────────────────
+function toggleReview() {
+  // Review mode lives inside the Knowledge view; switch tabs first if needed.
+  if (onTraces()) {
+    $("trace-view").classList.add("hidden");
+    $("kb-view").classList.remove("hidden");
+    $("tab-traces").classList.remove("active");
+    $("tab-knowledge").classList.add("active");
+  }
   govMode = !govMode;
   $("queue-banner").classList.toggle("hidden", !govMode);
+  $("kb-filters").classList.toggle("hidden", govMode);
+  updateReviewBtn();
   if (govMode) {
-    await loadGovernance();
+    loadGovernance();
   } else {
     offset = 0;
     loadChunks();
@@ -110,40 +368,44 @@ async function toggleGovernance() {
 async function loadGovernance() {
   try {
     const data = await api("/api/governance?state=pending");
-    renderGovernance(data.proposals || []);
-    $("page-info").textContent = `${(data.proposals || []).length} flagged`;
-    // The review queue isn't paginated — neutralize the chunk pager.
+    const proposals = data.proposals || [];
+    renderGovernance(proposals);
+    $("page-info").textContent = t("flagged", proposals.length);
     $("prev").disabled = true;
     $("next").disabled = true;
   } catch (e) {
-    toast("review queue failed: " + e.message, "err");
+    toast(t("queue_failed") + ": " + e.message, "err");
   }
 }
 
 function renderGovernance(proposals) {
   const ul = $("chunks");
   ul.innerHTML = "";
+  currentChunkIds = proposals.map((p) => p.chunk_id);
   if (proposals.length === 0) {
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = "No chunks flagged for review.";
+    li.textContent = t("gov_empty");
     ul.appendChild(li);
     return;
   }
   for (const p of proposals) {
     const li = document.createElement("li");
-    if (p.chunk_id === selectedId) li.className = "sel";
+    li.dataset.id = p.chunk_id;
+    if (p.chunk_id === selectedId) li.classList.add("sel");
     li.innerHTML =
-      `<div class="chunk-head"><span>${escapeHtml(p.skill_name || "·")} #${escapeHtml(String(p.seq ?? ""))} ` +
-      `<span class="muted">${escapeHtml(p.proposal_type || "")}</span></span>` +
-      `<span class="badge warn">score ${Number(p.evidence_score ?? 0).toFixed(1)} · ${Number(p.actor_count ?? 0)} actors</span></div>` +
-      `<div class="chunk-preview">${escapeHtml(p.content_preview || "(chunk missing)")}</div>` +
-      `<div class="muted small">${escapeHtml(p.reason || "")}</div>`;
+      `<div class="row-head"><span class="row-skill">${escapeHtml(p.skill_name || "·")}</span>` +
+      `<span class="row-seq">#${escapeHtml(String(p.seq ?? ""))}</span>` +
+      `<span class="row-sub">${escapeHtml(p.proposal_type || "")}</span>` +
+      `<span class="row-score">${t("score")} ${Number(p.evidence_score ?? 0).toFixed(1)} · ${t("actors", Number(p.actor_count ?? 0))}</span></div>` +
+      `<div class="row-preview">${escapeHtml(p.content_preview || t("chunk_missing"))}</div>` +
+      `<div class="row-reason"><span class="dot">●</span>${escapeHtml(p.reason || "")}</div>`;
     li.onclick = () => selectChunk(p.chunk_id);
     ul.appendChild(li);
   }
 }
 
+// ── Chunk list ──────────────────────────────────────────────────────────────
 async function loadChunks() {
   const state = $("f-state").value;
   const origin = $("f-origin").value;
@@ -157,127 +419,196 @@ async function loadChunks() {
     lastCount = chunks.length;
     updatePager();
   } catch (e) {
-    toast("load failed: " + e.message, "err");
+    toast(t("load_failed") + ": " + e.message, "err");
   }
 }
 
 // The API returns no total count, so "is there a next page?" is inferred: a full
 // page (exactly LIMIT rows) may have more; a short/empty page is the last one.
-// This stops Next from paging forever into empty results.
 function updatePager() {
   $("prev").disabled = offset === 0;
   $("next").disabled = lastCount < LIMIT;
   if (lastCount === 0) {
-    $("page-info").textContent = offset > 0 ? "no more results" : "no results";
+    $("page-info").textContent = offset > 0 ? t("no_more") : t("no_results");
   } else {
     $("page-info").textContent = `${offset + 1}–${offset + lastCount}`;
   }
 }
 
 function badge(state) {
-  const s = escapeHtml(state || "");
-  return `<span class="badge ${s}">${s || "?"}</span>`;
+  const s = state || "";
+  return `<span class="badge ${escapeHtml(s)}">${escapeHtml(s) || "?"}</span>`;
 }
 
 function renderList(chunks) {
   const ul = $("chunks");
   ul.innerHTML = "";
+  currentChunkIds = chunks.map((c) => c.id);
+  if (chunks.length === 0) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = t("no_results");
+    ul.appendChild(li);
+    return;
+  }
   for (const c of chunks) {
     const li = document.createElement("li");
-    if (c.id === selectedId) li.className = "sel";
+    li.dataset.id = c.id;
+    if (c.id === selectedId) li.classList.add("sel");
     li.innerHTML =
-      `<div class="chunk-head"><span>${escapeHtml(c.skill_name || "·")} #${escapeHtml(String(c.seq ?? ""))} ` +
-      `<span class="muted">${escapeHtml(c.origin || "")}</span></span>${badge(c.state)}</div>` +
-      `<div class="chunk-preview">${escapeHtml(c.content_preview || "")}</div>`;
+      `<div class="row-head"><span class="row-skill">${escapeHtml(c.skill_name || "·")}</span>` +
+      `<span class="row-seq">#${escapeHtml(String(c.seq ?? ""))}</span>` +
+      `<span class="row-sub">${escapeHtml(c.origin || "")}</span>${badge(c.state)}</div>` +
+      `<div class="row-preview">${escapeHtml(c.content_preview || "")}</div>`;
     li.onclick = () => selectChunk(c.id);
     ul.appendChild(li);
   }
 }
 
+function markSelected(listSel, id) {
+  document.querySelectorAll(listSel + " li").forEach((li) => {
+    li.classList.toggle("sel", li.dataset.id === id);
+  });
+}
+
 async function selectChunk(id) {
   selectedId = id;
-  document.querySelectorAll(".chunks li").forEach((li) => li.classList.remove("sel"));
+  showRaw = false;
+  markSelected("#chunks", id);
   try {
     const d = await api("/api/chunk/" + encodeURIComponent(id));
     renderDetail(d);
   } catch (e) {
-    $("detail").textContent = "detail failed: " + e.message;
+    const el = $("detail");
+    el.className = "detail-empty";
+    el.textContent = t("detail_failed") + ": " + e.message;
   }
-  if (govMode) loadGovernance(); else loadChunks();
+}
+
+// Governance actions available for a chunk, by state.
+function actionsFor(c) {
+  const out = [];
+  if (c.state === "pending") out.push({ label: t("act_approve"), cls: "filled-ok", kbd: "A", act: "approve" });
+  if (c.state === "archived" || c.state === "invalidated") out.push({ label: t("act_restore"), cls: "filled-accent", act: "restore" });
+  if (c.state === "active" || c.state === "pending") {
+    out.push({ label: t("act_archive"), cls: "ghost-warn", act: "archive" });
+    out.push({ label: t("act_invalidate"), cls: "ghost-danger", act: "invalidate" });
+  }
+  return out;
 }
 
 function renderDetail(d) {
+  lastDetail = d;
   const c = d.chunk || d;
-  const kv = (k, v) => `<div class="k">${k}</div><div>${escapeHtml(String(v ?? "—"))}</div>`;
-  $("detail").classList.remove("muted");
-  $("detail").innerHTML =
-    `<h2>${escapeHtml(c.skill_name || "")} #${escapeHtml(String(c.seq ?? ""))} ${badge(c.state)}</h2>` +
-    `<div class="actions">
-       <button class="ok" data-act="approve">Approve</button>
-       <button data-act="restore">Restore</button>
-       <button class="danger" data-act="archive">Archive…</button>
-       <button class="danger" data-act="invalidate">Invalidate…</button>
-     </div>` +
-    `<div class="kv">${kv("id", c.id)}${kv("origin", c.origin)}${kv("confidence", c.confidence)}` +
-    `${kv("created", fmtTime(c.created_at))}${kv("last used", fmtTime(c.last_used_at))}` +
-    `${kv("used / selected", (c.used_count ?? 0) + " / " + (c.selected_count ?? 0))}</div>` +
-    `<h2>content</h2><pre>${escapeHtml(c.content || "")}</pre>` +
-    `<h2>raw</h2><pre>${escapeHtml(JSON.stringify(d, null, 2))}</pre>`;
-  $("detail").querySelectorAll("button[data-act]").forEach((b) => {
-    b.onclick = () => govern(c.id, b.dataset.act);
-  });
+  selChunkState = c.state;
+  const el = $("detail");
+  el.className = "detail";
+  el.removeAttribute("data-i18n");
+
+  const acts = actionsFor(c);
+  const kvRows = [
+    [t("k_id"), c.id],
+    [t("k_origin"), c.origin],
+    [t("k_confidence"), c.confidence != null ? Number(c.confidence).toFixed(2) : "—"],
+    [t("k_created"), fmtTime(c.created_at)],
+    [t("k_last_used"), fmtTime(c.last_used_at)],
+    [t("k_used_selected"), (c.used_count ?? 0) + " / " + (c.selected_count ?? 0)],
+  ];
+
+  el.innerHTML =
+    `<div class="detail-title"><h1>${escapeHtml(c.skill_name || "")} <span class="seq">#${escapeHtml(String(c.seq ?? ""))}</span></h1>${badge(c.state)}</div>` +
+    `<div class="actions"><span class="actions-label">${t("governance")}</span>` +
+      acts.map((a) => `<button class="act ${a.cls}" data-act="${a.act}">${escapeHtml(a.label)}${a.kbd ? `<span class="kbd">${a.kbd}</span>` : ""}</button>`).join("") +
+    `</div>` +
+    `<div class="kv">` +
+      kvRows.map(([k, v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v ?? "—"))}</div>`).join("") +
+    `</div>` +
+    `<div class="section"><div class="section-head"><span class="section-eyebrow">${t("h_content")}</span><span class="section-rule"></span></div>` +
+      `<pre class="block">${escapeHtml(c.content || "")}</pre></div>` +
+    `<div class="section"><button class="raw-toggle" id="raw-toggle"><span class="chev">${showRaw ? "▾" : "▸"}</span>${showRaw ? t("hide_raw") : t("show_raw")}</button>` +
+      (showRaw ? `<pre class="raw-json">${escapeHtml(JSON.stringify(d, null, 2))}</pre>` : "") +
+    `</div>`;
+
+  el.querySelectorAll("button[data-act]").forEach((b) => { b.onclick = () => govern(c.id, b.dataset.act); });
+  const rt = $("raw-toggle");
+  if (rt) rt.onclick = () => { showRaw = !showRaw; renderDetail(lastDetail); };
 }
 
-async function govern(id, action) {
-  let reason = "";
+// approve / restore act immediately; archive / invalidate open the reason sheet.
+function govern(id, action) {
   if (action === "archive" || action === "invalidate") {
-    reason = prompt(`Reason for ${action}:`, "");
-    if (reason == null || !reason.trim()) return; // cancelled / empty
+    openDialog(id, action);
+  } else {
+    postGovern(id, action, "");
   }
-  if (!confirm(`${action} chunk ${id}?`)) return;
+}
+
+async function postGovern(id, action, reason) {
+  const label = t("act_" + action) || action;
   try {
     await api("/api/chunk/" + encodeURIComponent(id) + "/" + action, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Innate-Token": TOKEN },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason }),
     });
-    toast(`${action} ok`, "ok");
-    selectChunk(id);
-    loadHealth();
+    toast(t("action_ok", label), "ok");
+    await selectChunk(id);          // refresh detail (new state + actions)
+    if (govMode) loadGovernance(); else loadChunks();  // refresh list badge
+    loadHealth();                   // refresh health + review backlog
   } catch (e) {
-    toast(`${action} failed: ${e.message}`, "err");
+    toast(t("action_failed", label, e.message), "err");
   }
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (m) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
+// ── Archive / invalidate dialog (replaces native prompt()/confirm()) ─────────
+function openDialog(id, action) {
+  dialog = { id, action };
+  const isArch = action === "archive";
+  $("dialog-title").textContent = isArch ? t("confirm_archive") : t("confirm_invalidate");
+  $("dialog-desc").textContent = isArch ? t("archive_desc") : t("invalidate_desc");
+  const confirm = $("dialog-confirm");
+  confirm.textContent = isArch ? t("confirm_archive") : t("confirm_invalidate");
+  confirm.className = "btn-primary " + (isArch ? "warn" : "danger");
+  confirm.disabled = true;
+  const icon = $("dialog-icon");
+  icon.textContent = isArch ? "▤" : "✕";
+  icon.className = "sheet-icon " + (isArch ? "warn" : "danger");
+  const ta = $("dialog-reason");
+  ta.value = "";
+  ta.placeholder = t("reason_placeholder");
+  $("dialog-overlay").classList.remove("hidden");
+  ta.focus();
 }
 
-// Leaving queue mode whenever the user drives the normal filters keeps the two
-// views from desyncing (filters don't apply to the governance queue).
-function exitGovMode() {
-  if (!govMode) return;
-  govMode = false;
-  $("queue-banner").classList.add("hidden");
+function closeDialog() {
+  dialog = null;
+  $("dialog-overlay").classList.add("hidden");
+  $("dialog-reason").value = "";
 }
-$("reload").onclick = () => { offset = 0; if (govMode) loadGovernance(); else loadChunks(); };
-$("f-state").onchange = () => { exitGovMode(); offset = 0; loadChunks(); };
-$("f-origin").onchange = () => { exitGovMode(); offset = 0; loadChunks(); };
-$("prev").onclick = () => { if (!govMode && offset >= LIMIT) { offset -= LIMIT; loadChunks(); } };
-$("next").onclick = () => { if (!govMode && lastCount === LIMIT) { offset += LIMIT; loadChunks(); } };
+
+function confirmDialog() {
+  if (!dialog) return;
+  const reason = $("dialog-reason").value.trim();
+  if (!reason) return;
+  const { id, action } = dialog;
+  closeDialog();
+  postGovern(id, action, reason);
+}
 
 // ── LLM trace view ──────────────────────────────────────────────────────────
-// A separate panel (not overloaded onto the chunk list) showing recent LLM /
-// embedding HTTP calls for debugging what the agent actually sent and got back.
-
 function showView(which) {
-  const onTraces = which === "traces";
-  $("kb-view").classList.toggle("hidden", onTraces);
-  $("trace-view").classList.toggle("hidden", !onTraces);
-  $("tab-knowledge").classList.toggle("active", !onTraces);
-  $("tab-traces").classList.toggle("active", onTraces);
-  if (onTraces) loadTraces();
+  const traces = which === "traces";
+  if (traces && govMode) {  // leaving review mode when switching to traces
+    govMode = false;
+    $("queue-banner").classList.add("hidden");
+    $("kb-filters").classList.remove("hidden");
+    updateReviewBtn();
+  }
+  $("kb-view").classList.toggle("hidden", traces);
+  $("trace-view").classList.toggle("hidden", !traces);
+  $("tab-knowledge").classList.toggle("active", !traces);
+  $("tab-traces").classList.toggle("active", traces);
+  if (traces) loadTraces(); else loadChunks();
 }
 
 async function loadTraces() {
@@ -290,63 +621,136 @@ async function loadTraces() {
     const data = await api("/api/llm-traces?" + q.toString());
     renderTraces(data.traces || []);
   } catch (e) {
-    toast("traces failed: " + e.message, "err");
+    toast(t("traces_failed") + ": " + e.message, "err");
   }
 }
 
 function traceBadge(status) {
-  const cls = status === "ok" ? "active" : "warn";
-  return `<span class="badge ${cls}">${status || "?"}</span>`;
+  return `<span class="badge ${status === "ok" ? "active" : "warn"}">${escapeHtml(status || "?")}</span>`;
 }
 
 function renderTraces(traces) {
   const ul = $("traces");
   ul.innerHTML = "";
-  $("trace-info").textContent = `${traces.length} calls`;
+  currentTraces = traces;
+  $("trace-info").textContent = t("calls", traces.length);
   if (traces.length === 0) {
+    selectedTraceIdx = -1;
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = "No LLM calls traced yet. Trigger a recall / evolve, then reload.";
+    li.textContent = t("trace_empty");
     ul.appendChild(li);
     return;
   }
-  traces.forEach((t, i) => {
+  traces.forEach((tr, idx) => {
     const li = document.createElement("li");
-    const tok = t.token_usage && t.token_usage.total_tokens != null
-      ? ` · ${t.token_usage.total_tokens} tok` : "";
+    li.dataset.idx = String(idx);
+    if (idx === selectedTraceIdx) li.classList.add("sel");
+    const tok = tr.token_usage && tr.token_usage.total_tokens != null
+      ? ` · ${t("tok", tr.token_usage.total_tokens)}` : "";
     li.innerHTML =
-      `<div class="chunk-head"><span>${t.kind || "?"} <span class="muted">${escapeHtml(t.model || "")}</span></span>` +
-      `${traceBadge(t.status)}</div>` +
-      `<div class="muted small">${escapeHtml(fmtTime(t.ts))} · ${t.latency_ms ?? "?"}ms · ${t.attempts ?? 1} try${tok}</div>`;
-    li.onclick = () => {
-      document.querySelectorAll("#traces li").forEach((x) => x.classList.remove("sel"));
-      li.classList.add("sel");
-      renderTraceDetail(t);
-    };
+      `<div class="row-head"><span class="row-skill">${escapeHtml(tr.kind || "?")}</span>` +
+      `<span class="row-model">${escapeHtml(tr.model || "")}</span>${traceBadge(tr.status)}</div>` +
+      `<div class="row-meta">${escapeHtml(fmtTime(tr.ts))} · ${tr.latency_ms ?? "?"}ms · ${t("tries", tr.attempts ?? 1)}${tok}</div>`;
+    li.onclick = () => selectTrace(idx);
     ul.appendChild(li);
   });
 }
 
-function renderTraceDetail(t) {
-  const kv = (k, v) => `<div class="k">${k}</div><div>${escapeHtml(String(v ?? "—"))}</div>`;
-  const d = $("trace-detail");
-  d.classList.remove("muted");
-  let pretty = (s) => { try { return JSON.stringify(JSON.parse(s), null, 2); } catch (_) { return s; } };
-  d.innerHTML =
-    `<h2>${t.kind} ${traceBadge(t.status)}</h2>` +
-    `<div class="kv">${kv("time", fmtTime(t.ts))}${kv("model", t.model)}${kv("host", t.host)}` +
-    `${kv("latency", (t.latency_ms ?? "?") + " ms")}${kv("attempts", t.attempts)}` +
-    `${kv("tokens", t.token_usage ? JSON.stringify(t.token_usage) : "—")}</div>` +
-    (t.error ? `<h2>error</h2><pre class="err-pre">${escapeHtml(String(t.error))}</pre>` : "") +
-    `<h2>request</h2><pre>${escapeHtml(pretty(t.request_preview || ""))}</pre>` +
-    `<h2>response</h2><pre>${escapeHtml(pretty(t.response_preview || "") || "(none)")}</pre>`;
+function selectTrace(idx) {
+  selectedTraceIdx = idx;
+  document.querySelectorAll("#traces li").forEach((li) => {
+    li.classList.toggle("sel", li.dataset.idx === String(idx));
+  });
+  renderTraceDetail(currentTraces[idx]);
 }
 
+function renderTraceDetail(tr) {
+  if (!tr) return;
+  const el = $("trace-detail");
+  el.className = "detail";
+  el.removeAttribute("data-i18n");
+  const pretty = (s) => { try { return JSON.stringify(JSON.parse(s), null, 2); } catch (_) { return s; } };
+  const kvRows = [
+    [t("k_time"), fmtTime(tr.ts)],
+    [t("k_model"), tr.model],
+    [t("k_host"), tr.host],
+    [t("k_latency"), (tr.latency_ms ?? "?") + " ms"],
+    [t("k_attempts"), tr.attempts],
+    [t("k_tokens"), tr.token_usage ? JSON.stringify(tr.token_usage) : "—"],
+  ];
+  const section = (eyebrow, body, cls) =>
+    `<div class="section"><div class="section-head"><span class="section-eyebrow ${cls || ""}">${escapeHtml(eyebrow)}</span><span class="section-rule"></span></div>${body}</div>`;
+
+  el.innerHTML =
+    `<div class="detail-title"><h1>${escapeHtml(tr.kind || "")}</h1>${traceBadge(tr.status)}` +
+      `<span class="spacer">${escapeHtml(fmtTime(tr.ts))}</span></div>` +
+    `<div class="kv">` +
+      kvRows.map(([k, v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v ?? "—"))}</div>`).join("") +
+    `</div>` +
+    (tr.error ? section(t("h_error"), `<pre class="block err">${escapeHtml(String(tr.error))}</pre>`, "danger") : "") +
+    section(t("h_request"), `<pre class="block code">${escapeHtml(pretty(tr.request_preview || ""))}</pre>`) +
+    section(t("h_response"), `<pre class="block code">${escapeHtml(pretty(tr.response_preview || "") || t("none"))}</pre>`);
+}
+
+// ── Keyboard ────────────────────────────────────────────────────────────────
+// ↑/↓ navigate the active list; Esc closes the dialog; A approves a pending chunk.
+function onKey(e) {
+  if (e.key === "Escape" && dialog) { closeDialog(); return; }
+  if (dialog) return;
+  const tag = (e.target && e.target.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+  if ((e.key === "a" || e.key === "A") && !onTraces() && selectedId && selChunkState === "pending") {
+    e.preventDefault();
+    govern(selectedId, "approve");
+    return;
+  }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const dir = e.key === "ArrowDown" ? 1 : -1;
+  if (onTraces()) {
+    if (!currentTraces.length) return;
+    const i = selectedTraceIdx < 0 ? 0 : selectedTraceIdx + dir;
+    selectTrace(Math.max(0, Math.min(currentTraces.length - 1, i)));
+  } else {
+    if (!currentChunkIds.length) return;
+    const cur = currentChunkIds.indexOf(selectedId);
+    const i = cur < 0 ? 0 : cur + dir;
+    selectChunk(currentChunkIds[Math.max(0, Math.min(currentChunkIds.length - 1, i))]);
+  }
+}
+
+// ── Wiring ──────────────────────────────────────────────────────────────────
 $("tab-knowledge").onclick = () => showView("knowledge");
 $("tab-traces").onclick = () => showView("traces");
+$("health").onclick = toggleOverview;
+$("review-btn").onclick = toggleReview;
+$("queue-exit").onclick = toggleReview;
+$("lang-en").onclick = () => setLang("en");
+$("lang-zh").onclick = () => setLang("zh");
+$("theme-light").onclick = () => setTheme("light");
+$("theme-dark").onclick = () => setTheme("dark");
+
+$("reload").onclick = () => { offset = 0; if (govMode) loadGovernance(); else loadChunks(); };
+$("f-state").onchange = () => { offset = 0; loadChunks(); };
+$("f-origin").onchange = () => { offset = 0; loadChunks(); };
+$("prev").onclick = () => { if (!govMode && offset >= LIMIT) { offset -= LIMIT; loadChunks(); } };
+$("next").onclick = () => { if (!govMode && lastCount === LIMIT) { offset += LIMIT; loadChunks(); } };
+
 $("t-reload").onclick = loadTraces;
 $("t-kind").onchange = loadTraces;
 $("t-status").onchange = loadTraces;
 
+$("dialog-cancel").onclick = closeDialog;
+$("dialog-confirm").onclick = confirmDialog;
+$("dialog-reason").oninput = () => { $("dialog-confirm").disabled = !$("dialog-reason").value.trim(); };
+$("dialog-overlay").onclick = (e) => { if (e.target === $("dialog-overlay")) closeDialog(); };
+
+window.addEventListener("keydown", onKey);
+
+// ── Boot ────────────────────────────────────────────────────────────────────
+applyTheme();
+applyStatic();
 loadHealth();
 loadChunks();
