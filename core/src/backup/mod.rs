@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use hmac::digest::KeyInit; // `new_from_slice` moved to KeyInit in digest 0.11
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
@@ -195,10 +196,10 @@ impl R2BackupService {
         let (auth, payload_hash) = self.sign("PUT", &path, "", body, &datetime);
         let url = format!("{}{}", self.endpoint_base(), path);
         ureq::put(&url)
-            .set("x-amz-date", &datetime)
-            .set("x-amz-content-sha256", &payload_hash)
-            .set("Authorization", &auth)
-            .send_bytes(body)
+            .header("x-amz-date", &datetime)
+            .header("x-amz-content-sha256", &payload_hash)
+            .header("Authorization", &auth)
+            .send(body)
             .map_err(|e| anyhow::anyhow!("R2 PUT {key}: {e}"))?;
         Ok(())
     }
@@ -209,13 +210,13 @@ impl R2BackupService {
         let (auth, payload_hash) = self.sign("DELETE", &path, "", &[], &datetime);
         let url = format!("{}{}", self.endpoint_base(), path);
         match ureq::delete(&url)
-            .set("x-amz-date", &datetime)
-            .set("x-amz-content-sha256", &payload_hash)
-            .set("Authorization", &auth)
+            .header("x-amz-date", &datetime)
+            .header("x-amz-content-sha256", &payload_hash)
+            .header("Authorization", &auth)
             .call()
         {
             Ok(_) => Ok(()),
-            Err(ureq::Error::Status(404, _)) => Ok(()), // already gone
+            Err(ureq::Error::StatusCode(404)) => Ok(()), // already gone
             Err(e) => Err(anyhow::anyhow!("R2 DELETE {key}: {e}")),
         }
     }
@@ -240,12 +241,13 @@ impl R2BackupService {
         let url = format!("{}{}?{}", self.endpoint_base(), path, canonical_query);
 
         let body = ureq::get(&url)
-            .set("x-amz-date", &datetime)
-            .set("x-amz-content-sha256", &payload_hash)
-            .set("Authorization", &auth)
+            .header("x-amz-date", &datetime)
+            .header("x-amz-content-sha256", &payload_hash)
+            .header("Authorization", &auth)
             .call()
             .map_err(|e| anyhow::anyhow!("R2 LIST: {e}"))?
-            .into_string()
+            .body_mut()
+            .read_to_string()
             .map_err(|e| anyhow::anyhow!("R2 LIST read: {e}"))?;
 
         Ok(parse_list_xml(&body))

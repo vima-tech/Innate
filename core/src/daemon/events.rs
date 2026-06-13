@@ -131,7 +131,7 @@ pub(in crate::daemon) fn event_id_for_line(
     hash.update(offset.to_string().as_bytes());
     hash.update(b":");
     hash.update(line.as_bytes());
-    format!("{:x}", hash.finalize())
+    crate::utils::hex(&hash.finalize())
 }
 
 pub(in crate::daemon) fn record_daemon_error(

@@ -69,7 +69,7 @@ pub fn run_upgrade(version: Option<&str>, db_path: &Path, check_only: bool) -> R
         .with_context(|| format!("Could not download {asset}"))?;
 
     // 3. Verify checksum.
-    let actual_sha = format!("{:x}", Sha256::digest(&bytes));
+    let actual_sha = crate::utils::hex(&Sha256::digest(&bytes));
     if actual_sha != expected_sha {
         bail!(
             "SHA-256 mismatch — download may be corrupted.\n  \
@@ -144,27 +144,29 @@ fn latest_version() -> Result<String> {
 }
 
 fn http_get_text(url: &str) -> Result<String> {
-    let resp = ureq::get(url)
-        .set(
+    let mut resp = ureq::get(url)
+        .header(
             "User-Agent",
             &format!("innate/{}", env!("CARGO_PKG_VERSION")),
         )
-        .set("Accept", "application/vnd.github+json")
+        .header("Accept", "application/vnd.github+json")
         .call()
         .with_context(|| format!("HTTP GET {url}"))?;
-    Ok(resp.into_string()?)
+    Ok(resp.body_mut().read_to_string()?)
 }
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
-    let resp = ureq::get(url)
-        .set(
+    let mut resp = ureq::get(url)
+        .header(
             "User-Agent",
             &format!("innate/{}", env!("CARGO_PKG_VERSION")),
         )
         .call()
         .with_context(|| format!("HTTP GET {url}"))?;
     let mut buf = Vec::new();
-    resp.into_reader().read_to_end(&mut buf)?;
+    // `as_reader()` streams without ureq's default read-to-vec size cap — release
+    // binaries are multi-MB.
+    resp.body_mut().as_reader().read_to_end(&mut buf)?;
     Ok(buf)
 }
 

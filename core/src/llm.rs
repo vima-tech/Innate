@@ -133,32 +133,55 @@ fn post_json_retry(
     let mut attempt = 0;
     let outcome: Result<Value> = loop {
         attempt += 1;
+        // ureq 3 no longer carries the response inside the status error, so we opt
+        // out of `http_status_as_error`: non-2xx comes back as `Ok(response)` and we
+        // read its code + headers + body ourselves. A genuine `Err` is therefore a
+        // transport-level failure (timeout / connection / I/O) — always retryable.
         let mut req = ureq::post(url)
-            .timeout(HTTP_TIMEOUT)
-            .set("Content-Type", "application/json");
+            .config()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .http_status_as_error(false)
+            .build()
+            .header("Content-Type", "application/json");
         for (k, v) in headers {
-            req = req.set(k, v);
+            req = req.header(*k, *v);
         }
         match req.send_json(body) {
-            Ok(response) => {
-                break response
-                    .into_json()
-                    .map_err(|e| InnateError::Other(format!("{label} response parse error: {e}")));
-            }
-            Err(err) => {
-                let (retryable, retry_after) = match &err {
-                    ureq::Error::Status(code, resp) => (
-                        status_is_retryable(*code),
-                        resp.header("retry-after")
-                            .and_then(|s| s.trim().parse::<u64>().ok()),
-                    ),
-                    ureq::Error::Transport(_) => (true, None),
-                };
-                if retryable && attempt < HTTP_MAX_ATTEMPTS {
+            Ok(mut response) => {
+                let code = response.status().as_u16();
+                if (200..300).contains(&code) {
+                    break response
+                        .body_mut()
+                        .read_json::<Value>()
+                        .map_err(|e| {
+                            InnateError::Other(format!("{label} response parse error: {e}"))
+                        });
+                }
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok());
+                if status_is_retryable(code) && attempt < HTTP_MAX_ATTEMPTS {
                     std::thread::sleep(backoff_delay(attempt, retry_after));
                     continue;
                 }
-                break Err(InnateError::Other(format!("{label} HTTP error: {err}")));
+                // `status: {code}` is the substring llm_trace classifies into
+                // http_4xx / http_5xx / rate_limited (429); keep it ahead of the body.
+                let detail = response.body_mut().read_to_string().unwrap_or_default();
+                break Err(InnateError::Other(format!(
+                    "{label} HTTP error: status: {code} {detail}"
+                )));
+            }
+            Err(err) => {
+                if attempt < HTTP_MAX_ATTEMPTS {
+                    std::thread::sleep(backoff_delay(attempt, None));
+                    continue;
+                }
+                // `transport:` tag preserves the transport bucket in llm_trace.
+                break Err(InnateError::Other(format!(
+                    "{label} HTTP error: transport: {err}"
+                )));
             }
         }
     };

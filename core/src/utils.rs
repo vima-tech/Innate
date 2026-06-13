@@ -14,7 +14,19 @@ pub fn gen_uuid() -> String {
 pub fn content_hash(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
-    format!("{:x}", h.finalize())
+    hex(&h.finalize())
+}
+
+/// Lowercase hex encoding of a byte slice. Replaces the old `format!("{:x}", …)`
+/// over a digest output: RustCrypto digest 0.11 returns `hybrid_array::Array`,
+/// which no longer implements `LowerHex`.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Rough token estimate: 1 token ≈ 4 chars.
