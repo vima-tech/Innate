@@ -178,6 +178,37 @@ impl KnowledgeBase {
         Self::open_with(db_path, None, None, None, None, None)
     }
 
+    /// Persist a content embedding, rejecting any vector whose dimension differs
+    /// from the configured provider. A mismatched vector is silently skipped at
+    /// search time (cosine search only scores equal-dimension vectors), so an
+    /// unchecked write becomes invisible recall loss with no error. Fail closed
+    /// at the write boundary instead. All vector writers route through here.
+    pub(crate) fn store_vec_content(&self, chunk_id: &str, cvec: &[f32]) -> Result<()> {
+        let want = self.embedding.content_dim();
+        if cvec.len() != want {
+            return Err(InnateError::InvalidState(format!(
+                "content embedding dim {} != configured {want} (chunk {chunk_id})",
+                cvec.len()
+            )));
+        }
+        self.storage
+            .insert_vec_content(chunk_id, &pack_embedding(cvec))
+    }
+
+    /// Trigger-vector counterpart of [`store_vec_content`]; same fail-closed
+    /// dimension guard against `trigger_dim()`.
+    pub(crate) fn store_vec_trigger(&self, chunk_id: &str, tvec: &[f32]) -> Result<()> {
+        let want = self.embedding.trigger_dim();
+        if tvec.len() != want {
+            return Err(InnateError::InvalidState(format!(
+                "trigger embedding dim {} != configured {want} (chunk {chunk_id})",
+                tvec.len()
+            )));
+        }
+        self.storage
+            .insert_vec_trigger(chunk_id, &pack_embedding(tvec))
+    }
+
     pub fn open_with(
         db_path: impl AsRef<Path>,
         embedding: Option<Arc<dyn EmbeddingProvider>>,

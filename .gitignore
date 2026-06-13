@@ -22,7 +22,11 @@ Thumbs.db
 
 # Node
 node_modules/
+sdks/typescript/dist/
+# Lockfiles are ignored by default, but the TS SDK commits its lockfile so CI
+# can use the reproducible `npm ci` install.
 package-lock.json
+!sdks/typescript/package-lock.json
 
 # Innate runtime
 *.db

@@ -63,6 +63,7 @@ Curate   聚合、晋升、衰减、归档、去重和治理
 ```text
 MCP    (innate mcp)          ← JSON-RPC 2.0 over stdio；14 工具；直接进程内调用 Core
 CLI    (innate <cmd>)        ← clap 薄包装；直接进程内调用 Core
+Web    (innate web)          ← 本地只读查看 + 治理 HTTP 服务；进程内调用 Core
 SDKs   (Python / TypeScript) ← 子进程包装 CLI 二进制
 Daemon (innate daemon start) ← 后台日志/Hook 监听器；调用 CLI 子进程
                                        │
@@ -71,8 +72,9 @@ Daemon (innate daemon start) ← 后台日志/Hook 监听器；调用 CLI 子进
                            SQLite + 纯 Rust 向量检索
 ```
 
-- **MCP 与 CLI 进程内直接调用 `KnowledgeBase`**。
+- **MCP、CLI 与 Web 进程内直接调用 `KnowledgeBase`**。
 - **SDK 与 Daemon 从不直接打开数据库**，一律 shell out 到 `innate` 二进制——保证业务规则与治理逻辑单一来源于 Rust Core。
+- **Web 是第 5 个访问模块**，独立于 Daemon（不破坏 §11 中 Daemon「不直接打开知识库」的不变式）。因其暴露**治理写操作**（approve/archive/invalidate/restore），它持有读写 `KnowledgeBase` 句柄，并以「默认绑定 localhost + 一次性 token + 同源校验 + 前端二次确认」四件套作为安全边界。详见 §22。
 
 ### 3.2 模块化 crate 布局（`core/src/`）
 
@@ -101,6 +103,7 @@ Daemon (innate daemon start) ← 后台日志/Hook 监听器；调用 CLI 子进
 | `refine.rs` | `Sanitizer` / `Refiner` / `Distiller` trait 与默认实现 |
 | `errors.rs` | `InnateError` 枚举 |
 | `mcp.rs` | MCP stdio server——14 工具，JSON-RPC 2.0 分发 |
+| `web/` | `innate web`：本地 HTTP 服务（`tiny_http` 同步栈）。`mod` 启动与 token 生成、`api` 纯路由（读 + 治理、鉴权）、`assets` 内嵌前端（`include_str!`）|
 | `cli.rs` | CLI 命令（clap），薄包装 |
 | `daemon/` | 后台守护：`watch` 监听循环、`events` 事件解析、`process` 进程管理、`state` 状态库、`command` 子命令 |
 | `install/` | 安装向导：`wizard` 主流程、`agents` 各 agent 配置、`skills` Skill/斜杠命令、`settings` LLM/Daemon 交互、`path` PATH 安装、`ui` TUI、`uninstall` |
@@ -457,9 +460,11 @@ Curate ：归档知识并接受 proposal
 
 ### 16.1 Fail-closed 数据完整性
 
-- **Storage 查询 fail-closed**：行解码失败时整条查询返回错误并中止，不再 `filter_map(|r| r.ok())` 静默丢行（`storage/raw.rs`、`storage/chunks.rs`、`storage/traces.rs`）。损坏数据可见而非被悄悄跳过。
-- **Embedding 响应严格校验**：远程返回的向量逐元素要求数值（非法元素使整次解析失败，不静默丢弃），且最终长度必须等于配置 `embedding.dim`，否则报维度不匹配——错误维度的向量绝不进入余弦相似度（`llm.rs::parse_embedding_response`，含单测）。
-- **配置损坏显式告警**：`settings.json` 存在但解析失败时，`load_from` 向 stderr 打印显著 WARNING 并回退默认，而非静默吞掉——避免用户的 LLM/embedding 配置被悄悄忽略、降级到 Dummy provider（`settings.rs`）。
+- **知识 + 向量 + 依赖单事务原子写**：`add_with_deps` 在同一个 `BEGIN IMMEDIATE` 内写 chunk、双向量并**在事务内校验每个依赖目标存在**后写 `deps`；任一依赖非法则整笔回滚——知识块绝不会单独落库（CLI `innate add --depends-on`、MCP `innate_add` 均走此路径；含原子性测试）。`add()` 为零依赖的薄封装。
+- **配置 fail-closed（返回 `Result`）**：`settings::load`/`load_from` 现返回 `Result<Settings>`，**仅文件不存在**回退默认；存在但不可读/不可解析返回 `Err`。`open_kb` 及 backup/daemon/MCP-backup 命令传播该错误——损坏配置会让操作显式失败，而非静默创建 Dummy provider 的库。安装向导遇损坏配置打印提示并跳过该步，不再用默认覆盖原文件；MCP daemon 自启动为 best-effort（损坏即不自启）。含单测。
+- **持久化向量 fail-closed**：缓存加载时校验每个 BLOB `len > 0 且 len % 4 == 0`，结构性损坏（如被改成 3 字节）直接报错中止；打分阶段跳过维度与 query 不一致的向量（stale embed_version 或 4 字节对齐的损坏），绝不产生截断/垃圾点积（`storage/chunks.rs`，含 corrupt-blob 测试）。
+- **Storage 查询 fail-closed**：行解码失败时整条查询返回错误并中止，不再 `filter_map(|r| r.ok())` 静默丢行（`storage/raw.rs`、`storage/chunks.rs`、`storage/traces.rs`）。
+- **Embedding 响应严格校验**：远程向量逐元素要求数值，且长度必须等于配置 `embedding.dim`，否则报维度不匹配（`llm.rs::parse_embedding_response`，含单测）。
 
 > 注：Recall 仍对 embedding 服务硬依赖（先做远程 embedding，失败则整次 Recall 失败）；离线/降级检索（如词法回退）属未实现的架构项，见 §21。
 
@@ -467,7 +472,7 @@ Curate ：归档知识并接受 proposal
 
 ### 17.1 CLI 命令
 
-`recall` / `record` / `add` / `spark` / `evolve` / `inspect` / `approve` / `archive` / `invalidate` / `restore` / `mature-spark` / `promote-spark` / `drop-spark` / `backup` / `uninstall` / `upgrade` / `daemon` / `hook`（+ `migrate` / `vacuum`）。
+`recall` / `record` / `add` / `spark` / `evolve` / `inspect` / `approve` / `archive` / `invalidate` / `restore` / `mature-spark` / `promote-spark` / `drop-spark` / `backup` / `uninstall` / `upgrade` / `daemon` / `web` / `hook`（+ `migrate` / `vacuum`）。
 
 ### 17.2 MCP 工具（14）
 
@@ -546,12 +551,61 @@ MCP 直接调用 Rust Core。配置 daemon `auto_start` 且存在 watch dirs 时
 
 架构级债务（已识别，待单独设计，本版本未实现）：
 
-5. **统一操作契约 Module**：当前 CLI / MCP / SDK 各自拼装参数已出现漂移（如 TS recall 历史上缺 `include_sparks`/`expand_deps`/`refine_mode`，本版已补齐）。应抽出单一“操作契约”定义，CLI/MCP/SDK 仅作 Adapter，并加入跨 Adapter 契约测试，提高 leverage 与 locality。
+5. **统一操作契约 Module**：CLI / MCP / SDK 各自拼装参数仍易漂移（已逐项收敛：TS recall 补齐 `include_sparks`/`expand_deps`/`refine_mode`；TS/Python SDK `add` 补齐 `depends_on`/`dep_kind`；TS client 版本同步 0.1.9）。仍应抽出单一“操作契约”定义，CLI/MCP/SDK 仅作 Adapter，并加入跨 Adapter 契约测试，根治重复同步。
 6. **离线/降级检索**：Recall 当前对 embedding 服务硬依赖，远程失败即整次失败。需定义离线行为（如词法回退）、由 `inspect` 暴露 provider 健康状态。
-7. **MCP 子进程失败收敛**：TS MCP client 在子进程退出/异常/响应损坏时，待处理 Promise 缺少超时与失败收敛，需补超时与拒绝路径。
-8. **向量存储规模化**：content/trigger 两份完整缓存做 O(N×D) 全扫描；当 provider 对二者返回同一向量时存在重复存储（10 万×1536 维约 1.14 GiB 原始缓存）。应先建立规模基准与切换阈值，再考虑共享向量存储或 ANN Adapter（HNSW 仍按 §3.3 规模定位暂缓）。
+7. **MCP 子进程失败收敛**：TS MCP client 已补**请求级超时**、**进程退出/错误时拒绝全部 pending**、**stdin 写失败拒绝**（`McpClient.call`/`failAll`）。仍缺行为测试（需 Node 运行时）；CI 目前仅 tsc 编译校验。
+8. **向量存储规模化**：content/trigger 两个搜索空间语义不同（正文向量 vs trigger_desc 向量），并非冗余；仅当 chunk 无 `trigger_desc` 时两份才相同。当前各做 O(N×D) 全扫描、满精度 f32 缓存（10 万×1536 维约 600 MB/缓存）。应先建立规模基准，再考虑量化缓存 / 无-trigger 去重 / ANN Adapter（HNSW 仍按 §3.3 规模定位暂缓）。
 9. **Record Module 深化**：参数结构体化解决了函数参数数量，但调用方仍需理解归因/反馈/任务状态机；可继续将这些状态转换收拢进更深的 Module。
 10. **Storage 强类型行模型**：以强类型 row model + 外键完整性检查替代 `row_to_json` 动态投影中未知 SQLite 类型→null 的隐式降级，进一步集中完整性约束。
+11. **CI 可复现性**：TypeScript job 用 `npm install`（仓库无 `package-lock.json`）。应提交锁文件并改用 `npm ci`，并补 Python/TS 行为级契约测试。
+
+## 22. Web 访问模块（`innate web`）
+
+第 5 个访问模块，独立于 Daemon。提供本地 HTTP 服务，用于**只读查看**知识库与执行**治理写操作**（approve / archive / invalidate / restore）。同步技术栈（`tiny_http` + std accept loop），不引入 async 运行时；前端单文件内嵌（`include_str!`，同 `schema.sql` / `SKILL.md` 模式），无构建链。
+
+### 22.1 与 Daemon 的关系
+
+Web **不挂在 Daemon 上**，因此不破坏 §11 中 Daemon「不直接打开知识库」的不变式。与 MCP/CLI 一样，Web 进程内直接持有 `KnowledgeBase`。区别在于：因暴露治理写操作，它持有的是**读写**句柄（`open_kb`），而非只读连接。`cli.rs` 在已打开的 `kb` 上调用 `web::serve(kb, bind, port, require_token)`，accept loop 单线程串行处理请求（本地单用户场景足够，且让读写句柄生命周期天然 sound）。
+
+### 22.2 接口
+
+| 方法 | 路径 | 调用 | 鉴权 |
+|---|---|---|---|
+| GET | `/` `/app.js` `/style.css` | 内嵌静态资源 | 无 |
+| GET | `/api/inspect` | `KnowledgeBase::inspect` | 无 |
+| GET | `/api/chunks?state=&origin=&limit=&offset=` | `Storage::list_chunks`（分页投影，正文截断预览）| 无 |
+| GET | `/api/chunk/:id` | `KnowledgeBase::inspect_id` | 无 |
+| GET | `/api/governance?state=&limit=` | `Storage::list_governance_proposals`（人工复核队列，证据强者优先）| 无 |
+| GET | `/api/llm-traces?kind=&status=&limit=` | `llm_trace::read_recent`（最近 LLM/embedding 调用，倒序）| 无 |
+| POST | `/api/chunk/:id/approve` | `KnowledgeBase::approve` | token + 同源 |
+| POST | `/api/chunk/:id/restore` | `KnowledgeBase::restore` | token + 同源 |
+| POST | `/api/chunk/:id/archive` | `KnowledgeBase::archive`（必填 reason）| token + 同源 |
+| POST | `/api/chunk/:id/invalidate` | `KnowledgeBase::invalidate`（必填 reason）| token + 同源 |
+
+`api.rs` 的 `route()` 为纯函数（无 IO），便于单测；`handle()` 负责 `tiny_http` 收发并委派给 `route()`。
+
+### 22.3 安全模型（四件套）
+
+知识库是私人数据且 Web 暴露写操作，安全边界由四层构成：
+
+1. **默认绑定 `127.0.0.1`**（`--bind` 可改，文档明确警告超出 localhost 即不安全）。
+2. **一次性 token**：启动时 `gen_uuid()` 生成并打印到 stderr（`?token=…`）；所有治理（POST）端点校验 `X-Innate-Token` 头。`--no-token` 关闭（不建议，会让写操作无鉴权）。读端点不需 token。
+3. **同源校验**：POST 携带的 `Origin` 必须匹配 `127.0.0.1` / `localhost` / 绑定地址；缺失 `Origin`（非浏览器客户端如 curl）放行但仍需 token。浏览器跨站 POST 必带 `Origin`，故此为 CSRF 防线。
+4. **前端二次确认**：所有写操作 `confirm()`；archive/invalidate 弹框必填 reason（空 reason 后端返回 400）。token 从 URL query 读入仅存内存，不落 localStorage。
+
+### 22.4 健壮性
+
+`configure_pragmas` 设 `busy_timeout=5000`：长持读写句柄的 Web 进程与 `innate vacuum`（独占锁）并存时，短暂锁竞争自动重试而非立即失败。
+
+### 22.5 LLM 调用追踪（`llm_trace.rs`）
+
+为排查 agent 行为（recall/evolve 实际向模型发了什么、收到什么、是否失败），所有 LLM/embedding 的 HTTP 调用都汇集到 `llm::post_json_retry` 这一个传输函数。该函数在请求前后计时，并在每次调用（含全部重试后）落一条 JSONL 到 `~/.innate/logs/llm_trace.log`，由 `llm_trace::record` 写入：
+
+- **单点埋点、跨进程**：MCP / CLI / Daemon 触发的 evolve 任何进程的调用都自动记录，无需各自接线；失败调用同样留痕（排查核心）。
+- **字段**：`ts`、`kind`（chat/embedding）、`model`、`host`（仅主机名）、`status`（ok / http_4xx / http_5xx / rate_limited / transport / error）、`attempts`、`latency_ms`、`token_usage`、`error`、`request_preview` / `response_preview`（各截断至 4000 字节）。
+- **安全**：`Authorization` 头从不传入 tracer，**绝不记录 API key**；只记请求体（含 prompt/input，不含密钥）。
+- **有界**：单文件超过 5 MiB 轮转为 `.log.1`；`INNATE_LLM_TRACE=0` 可整体关闭。
+- **查看**：`innate web` 的 `GET /api/llm-traces` 只读该文件（不碰知识库 db），前端「LLM Traces」标签页按 kind/status 过滤、点开看完整 request/response。这是诊断/可观测面，刻意不落知识库 db（db 只装知识，不混 ops 遥测）。
 
 ---
 

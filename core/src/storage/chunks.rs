@@ -128,6 +128,62 @@ impl Storage {
         self.vector_cache_revision.set(None);
     }
 
+    /// Paginated chunk listing for the web viewer. Filters by exact `state` and
+    /// `origin` when provided; returns a compact projection (content truncated to
+    /// a preview) ordered newest-first. Read-only — never mutates.
+    pub fn list_chunks(
+        &self,
+        state: Option<&str>,
+        origin: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Value>> {
+        let mut sql = String::from(
+            "SELECT id, skill_name, seq, origin, state, state_reason, maturity, \
+             confidence, token_count, protected, selected_count, used_count, \
+             used_success_count, substr(content, 1, 280) AS content_preview, \
+             created_at, updated_at, last_used_at \
+             FROM chunks",
+        );
+        let mut clauses: Vec<&str> = Vec::new();
+        if state.is_some() {
+            clauses.push("state = :state");
+        }
+        if origin.is_some() {
+            clauses.push("origin = :origin");
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT :limit OFFSET :offset");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let names: Vec<String> = stmt
+            .column_names()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if let Some(s) = state.as_ref() {
+            params.push((":state", s));
+        }
+        if let Some(o) = origin.as_ref() {
+            params.push((":origin", o));
+        }
+        let limit_i = limit as i64;
+        let offset_i = offset as i64;
+        params.push((":limit", &limit_i));
+        params.push((":offset", &offset_i));
+
+        let rows = stmt.query_map(params.as_slice(), |r| row_to_json_with_names(r, &names))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn get_chunk(&self, id: &str) -> Result<Option<Value>> {
         let mut stmt = self.conn.prepare_cached("SELECT * FROM chunks WHERE id=?")?;
         let row = stmt.query_row([id], row_to_json);
@@ -219,20 +275,26 @@ impl Storage {
         if cache_cell.borrow().is_none() {
             let sql = format!("SELECT chunk_id, embedding FROM {table}");
             let mut stmt = self.conn.prepare(&sql)?;
-            let entries: Vec<(String, Vec<f32>)> = stmt
+            let raw: Vec<(String, Vec<u8>)> = stmt
                 .query_map([], |r| {
-                    let id: String = r.get(0)?;
-                    let blob: Vec<u8> = r.get(1)?;
-                    Ok((id, blob))
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
                 })?
-                .map(|row| {
-                    row.map(|(id, blob)| {
-                        let mut v = unpack_embedding(&blob);
-                        l2_normalize(&mut v);
-                        (id, v)
-                    })
-                })
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut entries: Vec<(String, Vec<f32>)> = Vec::with_capacity(raw.len());
+            for (id, blob) in raw {
+                // Fail-closed: a persisted embedding must be a whole number of
+                // f32 values (4 bytes each). A structurally corrupt blob aborts
+                // the load rather than silently yielding a truncated vector.
+                if blob.is_empty() || blob.len() % 4 != 0 {
+                    return Err(crate::errors::InnateError::Other(format!(
+                        "corrupt embedding for chunk {id} in {table}: {} bytes (not a non-zero multiple of 4)",
+                        blob.len()
+                    )));
+                }
+                let mut v = unpack_embedding(&blob);
+                l2_normalize(&mut v);
+                entries.push((id, v));
+            }
             *cache_cell.borrow_mut() = Some(entries);
         }
 
@@ -246,9 +308,13 @@ impl Storage {
 
         // Score by (index, similarity) without cloning ids; partial-sort the top
         // `limit` to the front (O(N) select), then clone ids for the winners only.
+        // Only score vectors whose dimension matches the query. A mismatch means
+        // a stale embed_version vector or a (4-byte-aligned) corruption — either
+        // way it must not contribute a truncated/garbage dot product.
         let mut scored: Vec<(usize, f32)> = entries
             .iter()
             .enumerate()
+            .filter(|(_, (_, v))| v.len() == q.len())
             .map(|(i, (_, v))| (i, dot_product(&q, v)))
             .collect();
         if scored.len() > limit {

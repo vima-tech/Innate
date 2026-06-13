@@ -247,6 +247,7 @@ fn configure_pragmas(conn: &Connection) -> Result<()> {
          PRAGMA synchronous=NORMAL;
          PRAGMA cache_size=-65536;
          PRAGMA mmap_size=268435456;
+         PRAGMA busy_timeout=5000;
          PRAGMA temp_store=memory;",
     )?;
     // Validate WAL mode was accepted (some VFS/filesystems silently downgrade).

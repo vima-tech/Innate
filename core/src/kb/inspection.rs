@@ -380,10 +380,8 @@ impl KnowledgeBase {
 
             self.storage.begin_immediate()?;
             let r = (|| -> Result<()> {
-                self.storage
-                    .insert_vec_content(id, &pack_embedding(&cvec))?;
-                self.storage
-                    .insert_vec_trigger(id, &pack_embedding(&tvec))?;
+                self.store_vec_content(id, &cvec)?;
+                self.store_vec_trigger(id, &tvec)?;
                 // Restore intended state if encoded in state_reason.
                 let new_reason = if state_reason.starts_with("embedding_pending:target=") {
                     let target_state = state_reason.trim_start_matches("embedding_pending:target=");

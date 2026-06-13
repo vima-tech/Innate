@@ -67,6 +67,12 @@ pub fn mcp_log_path() -> PathBuf {
     logs_dir().join("mcp.log")
 }
 
+/// `~/.innate/logs/llm_trace.log` — JSONL trace of every LLM/embedding HTTP call
+/// (request/response previews, latency, retries, errors) for agent debugging.
+pub fn llm_trace_path() -> PathBuf {
+    logs_dir().join("llm_trace.log")
+}
+
 pub fn session_log_path() -> PathBuf {
     sessions_dir().join("session.log")
 }

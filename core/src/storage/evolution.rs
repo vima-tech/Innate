@@ -39,6 +39,36 @@ impl Storage {
         Ok(())
     }
 
+    /// Read-only listing of governance proposals for the web review queue,
+    /// joined with a compact chunk projection so a reviewer sees *what* was
+    /// flagged and *why* (evidence_score / actor_count) in one round-trip.
+    /// Ordered by evidence_score DESC so the strongest cases surface first.
+    pub fn list_governance_proposals(&self, state: &str, limit: usize) -> Result<Vec<Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT g.id, g.chunk_id, g.proposal_type, g.reason,
+                    g.evidence_count, g.evidence_score, g.actor_count,
+                    g.state, g.created_at, g.updated_at,
+                    c.skill_name, c.seq, c.origin, c.state AS chunk_state,
+                    c.confidence, substr(c.content, 1, 280) AS content_preview
+             FROM governance_proposals g
+             LEFT JOIN chunks c ON c.id = g.chunk_id
+             WHERE g.state = :state
+             ORDER BY g.evidence_score DESC, g.updated_at DESC
+             LIMIT :limit",
+        )?;
+        let names: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+        let limit_i = limit as i64;
+        let rows = stmt.query_map(
+            rusqlite::named_params! { ":state": state, ":limit": limit_i },
+            |r| row_to_json_with_names(r, &names),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn request_evolve(&self, id: &str, reason: &str, now: &str) -> Result<()> {
         self.request_evolve_at(id, reason, now, None)
     }

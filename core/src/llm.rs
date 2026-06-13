@@ -118,8 +118,12 @@ fn post_json_retry(
     body: &Value,
     label: &str,
 ) -> Result<Value> {
+    // Single instrumentation point for all LLM/embedding calls: time the whole
+    // call (across retries) and emit one trace with the final outcome. The
+    // `Authorization` header is never handed to the tracer — only the body.
+    let start = std::time::Instant::now();
     let mut attempt = 0;
-    loop {
+    let outcome: Result<Value> = loop {
         attempt += 1;
         let mut req = ureq::post(url)
             .timeout(HTTP_TIMEOUT)
@@ -129,7 +133,7 @@ fn post_json_retry(
         }
         match req.send_json(body) {
             Ok(response) => {
-                return response
+                break response
                     .into_json()
                     .map_err(|e| InnateError::Other(format!("{label} response parse error: {e}")));
             }
@@ -146,10 +150,12 @@ fn post_json_retry(
                     std::thread::sleep(backoff_delay(attempt, retry_after));
                     continue;
                 }
-                return Err(InnateError::Other(format!("{label} HTTP error: {err}")));
+                break Err(InnateError::Other(format!("{label} HTTP error: {err}")));
             }
         }
-    }
+    };
+    crate::llm_trace::record(label, url, body, &outcome, attempt, start.elapsed());
+    outcome
 }
 
 /// Transient HTTP statuses worth retrying: rate limits and server-side errors.

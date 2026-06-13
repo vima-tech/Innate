@@ -13,8 +13,15 @@ pub(super) fn configure_llm_interactive() {
         return;
     }
 
-    // Load existing settings (preserve any already-set values).
-    let mut s = settings::load();
+    // Load existing settings (preserve any already-set values). Abort rather
+    // than overwrite a present-but-corrupt config with defaults.
+    let mut s = match settings::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Skipping LLM config — existing settings.json is invalid: {e}");
+            return;
+        }
+    };
 
     // ── Provider ──────────────────────────────────────────────────────────
     let provider_idx = prompt_select(
@@ -202,7 +209,13 @@ pub(super) fn configure_daemon_interactive() {
         result_line(&format!("Added: {dir}"));
     }
 
-    let mut s = settings::load();
+    let mut s = match settings::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Skipping daemon config — existing settings.json is invalid: {e}");
+            return;
+        }
+    };
     s.daemon = Some(DaemonConfig {
         watch_dirs,
         auto_start: true,

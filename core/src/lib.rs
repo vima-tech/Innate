@@ -7,6 +7,7 @@ pub mod hook;
 pub mod install;
 pub mod kb;
 pub mod llm;
+pub mod llm_trace;
 pub mod mcp;
 pub mod migrate;
 pub mod paths;
@@ -15,6 +16,7 @@ pub mod settings;
 pub mod storage;
 pub mod upgrade;
 pub mod utils;
+pub mod web;
 
 #[cfg(test)]
 mod tests;
@@ -27,7 +29,7 @@ pub use kb::{CurateReport, KnowledgeBase, RecallParams, RecallResult, RecordPara
 /// settings are present.
 pub fn open_kb(db_path: impl AsRef<std::path::Path>) -> Result<KnowledgeBase> {
     use std::sync::Arc;
-    let s = settings::load();
+    let s = settings::load()?;
 
     let embedding: Option<Arc<dyn embedding::EmbeddingProvider>> = s.embedding.as_ref().map(|c| {
         Arc::new(llm::LlmEmbeddingProvider::new(c.clone())) as Arc<dyn embedding::EmbeddingProvider>

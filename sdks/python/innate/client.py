@@ -157,6 +157,8 @@ class KnowledgeBase:
         anti_trigger_desc: str | None = None,
         source: str = "agent",
         skill_name: str | None = None,
+        depends_on: list[str] | None = None,
+        dep_kind: str = "hard",
     ) -> str:
         args = self._args() + ["add", content, "--kind", kind, "--source", source]
         if trigger_desc:
@@ -165,6 +167,10 @@ class KnowledgeBase:
             args += ["--anti-trigger", anti_trigger_desc]
         if skill_name:
             args += ["--skill-name", skill_name]
+        for dep in depends_on or []:
+            args += ["--depends-on", dep]
+        if depends_on:
+            args += ["--dep-kind", dep_kind]
         result = _run(*args)
         return str(result.get("_raw", result.get("chunk_id", "")))
 

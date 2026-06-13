@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::{InnateError, Result};
+
 pub const SCHEMA_JSONC: &str = include_str!("settings.schema.jsonc");
 
 fn default_schema_path() -> String {
@@ -279,31 +281,35 @@ pub fn settings_path() -> PathBuf {
     crate::paths::settings_path()
 }
 
-/// Load settings from `~/.innate/settings.json`. Returns `Settings::default()` if absent.
-pub fn load() -> Settings {
-    let path = settings_path();
-    load_from(&path)
+/// Load settings from `~/.innate/settings.json`.
+///
+/// Fail-closed: **only an absent file** falls back to `Settings::default()`. A
+/// present-but-unreadable or unparseable file returns `Err` rather than silently
+/// degrading to defaults (which would drop the user's LLM/embedding config and
+/// run on the Dummy provider). Callers that open the knowledge base propagate
+/// this error so a corrupt config surfaces instead of producing a Dummy DB.
+pub fn load() -> Result<Settings> {
+    load_from(&settings_path())
 }
 
-pub fn load_from(path: &Path) -> Settings {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Settings::default();
-    };
-    // A present-but-unparseable settings file must not silently degrade to
-    // defaults (which would drop the user's LLM/embedding config and fall back
-    // to the Dummy provider). Warn loudly so the misconfiguration is visible.
-    match serde_json::from_str(&text) {
-        Ok(settings) => settings,
+pub fn load_from(path: &Path) -> Result<Settings> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Settings::default()),
         Err(e) => {
-            eprintln!(
-                "innate: WARNING — {} exists but could not be parsed ({e}); \
-                 ignoring it and using defaults. LLM/embedding/backup settings \
-                 will NOT take effect until the file is fixed.",
+            return Err(InnateError::Other(format!(
+                "cannot read settings file {}: {e}",
                 path.display()
-            );
-            Settings::default()
+            )))
         }
-    }
+    };
+    serde_json::from_str(&text).map_err(|e| {
+        InnateError::Other(format!(
+            "{} is present but could not be parsed ({e}); fix the file \
+             (only an absent settings file falls back to defaults)",
+            path.display()
+        ))
+    })
 }
 
 /// Write settings to `~/.innate/settings.json` with mode 0600.
@@ -349,4 +355,27 @@ pub fn resolved_watch_dirs(settings: &Settings) -> Vec<String> {
         .as_ref()
         .map(|d| d.watch_dirs.iter().map(|p| expand_tilde(p)).collect())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn load_is_fail_closed_only_absent_falls_back() {
+        // Absent file → default (the one allowed fallback).
+        let missing = std::path::Path::new("/nonexistent/innate/settings.json");
+        assert!(load_from(missing).is_ok());
+
+        // Present-but-corrupt file → Err (no silent degradation to Dummy).
+        let mut bad = tempfile::NamedTempFile::new().unwrap();
+        bad.write_all(b"{ this is not valid json").unwrap();
+        assert!(load_from(bad.path()).is_err());
+
+        // Valid file → parsed.
+        let mut good = tempfile::NamedTempFile::new().unwrap();
+        good.write_all(br#"{"schema":"1"}"#).unwrap();
+        assert!(load_from(good.path()).is_ok());
+    }
 }

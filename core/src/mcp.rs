@@ -319,22 +319,24 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             } else {
                 s("source")
             };
-            let id = kb.add(
+            let dep_kind = if s("dep_kind").is_empty() {
+                "hard".to_string()
+            } else {
+                s("dep_kind")
+            };
+            let deps: Vec<(String, String)> = arr("depends_on")
+                .into_iter()
+                .map(|d| (d, dep_kind.clone()))
+                .collect();
+            let id = kb.add_with_deps(
                 &content,
                 &kind,
                 so("trigger_desc").as_deref(),
                 so("anti_trigger_desc").as_deref(),
                 &source,
                 so("skill_name").as_deref(),
+                &deps,
             )?;
-            let dep_kind = if s("dep_kind").is_empty() {
-                "hard".to_string()
-            } else {
-                s("dep_kind")
-            };
-            for dep in arr("depends_on") {
-                kb.add_dependency(&id, &dep, &dep_kind)?;
-            }
             Ok(json!({"chunk_id": id}))
         }
         "innate_spark" => {
@@ -536,7 +538,7 @@ fn dispatch_backup(
     use crate::backup::R2BackupService;
     use crate::errors::InnateError;
 
-    let settings = crate::settings::load();
+    let settings = crate::settings::load()?;
     let cfg = settings.backup.as_ref().ok_or_else(|| {
         InnateError::Other(
             "backup not configured — add a \"backup\" section with \"enable\": true \
@@ -630,7 +632,9 @@ fn default_pid_file() -> PathBuf {
 /// daemon in the background if it is not already running. Failures are silently ignored
 /// so the MCP server always starts even when the daemon can't be spawned.
 fn maybe_auto_start_daemon(db_path: &std::path::Path) {
-    let s = crate::settings::load();
+    // Best-effort: a corrupt config simply means "no auto-start" rather than
+    // blocking MCP startup (errors here are intentionally swallowed).
+    let s = crate::settings::load().unwrap_or_default();
     match &s.daemon {
         Some(c) if c.auto_start => {}
         _ => return,

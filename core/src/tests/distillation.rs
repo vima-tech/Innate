@@ -752,6 +752,128 @@ fn add_dependency_wires_public_dep_edges() {
 }
 
 #[test]
+fn add_with_deps_is_atomic_on_missing_dependency() {
+    let (kb, _file) = tmp_kb();
+    // Creating a chunk that depends on a non-existent chunk must fail AND leave
+    // no partial chunk behind — the chunk + vectors + deps are one transaction.
+    let err = kb
+        .add_with_deps(
+            "orphan-maker",
+            "note",
+            Some("t"),
+            None,
+            "manual",
+            None,
+            &[("does-not-exist".to_string(), "hard".to_string())],
+        )
+        .unwrap_err();
+    assert!(matches!(err, InnateError::ChunkNotFound(_)));
+    let rows = kb
+        .storage
+        .query_chunks_params(
+            "SELECT id FROM chunks WHERE content=?",
+            rusqlite::params!["orphan-maker"],
+        )
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "chunk must not persist when a declared dependency is invalid"
+    );
+}
+
+#[test]
+fn idempotent_add_merges_new_dependencies() {
+    let (kb, _file) = tmp_kb();
+    let target = kb
+        .add("dep target", "note", Some("t"), None, "manual", None)
+        .unwrap();
+    // First add of the content, no deps.
+    let id1 = kb
+        .add("duplicate body", "note", Some("d"), None, "manual", None)
+        .unwrap();
+    assert_eq!(kb.storage.get_deps(&id1).unwrap().len(), 0);
+
+    // Re-adding identical content with a NEW dependency must return the same
+    // chunk AND merge the edge, rather than silently dropping it.
+    let id2 = kb
+        .add_with_deps(
+            "duplicate body",
+            "note",
+            Some("d"),
+            None,
+            "manual",
+            None,
+            &[(target.clone(), "hard".to_string())],
+        )
+        .unwrap();
+    assert_eq!(id1, id2, "duplicate content returns the existing chunk id");
+    let deps = kb.storage.get_deps(&id1).unwrap();
+    assert_eq!(deps.len(), 1, "the new dependency must be merged in");
+    assert_eq!(deps[0].0, target);
+
+    // Merging is idempotent: a second identical merge does not duplicate edges.
+    kb.add_with_deps(
+        "duplicate body",
+        "note",
+        Some("d"),
+        None,
+        "manual",
+        None,
+        &[(target.clone(), "hard".to_string())],
+    )
+    .unwrap();
+    assert_eq!(kb.storage.get_deps(&id1).unwrap().len(), 1);
+
+    // A bad dependency target on the idempotent path is still rejected.
+    let err = kb
+        .add_with_deps(
+            "duplicate body",
+            "note",
+            Some("d"),
+            None,
+            "manual",
+            None,
+            &[("nope".to_string(), "hard".to_string())],
+        )
+        .unwrap_err();
+    assert!(matches!(err, InnateError::ChunkNotFound(_)));
+}
+
+#[test]
+fn corrupt_vector_blob_fails_recall_closed() {
+    let (kb, _file) = tmp_kb();
+    let id = kb
+        .add(
+            "vectored knowledge",
+            "note",
+            Some("trigger"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    // Corrupt the stored content vector to 3 bytes (not a multiple of 4).
+    kb.storage
+        .conn_execute(
+            "UPDATE vec_content SET embedding=? WHERE chunk_id=?",
+            rusqlite::params![vec![1u8, 2, 3], id],
+        )
+        .unwrap();
+    kb.storage.invalidate_vector_caches();
+    // Recall must fail-closed rather than silently using a truncated vector.
+    let result = kb.recall(RecallParams {
+        query: "vectored knowledge",
+        budget: 6000,
+        source: "sdk",
+        ..Default::default()
+    });
+    assert!(
+        result.is_err(),
+        "recall must fail on a structurally corrupt persisted embedding"
+    );
+}
+
+#[test]
 fn recall_refreshes_vector_cache_after_external_write() {
     let file = NamedTempFile::new().unwrap();
     let reader = KnowledgeBase::open(file.path()).unwrap();
@@ -811,4 +933,53 @@ fn vector_search_with_zero_limit_returns_empty() {
 
     let result = kb.storage.search_vec_content(&vec![0.0; 1024], 0).unwrap();
     assert!(result.is_empty());
+}
+
+/// Embedding provider that lies about its output: it declares a dimension but
+/// returns a vector of a different length. Used to prove the write-side guard
+/// rejects dimension-mismatched vectors instead of silently storing them.
+struct LyingEmbeddingProvider {
+    declared: usize,
+    actual: usize,
+}
+
+impl EmbeddingProvider for LyingEmbeddingProvider {
+    fn content_dim(&self) -> usize {
+        self.declared
+    }
+    fn trigger_dim(&self) -> usize {
+        self.declared
+    }
+    fn embed_content(&self, _text: &str) -> Result<Vec<f32>> {
+        Ok(vec![0.1; self.actual])
+    }
+    fn embed_trigger(&self, _text: &str) -> Result<Vec<f32>> {
+        Ok(vec![0.1; self.actual])
+    }
+}
+
+#[test]
+fn add_rejects_dimension_mismatched_vector() {
+    let file = NamedTempFile::new().unwrap();
+    let embedding: Arc<dyn EmbeddingProvider> =
+        Arc::new(LyingEmbeddingProvider { declared: 4, actual: 2 });
+    let kb =
+        KnowledgeBase::open_with(file.path(), Some(embedding), None, None, None, None).unwrap();
+
+    // A vector whose real length disagrees with the configured dimension would
+    // be silently dropped at search time, so the write must fail closed.
+    let err = kb
+        .add("mismatched", "note", Some("t"), None, "manual", None)
+        .unwrap_err();
+    assert!(matches!(err, InnateError::InvalidState(_)), "got: {err:?}");
+
+    // And nothing partial is left behind — the transaction rolled back.
+    let rows = kb
+        .storage
+        .query_chunks_params(
+            "SELECT id FROM chunks WHERE content=?",
+            rusqlite::params!["mismatched"],
+        )
+        .unwrap();
+    assert!(rows.is_empty(), "no chunk should persist on a bad-dim write");
 }

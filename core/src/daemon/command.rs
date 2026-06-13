@@ -48,7 +48,7 @@ pub(crate) fn run_command(action: &DaemonCommands, db_path: &Path) -> anyhow::Re
             let effective_watch: Vec<std::path::PathBuf> = if !watch.is_empty() {
                 watch.clone()
             } else {
-                let s = crate::settings::load();
+                let s = crate::settings::load()?;
                 crate::settings::resolved_watch_dirs(&s)
                     .into_iter()
                     .map(std::path::PathBuf::from)

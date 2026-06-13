@@ -240,6 +240,8 @@ export class KnowledgeBase {
       antiTriggerDesc?: string;
       source?: "chat" | "manual" | "doc" | "agent";
       skillName?: string;
+      dependsOn?: string[];
+      depKind?: "hard" | "soft";
     } = {}
   ): string {
     const args = [
@@ -253,6 +255,10 @@ export class KnowledgeBase {
     if (options.triggerDesc) args.push("--trigger", options.triggerDesc);
     if (options.antiTriggerDesc) args.push("--anti-trigger", options.antiTriggerDesc);
     if (options.skillName) args.push("--skill-name", options.skillName);
+    // Dependencies: matches the MCP `add` and the CLI's `--depends-on` (repeatable)
+    // + `--dep-kind`, so the subprocess SDK is no longer missing edge support.
+    if (options.depKind) args.push("--dep-kind", options.depKind);
+    for (const dst of options.dependsOn ?? []) args.push("--depends-on", dst);
     return this.runRaw(...args);
   }
 
@@ -353,28 +359,67 @@ export class McpClient {
         } catch { /* ignore malformed */ }
       }
     });
+
+    // Fail every in-flight request if the subprocess dies or errors, so callers
+    // never hang on a Promise that can no longer be answered.
+    this.proc.on("exit", (code) =>
+      this.failAll(new Error(`innate mcp process exited (code ${code ?? "unknown"})`)),
+    );
+    this.proc.on("error", (err) =>
+      this.failAll(new Error(`innate mcp process error: ${err.message}`)),
+    );
+    // A broken stdin pipe (e.g. the child exited) surfaces as an async 'error'
+    // on the stream. Without a listener Node would throw it as uncaught and
+    // crash the host process; instead fail every pending request.
+    this.stdin.on("error", (err) =>
+      this.failAll(new Error(`innate mcp stdin error: ${err.message}`)),
+    );
+  }
+
+  private failAll(err: Error): void {
+    for (const cb of this.pending.values()) {
+      cb({ jsonrpc: "2.0", id: -1, error: { code: -1, message: err.message } });
+    }
+    this.pending.clear();
   }
 
   async initialize(): Promise<void> {
     await this.call("initialize", {
       protocolVersion: "2024-11-05",
-      clientInfo: { name: "innate-ts", version: "0.1.8" },
+      clientInfo: { name: "innate-ts", version: "0.1.9" },
     });
     this.send({ jsonrpc: "2.0", id: 0, method: "notifications/initialized" });
   }
 
   private send(msg: McpRequest | object): void {
-    this.stdin.write(JSON.stringify(msg) + "\n");
+    // Surface async write failures (back-pressure / EPIPE) instead of dropping
+    // them: a failed write means the request will never be answered, so fail
+    // all in-flight calls rather than letting them hang until timeout.
+    this.stdin.write(JSON.stringify(msg) + "\n", (err) => {
+      if (err) this.failAll(new Error(`innate mcp stdin write failed: ${err.message}`));
+    });
   }
 
-  private call(method: string, params?: unknown): Promise<unknown> {
+  private call(method: string, params?: unknown, timeoutMs = 30000): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) {
+          reject(new Error(`innate mcp request timed out after ${timeoutMs}ms: ${method}`));
+        }
+      }, timeoutMs);
       this.pending.set(id, (resp) => {
+        clearTimeout(timer);
         if (resp.error) reject(new Error(resp.error.message));
         else resolve(resp.result);
       });
-      this.send({ jsonrpc: "2.0", id, method, params });
+      try {
+        this.send({ jsonrpc: "2.0", id, method, params });
+      } catch (e) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
     });
   }
 
@@ -422,12 +467,15 @@ export class McpClient {
 
   async add(content: string, options: {
     kind?: string; triggerDesc?: string; source?: string;
+    dependsOn?: string[]; depKind?: "hard" | "soft";
   } = {}): Promise<string> {
     const r = await this.toolCall("innate_add", {
       content,
       kind: options.kind ?? "note",
       source: options.source ?? "agent",
       ...(options.triggerDesc ? { trigger_desc: options.triggerDesc } : {}),
+      ...(options.dependsOn?.length ? { depends_on: options.dependsOn } : {}),
+      ...(options.depKind ? { dep_kind: options.depKind } : {}),
     }) as { chunk_id: string };
     return r.chunk_id;
   }

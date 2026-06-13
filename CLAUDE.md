@@ -47,11 +47,12 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 ## Architecture
 
-Four access modules, one Rust KnowledgeBase Core:
+Five access modules, one Rust KnowledgeBase Core:
 
 ```
 MCP    (innate mcp)          ← JSON-RPC 2.0 over stdio; 14 tools; direct Core calls
 CLI    (innate <cmd>)        ← clap thin wrapper; direct Core calls
+Web    (innate web)          ← local read + governance HTTP UI; direct Core calls (read-write)
 SDKs   (Python / TypeScript) ← subprocess wrapper over CLI binary
 Daemon (innate daemon start) ← background log/hook watcher; invokes CLI subprocesses
                                     │
@@ -65,11 +66,12 @@ Dependency direction:
 ```
 MCP    ──────────────────────> KnowledgeBase Core
 CLI    ──────────────────────> KnowledgeBase Core
+Web    ──────────────────────> KnowledgeBase Core
 SDKs   ──> CLI ──────────────> KnowledgeBase Core
 Daemon ──> CLI ──────────────> KnowledgeBase Core
 ```
 
-MCP and CLI call `KnowledgeBase` directly (in-process). SDKs and Daemon never open the database; they shell out to the `innate` binary.
+MCP, CLI, and Web call `KnowledgeBase` directly (in-process). SDKs and Daemon never open the database; they shell out to the `innate` binary. Web is the only access module that exposes governance writes over the network, so it is localhost-bound + token-gated (see design doc §22).
 
 ### Crate layout (`core/src/`)
 
@@ -88,10 +90,12 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `storage/{mod,chunks,traces,evolution,meta,raw}.rs` | rusqlite backend; schema init, BLOB-vector search, SQL helpers |
 | `embedding.rs` | `EmbeddingProvider` trait + `DummyEmbeddingProvider` (hash-based, for tests) |
 | `llm.rs` | `HttpDistiller` (OpenAI-compatible + Anthropic, one type) + `LlmEmbeddingProvider`; HTTP retry transport |
+| `llm_trace.rs` | LLM/embedding call tracing — `post_json_retry` emits JSONL to `~/.innate/logs/llm_trace.log` (request/response previews, latency, retries, errors; never the API key). Read by `innate web` `/api/llm-traces` |
 | `refine.rs` | `Sanitizer`/`Refiner`/`Distiller` traits + `DefaultSanitizer`/`NoopSanitizer`/`NullRefiner`/`HeuristicDistiller` defaults |
 | `errors.rs` | `InnateError` enum covering all error kinds |
 | `mcp.rs` | MCP stdio server — 14 tools, JSON-RPC 2.0 dispatcher |
 | `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
+| `web/{mod,api,assets}.rs` | `innate web` — local HTTP UI (`tiny_http` sync). `mod` serve+token; `api` pure router (read + governance, auth); `assets` embedded frontend via `include_str!` |
 | `daemon/{mod,watch,events,process,state,command}.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
 | `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
 | `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |

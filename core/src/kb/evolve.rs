@@ -354,8 +354,11 @@ impl KnowledgeBase {
                     ..Default::default()
                 };
                 let cvec = match self.embedding.embed_content(&content) {
-                    Ok(v) => v,
-                    Err(_) => {
+                    Ok(v) if v.len() == self.embedding.content_dim() => v,
+                    // A failed or wrong-dimension embedding is deferred (not
+                    // written): a dim mismatch would be silently dropped at
+                    // search time, so it must never reach storage.
+                    _ => {
                         embedding_failures += 1;
                         continue;
                     }
@@ -364,8 +367,8 @@ impl KnowledgeBase {
                     .embedding
                     .embed_trigger(row.trigger_desc.as_deref().unwrap_or(&content))
                 {
-                    Ok(v) => v,
-                    Err(_) => {
+                    Ok(v) if v.len() == self.embedding.trigger_dim() => v,
+                    _ => {
                         embedding_failures += 1;
                         continue;
                     }

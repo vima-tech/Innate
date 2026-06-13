@@ -189,6 +189,22 @@ pub enum Commands {
     },
     /// Start MCP stdio server
     Mcp,
+    /// Start a local web UI to view and govern the knowledge base
+    Web {
+        /// Address to bind (localhost only by default; exposing beyond is unsafe)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Port to listen on
+        #[arg(long, default_value_t = 8788)]
+        port: u16,
+        /// Disable the governance auth token (NOT recommended; leaves writes unauthenticated)
+        #[arg(long)]
+        no_token: bool,
+        /// Required to bind a non-loopback address. Exposes the knowledge base to
+        /// the network; the auth token then gates reads as well as writes.
+        #[arg(long)]
+        allow_remote: bool,
+    },
     /// Agent hook handlers (called by agent hooks; reads payload from stdin)
     Hook {
         #[command(subcommand)]
@@ -397,17 +413,19 @@ pub fn run() -> anyhow::Result<()> {
             } else {
                 content
             };
-            let id = kb.add(
+            let deps: Vec<(String, String)> = depends_on
+                .iter()
+                .map(|d| (d.clone(), dep_kind.clone()))
+                .collect();
+            let id = kb.add_with_deps(
                 &content,
                 &kind,
                 trigger.as_deref(),
                 anti_trigger.as_deref(),
                 &source,
                 skill_name.as_deref(),
+                &deps,
             )?;
-            for dep in &depends_on {
-                kb.add_dependency(&id, dep, &dep_kind)?;
-            }
             println!("{id}");
         }
         Commands::Spark { content, trigger } => {
@@ -480,6 +498,27 @@ pub fn run() -> anyhow::Result<()> {
                 mb(after),
                 mb(before - after)
             );
+        }
+        Commands::Web {
+            bind,
+            port,
+            no_token,
+            allow_remote,
+        } => {
+            let loopback = crate::web::is_loopback(&bind);
+            if !loopback && !allow_remote {
+                anyhow::bail!(
+                    "refusing to bind non-loopback address {bind} without --allow-remote \
+                     (this exposes the knowledge base to the network)"
+                );
+            }
+            if !loopback && no_token {
+                anyhow::bail!(
+                    "--no-token cannot be combined with a non-loopback bind: a network-exposed \
+                     server must keep the auth token to gate reads and writes"
+                );
+            }
+            crate::web::serve(kb, &bind, port, !no_token)?;
         }
         Commands::Mcp
         | Commands::Install

@@ -10,8 +10,42 @@ impl KnowledgeBase {
         source: &str,
         skill_name: Option<&str>,
     ) -> Result<String> {
+        self.add_with_deps(
+            content,
+            kind,
+            trigger_desc,
+            anti_trigger_desc,
+            source,
+            skill_name,
+            &[],
+        )
+    }
+
+    /// Full-form writer: persist a chunk, its vectors, and all declared
+    /// dependencies in a **single transaction**. Each dep is `(dst_chunk_id,
+    /// kind)`; `kind` ∈ {`soft`,`hard`}. Dependency targets are validated to
+    /// exist *inside* the transaction, so a bad dependency rolls back the whole
+    /// write — the chunk is never persisted on its own.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_with_deps(
+        &self,
+        content: &str,
+        kind: &str,
+        trigger_desc: Option<&str>,
+        anti_trigger_desc: Option<&str>,
+        source: &str,
+        skill_name: Option<&str>,
+        deps: &[(String, String)],
+    ) -> Result<String> {
         if !matches!(kind, "note" | "skill") {
             return Err(InnateError::InvalidState(format!("invalid kind: {kind}")));
+        }
+        for (_, dep_kind) in deps {
+            if !matches!(dep_kind.as_str(), "soft" | "hard") {
+                return Err(InnateError::InvalidState(format!(
+                    "invalid dependency kind: {dep_kind} (expected soft|hard)"
+                )));
+            }
         }
         if !matches!(source, "chat" | "manual" | "doc" | "agent") {
             return Err(InnateError::InvalidState(format!(
@@ -54,8 +88,30 @@ impl KnowledgeBase {
             rusqlite::params![h],
         )?;
         if let Some(e) = existing.first() {
-            if let Some(id) = e.get("id").and_then(Value::as_str) {
-                return Ok(id.to_string());
+            if let Some(id) = e.get("id").and_then(Value::as_str).map(str::to_string) {
+                // Content already exists. Don't silently drop newly-declared
+                // dependencies: merge them into the existing chunk in one
+                // transaction (edge insert is idempotent via INSERT OR IGNORE,
+                // targets validated as in the fresh-write path).
+                if !deps.is_empty() {
+                    self.storage.begin_immediate()?;
+                    let merge = (|| -> Result<()> {
+                        for (dst, dep_kind) in deps {
+                            if self.storage.get_chunk(dst)?.is_none() {
+                                return Err(InnateError::ChunkNotFound(format!(
+                                    "dependency target not found: {dst}"
+                                )));
+                            }
+                            self.storage.insert_dep(&id, dst, dep_kind, None)?;
+                        }
+                        self.storage.commit()
+                    })();
+                    if merge.is_err() {
+                        let _ = self.storage.rollback();
+                    }
+                    merge?;
+                }
+                return Ok(id);
             }
         }
 
@@ -131,10 +187,19 @@ impl KnowledgeBase {
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
             if embed_ver > 0 {
-                self.storage
-                    .insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-                self.storage
-                    .insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+                self.store_vec_content(&chunk_id, &cvec)?;
+                self.store_vec_trigger(&chunk_id, &tvec)?;
+            }
+            // Dependencies are validated and written in the SAME transaction: a
+            // missing target aborts the whole write so the chunk never lands
+            // alone (no foreign keys, so existence is checked here explicitly).
+            for (dst, dep_kind) in deps {
+                if self.storage.get_chunk(dst)?.is_none() {
+                    return Err(InnateError::ChunkNotFound(format!(
+                        "dependency target not found: {dst}"
+                    )));
+                }
+                self.storage.insert_dep(&chunk_id, dst, dep_kind, None)?;
             }
             self.storage.commit()
         })();
@@ -272,10 +337,8 @@ impl KnowledgeBase {
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
             if embed_ver > 0 {
-                self.storage
-                    .insert_vec_content(&chunk_id, &pack_embedding(&cvec))?;
-                self.storage
-                    .insert_vec_trigger(&chunk_id, &pack_embedding(&tvec))?;
+                self.store_vec_content(&chunk_id, &cvec)?;
+                self.store_vec_trigger(&chunk_id, &tvec)?;
             }
             self.storage.commit()
         })();
@@ -438,10 +501,8 @@ impl KnowledgeBase {
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
             self.storage.insert_chunk(&row)?;
-            self.storage
-                .insert_vec_content(&new_id, &pack_embedding(&cvec))?;
-            self.storage
-                .insert_vec_trigger(&new_id, &pack_embedding(&tvec))?;
+            self.store_vec_content(&new_id, &cvec)?;
+            self.store_vec_trigger(&new_id, &tvec)?;
             self.storage.query_chunks_params(
                 "UPDATE chunks SET maturity='promoted', updated_at=? WHERE id=?",
                 rusqlite::params![now, spark_id],

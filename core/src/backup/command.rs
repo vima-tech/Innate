@@ -16,7 +16,7 @@ pub enum BackupCommands {
 pub(crate) fn run_command(action: &BackupCommands, db_path: &Path) -> anyhow::Result<()> {
     use super::R2BackupService;
 
-    let settings = crate::settings::load();
+    let settings = crate::settings::load()?;
     let cfg = settings.backup.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "No backup config found in ~/.innate/settings.json.\n\

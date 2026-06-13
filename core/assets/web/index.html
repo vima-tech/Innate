@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Defense-in-depth against stored XSS: only same-origin scripts/styles may
+       run, and no inline script can execute even if markup is injected. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'" />
+  <title>Innate — Knowledge Base</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Innate <span class="muted">knowledge base</span></h1>
+    <nav class="tabs">
+      <button id="tab-knowledge" class="tab active">Knowledge</button>
+      <button id="tab-traces" class="tab">LLM Traces</button>
+    </nav>
+    <div id="health" class="health"></div>
+  </header>
+
+  <main id="kb-view">
+    <section class="list-pane">
+      <div class="filters">
+        <select id="f-state">
+          <option value="">state: all</option>
+          <option value="pending">pending</option>
+          <option value="active">active</option>
+          <option value="archived">archived</option>
+          <option value="invalidated">invalidated</option>
+        </select>
+        <select id="f-origin">
+          <option value="">origin: all</option>
+          <option value="captured">captured</option>
+          <option value="distilled">distilled</option>
+          <option value="spark">spark</option>
+        </select>
+        <button id="reload">Reload</button>
+      </div>
+      <div id="queue-banner" class="queue-banner hidden">
+        ⚠ Review queue — chunks flagged by repeated negative feedback. Filters disabled; click an item to adjudicate.
+      </div>
+      <ul id="chunks" class="chunks"></ul>
+      <div class="pager">
+        <button id="prev">‹ Prev</button>
+        <span id="page-info"></span>
+        <button id="next">Next ›</button>
+      </div>
+    </section>
+
+    <section class="detail-pane">
+      <div id="detail" class="detail muted">Select a chunk to view details.</div>
+    </section>
+  </main>
+
+  <main id="trace-view" class="hidden">
+    <section class="list-pane">
+      <div class="filters">
+        <select id="t-kind">
+          <option value="">kind: all</option>
+          <option value="chat">chat</option>
+          <option value="embedding">embedding</option>
+        </select>
+        <select id="t-status">
+          <option value="">status: all</option>
+          <option value="ok">ok</option>
+          <option value="http_4xx">http_4xx</option>
+          <option value="http_5xx">http_5xx</option>
+          <option value="rate_limited">rate_limited</option>
+          <option value="transport">transport</option>
+          <option value="error">error</option>
+        </select>
+        <button id="t-reload">Reload</button>
+      </div>
+      <ul id="traces" class="chunks"></ul>
+      <div class="pager"><span id="trace-info"></span></div>
+    </section>
+    <section class="detail-pane">
+      <div id="trace-detail" class="detail muted">Select a call to view its request &amp; response.</div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
