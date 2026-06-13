@@ -43,14 +43,14 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 ## Authoritative Design Reference
 
-`docs/Innate-设计文档-v0.1.8.md` is the **编码基线**. Every design decision references a section. When behavior is ambiguous, consult the doc first.
+`docs/Innate-设计文档-v0.1.9.md` is the **编码基线** (latest; supersedes the v0.1.8 doc after the modular refactor). Every design decision references a section. When behavior is ambiguous, consult the doc first.
 
 ## Architecture
 
 Four access modules, one Rust KnowledgeBase Core:
 
 ```
-MCP    (innate mcp)          ← JSON-RPC 2.0 over stdio; 13 tools; direct Core calls
+MCP    (innate mcp)          ← JSON-RPC 2.0 over stdio; 14 tools; direct Core calls
 CLI    (innate <cmd>)        ← clap thin wrapper; direct Core calls
 SDKs   (Python / TypeScript) ← subprocess wrapper over CLI binary
 Daemon (innate daemon start) ← background log/hook watcher; invokes CLI subprocesses
@@ -73,19 +73,35 @@ MCP and CLI call `KnowledgeBase` directly (in-process). SDKs and Daemon never op
 
 ### Crate layout (`core/src/`)
 
-| File | Role |
+Source is split into focused module directories (the old monolithic `kb.rs` / `storage.rs` / `daemon.rs` no longer exist).
+
+| Path | Role |
 |---|---|
-| `kb.rs` | `KnowledgeBase` — all 8 Public APIs |
-| `storage.rs` | rusqlite backend; schema init, BLOB-vector search, SQL helpers |
-| `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `default_sanitize()`, cosine similarity |
+| `lib.rs` | crate root; `open_kb()` injects remote models from settings, else Dummy/Heuristic |
+| `kb/mod.rs` | `KnowledgeBase` struct, param loading, `open_with` injection, cycle detection |
+| `kb/recall.rs` | `recall` — vector candidates, fused scoring, packing, dep expansion, trace write |
+| `kb/record/mod.rs` + `kb/record/evidence.rs` | `record`/`record_detailed`; confidence EMA replay, context stats, governance evidence |
+| `kb/evolve.rs` | `evolve` — claim request, lease, distill transaction |
+| `kb/curate.rs` | aggregate → archive → promote → decay → dedupe → governance |
+| `kb/lifecycle.rs` | `add` / spark family / `approve` / `archive` / `invalidate` / `restore` |
+| `kb/inspection.rs` | `inspect` — closed-loop health metrics |
+| `storage/{mod,chunks,traces,evolution,meta,raw}.rs` | rusqlite backend; schema init, BLOB-vector search, SQL helpers |
 | `embedding.rs` | `EmbeddingProvider` trait + `DummyEmbeddingProvider` (hash-based, for tests) |
-| `refine.rs` | `Refiner`/`Distiller` traits + `NullRefiner`/`HeuristicDistiller` defaults |
+| `llm.rs` | `HttpDistiller` (OpenAI-compatible + Anthropic, one type) + `LlmEmbeddingProvider`; HTTP retry transport |
+| `refine.rs` | `Sanitizer`/`Refiner`/`Distiller` traits + `DefaultSanitizer`/`NoopSanitizer`/`NullRefiner`/`HeuristicDistiller` defaults |
 | `errors.rs` | `InnateError` enum covering all error kinds |
-| `mcp.rs` | MCP stdio server — 13 tools, JSON-RPC 2.0 dispatcher |
+| `mcp.rs` | MCP stdio server — 14 tools, JSON-RPC 2.0 dispatcher |
 | `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
-| `daemon.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
+| `daemon/{mod,watch,events,process,state,command}.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
+| `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
+| `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |
+| `upgrade.rs` | `innate upgrade` — GitHub Releases self-update + SHA-256 verify + atomic swap |
+| `migrate.rs` | Schema migration chain 4.0 → 4.14, each step atomic |
+| `hook.rs` | `innate hook stop` — Claude Code Stop payload → session.log events |
 | `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
-| `schema.sql` | Embedded schema (v4.13); `include_str!` at compile time |
+| `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `sanitize()`, cosine similarity |
+| `settings.rs` | `settings.json` parsing (LLM / Embedding / Daemon / Backup) |
+| `schema.sql` | Embedded schema (v4.14); `include_str!` at compile time |
 
 ### Filesystem layout (`~/.innate/`)
 
@@ -117,7 +133,7 @@ evolve()  →  distill (new→pending chunks) + builtin_curate (aggregate→arch
 
 ### Vector Search
 
-No sqlite-vec dependency. Embeddings stored as raw `f32` BLOBs in `vec_content` / `vec_trigger` tables. `storage.rs` loads all embeddings into memory and computes cosine similarity in Rust. Suitable for moderate corpus sizes; swap `EmbeddingProvider` and `Storage` for HNSW if scale demands it.
+No sqlite-vec dependency. Embeddings stored as raw `f32` BLOBs in `vec_content` / `vec_trigger` tables. `storage/` loads all embeddings into memory and computes cosine similarity in Rust. Designed for up to ~100k chunks (HNSW deliberately rejected); swap `EmbeddingProvider` and `Storage` if scale demands it.
 
 ## Non-Obvious Implementation Constraints
 
@@ -147,6 +163,7 @@ Injectable at `KnowledgeBase::open_with(...)`:
 - `embedding: Arc<dyn EmbeddingProvider>` — swap embedding model
 - `refiner: Arc<dyn Refiner>` — online trim/adapt
 - `distiller: Arc<dyn Distiller>` — episodic log → chunk extraction
+- `sanitizer: Arc<dyn Sanitizer>` — reject/redact before persist
 
 ## Configurable Parameters
 
@@ -173,6 +190,7 @@ Both SDKs wrap the CLI binary via subprocess — they are not native Rust FFI bi
 | `innate_inspect` | `KnowledgeBase::inspect` |
 | `innate_approve/archive/invalidate/restore` | governance APIs |
 | `innate_mature_spark/promote_spark/drop_spark` | spark lifecycle |
+| `innate_backup` | R2 backup (ops tool; not in install's default auto-allow set) |
 
 ## SKILL.md
 

@@ -281,8 +281,13 @@ The CLI is a thin wrapper over the SDK public API — it adds no knowledge-layer
 | `innate daemon start` | Integrate | Background log/hook watcher `--watch <dir>` (Linux only) |
 | `innate daemon status` | Integrate | Show daemon status and error stats |
 | `innate daemon stop` | Integrate | Stop a running daemon |
+| `innate backup run\|status\|list\|prune` | Ops | Cloudflare R2 backup/restore/list/prune |
+| `innate upgrade` | Ops | Self-update from GitHub Releases `--version` · `--check` |
+| `innate migrate` | Ops | Apply schema migrations up to the current version |
+| `innate vacuum` | Ops | Checkpoint WAL + VACUUM to reclaim space after curate |
+| `innate hook stop` | Integrate | Process a Claude Code Stop payload from stdin into session events |
 
-### MCP tools (13 tools exposed by `innate mcp`)
+### MCP tools (14 tools exposed by `innate mcp`)
 
 | MCP Tool | Capability |
 |---|---|
@@ -294,6 +299,7 @@ The CLI is a thin wrapper over the SDK public API — it adds no knowledge-layer
 | `innate_inspect` | Health check |
 | `innate_approve` / `innate_archive` / `innate_invalidate` / `innate_restore` | Governance |
 | `innate_mature_spark` / `innate_promote_spark` / `innate_drop_spark` | Spark lifecycle |
+| `innate_backup` | Trigger a Cloudflare R2 backup |
 
 ---
 
@@ -310,7 +316,7 @@ Daemon (innate daemon start)  ──> CLI ────────────�
 
 | Module | Implementation | Notes |
 |---|---|---|
-| **MCP** | Direct Core call | JSON-RPC 2.0 over stdio; 13 tools; for Claude Code / Claude Desktop |
+| **MCP** | Direct Core call | JSON-RPC 2.0 over stdio; 14 tools; for Claude Code / Claude Desktop |
 | **CLI** | Direct Core call | clap thin wrapper; full public API as CLI commands |
 | **Python SDK** | subprocess → CLI | `innate-py`, zero extra dependencies |
 | **TypeScript SDK** | subprocess → CLI + async MCP client | `@innate/sdk`, Node.js 18+ |
@@ -321,7 +327,7 @@ Innate System
 ├── Rust core (core/)
 │   ├── KnowledgeBase (lib)     8 public APIs, SQLite + pure-Rust cosine similarity
 │   ├── CLI (innate <cmd>)      clap thin wrapper → KnowledgeBase calls
-│   ├── MCP Server (innate mcp) JSON-RPC 2.0 over stdio, 13 MCP tools
+│   ├── MCP Server (innate mcp) JSON-RPC 2.0 over stdio, 14 MCP tools
 │   └── Daemon (innate daemon)  background log/hook watcher, subprocess → CLI (Linux only)
 │
 ├── Vector search               f32 BLOB storage + full-scan cosine similarity (zero native extensions)
@@ -342,7 +348,7 @@ Innate System
 - **Dual-vector recall**: `content_vec` + `trigger_vec`, fused ranking with configurable `w_content / w_trigger / w_confidence` weights
 - **Confidence-driven ranking**: EMA update + recency weighting (explicit signals) + time decay — knowledge improves with use
 - **Zero native extensions**: vectors stored as f32 BLOBs, cosine similarity in pure Rust — no sqlite-vec or C extension required
-- **Native MCP integration**: `innate mcp` exposes 13 tools, works out of the box with Claude Code and Claude Desktop
+- **Native MCP integration**: `innate mcp` exposes 14 tools, works out of the box with Claude Code and Claude Desktop
 - **Hard-dep fail-closed**: if a hard dependency is unavailable or archived at recall time, the entire seed is discarded — no partial closures returned
 - **Zero autonomous behavior**: the SDK never acts on its own; all growth is externally triggered (`evolve` trigger: manual / scheduled / threshold)
 - **Sanitize three-state contract**: hook returns `(cleaned, action)`, `action ∈ {allow, redact, discard}`; `discard` rejects the write, `redact` caps confidence at 0.4
@@ -358,14 +364,15 @@ Innate System
 - Python SDK: Python 3.8+ (subprocess, zero extra dependencies)
 - TypeScript SDK: Node.js 18+ (child_process, zero extra dependencies)
 - Daemon: Linux only (requires `/proc` and `fork`; returns a clear error on non-Linux platforms)
-- Default database: `~/.innate/personal.db` (overridable via `INNATE_DB` env var or `--db` flag)
+- Default database: `~/.innate/data/personal.db` (overridable via `INNATE_DB` env var or `--db` flag)
 - Platforms: Linux / macOS / Windows; Daemon is Linux only
 
 ---
 
 ## Documentation
 
-- [`docs/Innate-设计文档-v0.1.8.md`](docs/Innate-设计文档-v0.1.8.md) — Complete system design (authoritative baseline, Chinese)
+- [`docs/Innate-设计文档-v0.1.9.md`](docs/Innate-设计文档-v0.1.9.md) — Complete system design (authoritative baseline, latest; Chinese)
+- [`docs/Innate-设计文档-v0.1.8.md`](docs/Innate-设计文档-v0.1.8.md) — Prior baseline with full per-schema (4.8→4.14) change history (Chinese)
 - [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent skill metadata and usage protocol
 
 ---
@@ -386,7 +393,7 @@ cd core && cargo test test_add_and_recall
 innate inspect
 ```
 
-Tests are grouped by responsibility: `add_and_recall` · `spark_and_promote` · `record_state_machine` · `invalidate_cascade` · `inspect_returns_counts` · `evolve_smoke` + 3 utils tests.
+Tests (104 total, all passing) are grouped by responsibility under `core/src/tests/`: `basics` · `feedback` · `governance` · `distillation` · `distill_failures` · `evolve_retries` · `reliability` · `restoration`.
 
 ---
 

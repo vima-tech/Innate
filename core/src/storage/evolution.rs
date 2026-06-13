@@ -76,12 +76,6 @@ impl Storage {
         Ok(())
     }
 
-    pub fn claim_evolve_request(&self, now: &str, stale_before: &str) -> Result<Option<String>> {
-        Ok(self
-            .claim_evolve_request_with_reason(now, stale_before)?
-            .map(|claim| claim.id))
-    }
-
     pub fn claim_evolve_request_with_reason(
         &self,
         now: &str,

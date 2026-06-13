@@ -168,19 +168,30 @@ fn backoff_delay(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI-compatible distiller  (works for GPT, DeepSeek, local Ollama, etc.)
+// HTTP distiller — one type for both OpenAI-compatible endpoints (GPT, DeepSeek,
+// local Ollama, ...) and the Anthropic Messages API. The request/response shape
+// is selected per call from `config.provider`; everything else (distill loop,
+// provenance, retry transport) is shared.
 // ---------------------------------------------------------------------------
 
-pub struct OpenAiDistiller {
+pub struct HttpDistiller {
     config: LlmConfig,
 }
 
-impl OpenAiDistiller {
+impl HttpDistiller {
     pub fn new(config: LlmConfig) -> Self {
         Self { config }
     }
 
     fn call(&self, prompt: &str) -> Result<String> {
+        if self.config.provider == "anthropic" {
+            self.call_anthropic(prompt)
+        } else {
+            self.call_openai(prompt)
+        }
+    }
+
+    fn call_openai(&self, prompt: &str) -> Result<String> {
         let api_key = self
             .config
             .resolved_api_key()
@@ -197,12 +208,7 @@ impl OpenAiDistiller {
         });
 
         let auth = format!("Bearer {api_key}");
-        let resp_json = post_json_retry(
-            &url,
-            &[("Authorization", &auth)],
-            &body,
-            "LLM",
-        )?;
+        let resp_json = post_json_retry(&url, &[("Authorization", &auth)], &body, "LLM")?;
 
         resp_json
             .pointer("/choices/0/message/content")
@@ -210,44 +216,8 @@ impl OpenAiDistiller {
             .map(str::to_string)
             .ok_or_else(|| InnateError::Other("unexpected LLM response shape".into()))
     }
-}
 
-impl Distiller for OpenAiDistiller {
-    fn distill(&self, log_entries: &[Value]) -> crate::errors::Result<Vec<DistilledChunk>> {
-        distill_with(log_entries, |prompt| self.call(prompt))
-    }
-
-    fn distill_with_context(
-        &self,
-        primary: &Value,
-        related_logs: &[Value],
-    ) -> crate::errors::Result<Vec<DistilledChunk>> {
-        distill_entry_with(primary, related_logs, |prompt| self.call(prompt))
-    }
-
-    fn provenance(&self) -> DistillProvenance {
-        DistillProvenance {
-            provider: Some(self.config.provider.clone()),
-            model: Some(self.config.model_id.clone()),
-            prompt_version: Some(DISTILL_PROMPT_VERSION.to_string()),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Anthropic Messages API distiller
-// ---------------------------------------------------------------------------
-
-pub struct AnthropicDistiller {
-    config: LlmConfig,
-}
-
-impl AnthropicDistiller {
-    pub fn new(config: LlmConfig) -> Self {
-        Self { config }
-    }
-
-    fn call(&self, prompt: &str) -> Result<String> {
+    fn call_anthropic(&self, prompt: &str) -> Result<String> {
         let api_key = self
             .config
             .resolved_api_key()
@@ -264,10 +234,7 @@ impl AnthropicDistiller {
 
         let resp_json = post_json_retry(
             &url,
-            &[
-                ("x-api-key", &api_key),
-                ("anthropic-version", "2023-06-01"),
-            ],
+            &[("x-api-key", &api_key), ("anthropic-version", "2023-06-01")],
             &body,
             "Anthropic",
         )?;
@@ -280,7 +247,7 @@ impl AnthropicDistiller {
     }
 }
 
-impl Distiller for AnthropicDistiller {
+impl Distiller for HttpDistiller {
     fn distill(&self, log_entries: &[Value]) -> crate::errors::Result<Vec<DistilledChunk>> {
         distill_with(log_entries, |prompt| self.call(prompt))
     }
@@ -406,10 +373,7 @@ fn extract_json(text: &str) -> &str {
 // ---------------------------------------------------------------------------
 
 pub fn build_distiller(config: &LlmConfig) -> std::sync::Arc<dyn Distiller + Send + Sync> {
-    match config.provider.as_str() {
-        "anthropic" => std::sync::Arc::new(AnthropicDistiller::new(config.clone())),
-        _ => std::sync::Arc::new(OpenAiDistiller::new(config.clone())),
-    }
+    std::sync::Arc::new(HttpDistiller::new(config.clone()))
 }
 
 // ---------------------------------------------------------------------------

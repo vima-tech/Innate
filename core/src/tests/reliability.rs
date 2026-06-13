@@ -305,9 +305,10 @@ fn evolve_requests_preserve_reasons_and_retry_failures() {
 
     let id = kb
         .storage
-        .claim_evolve_request(&now, "1970-01-01T00:00:00.000Z")
+        .claim_evolve_request_with_reason(&now, "1970-01-01T00:00:00.000Z")
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .id;
     let reason = kb
         .storage
         .query_chunks_params(
@@ -321,9 +322,10 @@ fn evolve_requests_preserve_reasons_and_retry_failures() {
         .unwrap();
     let retried = kb
         .storage
-        .claim_evolve_request("9999-01-01T00:00:00.000Z", "9999-01-01T00:00:00.000Z")
+        .claim_evolve_request_with_reason("9999-01-01T00:00:00.000Z", "9999-01-01T00:00:00.000Z")
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .id;
     assert_eq!(retried, id);
 }
 

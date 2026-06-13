@@ -281,8 +281,13 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 | `innate daemon start` | 集成 | 后台日志/Hook 监听守护进程 `--watch <dir>` (Linux only) |
 | `innate daemon status` | 集成 | 查看 daemon 运行状态与错误统计 |
 | `innate daemon stop` | 集成 | 停止运行中的 daemon |
+| `innate backup run\|status\|list\|prune` | 运维 | Cloudflare R2 备份/恢复/列举/清理 |
+| `innate upgrade` | 运维 | 从 GitHub Releases 自更新 `--version` · `--check` |
+| `innate migrate` | 运维 | 将数据库 schema 迁移到当前版本 |
+| `innate vacuum` | 运维 | checkpoint WAL + VACUUM，回收 curate 压缩后的空间 |
+| `innate hook stop` | 集成 | 从 stdin 处理 Claude Code Stop 负载为会话事件 |
 
-### MCP 工具 (`innate mcp` 暴露的 13 个工具)
+### MCP 工具 (`innate mcp` 暴露的 14 个工具)
 
 | MCP 工具 | 对应能力 |
 |---|---|
@@ -294,6 +299,7 @@ CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只
 | `innate_inspect` | 库体检 |
 | `innate_approve` / `innate_archive` / `innate_invalidate` / `innate_restore` | 治理 |
 | `innate_mature_spark` / `innate_promote_spark` / `innate_drop_spark` | 灵感生命周期 |
+| `innate_backup` | 触发一次 Cloudflare R2 备份 |
 
 ---
 
@@ -310,7 +316,7 @@ Daemon (innate daemon start)   ──> CLI ────────────�
 
 | 模块 | 实现方式 | 说明 |
 |---|---|---|
-| **MCP** | 直接调用 Core lib | JSON-RPC 2.0 over stdio；13 个工具；供 Claude Code / Claude Desktop 使用 |
+| **MCP** | 直接调用 Core lib | JSON-RPC 2.0 over stdio；14 个工具；供 Claude Code / Claude Desktop 使用 |
 | **CLI** | 直接调用 Core lib | clap 薄封装；完整 Public API 的命令行入口 |
 | **Python SDK** | subprocess 调用 CLI | `innate-py`，零额外依赖 |
 | **TypeScript SDK** | subprocess 调用 CLI + async MCP client | `@innate/sdk`，Node.js 18+ |
@@ -321,7 +327,7 @@ Innate System
 ├── Rust 核心 (core/)
 │   ├── KnowledgeBase (lib)      8 类 Public API, SQLite + 纯 Rust 余弦相似度
 │   ├── CLI (innate <cmd>)       clap 薄封装, 参数解析 → KnowledgeBase 调用
-│   ├── MCP Server (innate mcp)  JSON-RPC 2.0 over stdio, 13 个 MCP 工具
+│   ├── MCP Server (innate mcp)  JSON-RPC 2.0 over stdio, 14 个 MCP 工具
 │   └── Daemon (innate daemon)   后台日志/Hook 监听, subprocess → CLI (Linux only)
 │
 ├── 向量搜索                     f32 BLOB 存储 + 全扫描余弦相似度 (零 native 扩展)
@@ -342,7 +348,7 @@ Innate System
 - **双向量召回**: `content_vec` + `trigger_vec`, 按 `w_content / w_trigger / w_confidence` 融合排序
 - **置信度驱动**: EMA 更新 + 时效加权 (显式信号) + 时间衰减, 知识越用越准
 - **零 native 扩展**: 向量存为 f32 BLOB, Rust 原生余弦相似度, 无 sqlite-vec / C 扩展依赖
-- **MCP 原生集成**: `innate mcp` 暴露 13 个工具, Claude Code / Claude Desktop 开箱可用
+- **MCP 原生集成**: `innate mcp` 暴露 14 个工具, Claude Code / Claude Desktop 开箱可用
 - **hard dep fail-closed**: 召回时若 hard 依赖不可用/被归档, 直接丢弃整个 seed, **绝不返回半截闭包**
 - **零主动行为**: SDK 永不自发行动, 所有成长由外部触发 (evolve trigger: manual / scheduled / threshold)
 - **sanitize 三态合同**: 钩子返回 `(cleaned, action)`, `action ∈ {allow, redact, discard}`; `discard` 拒绝写入, `redact` 落点 confidence 上限 0.4
@@ -358,14 +364,15 @@ Innate System
 - Python SDK: Python 3.8+ (subprocess, 零额外依赖)
 - TypeScript SDK: Node.js 18+ (child_process, 零额外依赖)
 - Daemon: Linux only (依赖 `/proc` 与 `fork`；非 Linux 平台返回明确错误)
-- 数据库默认位置: `~/.innate/personal.db` (可通过 `INNATE_DB` 环境变量或 `--db` 覆盖)
+- 数据库默认位置: `~/.innate/data/personal.db` (可通过 `INNATE_DB` 环境变量或 `--db` 覆盖)
 - 平台: Linux / macOS / Windows；Daemon 仅 Linux
 
 ---
 
 ## 文档
 
-- [`docs/Innate-设计文档-v0.1.8.md`](docs/Innate-设计文档-v0.1.8.md) — 完整系统设计（权威基线）
+- [`docs/Innate-设计文档-v0.1.9.md`](docs/Innate-设计文档-v0.1.9.md) — 完整系统设计（最新权威基线）
+- [`docs/Innate-设计文档-v0.1.8.md`](docs/Innate-设计文档-v0.1.8.md) — 上一基线，含 4.8→4.14 逐版 schema 变更史
 - [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent Skill 元数据与使用规范
 
 ---
