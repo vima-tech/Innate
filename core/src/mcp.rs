@@ -230,6 +230,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             } else {
                 s("refine_mode")
             };
+            let min_score = args.get("min_score").and_then(Value::as_f64);
             let result = kb.recall(RecallParams {
                 query: &query,
                 budget,
@@ -240,6 +241,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 expand_deps: &expand_deps,
                 allow_trim,
                 refine_mode: &refine_mode,
+                min_score,
             })?;
             Ok(json!({
                 "trace_id": result.trace_id,
@@ -417,7 +419,8 @@ fn tool_schema(name: &str) -> Value {
                 "top": {"type": "integer", "description": "Max results"},
                 "include_sparks": {"type": "boolean"},
                 "expand_deps": {"type": "string", "enum": ["false","direct","closure"], "description": "Dependency expansion: false (default) | direct | closure"},
-                "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]}
+                "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]},
+                "min_score": {"type": "number", "description": "Relevance gate: drop candidates whose fused score is below this value (omit to disable)"}
             },
             "required": ["query"]
         }),

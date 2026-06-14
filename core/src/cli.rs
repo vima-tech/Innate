@@ -49,6 +49,10 @@ pub enum Commands {
         /// Event source written to usage_trace (mcp | sdk | cli | hook | daemon | augmented)
         #[arg(long, default_value = "cli")]
         source: String,
+        /// Relevance gate: drop candidates whose fused score is below this value.
+        /// Keeps always-on hooks high-frequency without injecting noise.
+        #[arg(long)]
+        min_score: Option<f64>,
     },
     /// Close a trace with outcome
     Record {
@@ -257,7 +261,7 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     if let Commands::Hook { action } = &cli.command {
-        return crate::hook::run_command(action);
+        return crate::hook::run_command(action, &db_path);
     }
 
     let kb = crate::open_kb(&db_path)?;
@@ -273,6 +277,7 @@ pub fn run() -> anyhow::Result<()> {
             allow_trim,
             refine_mode,
             source,
+            min_score,
         } => {
             let result = kb.recall(RecallParams {
                 query: &query,
@@ -284,6 +289,7 @@ pub fn run() -> anyhow::Result<()> {
                 expand_deps: &expand_deps,
                 allow_trim,
                 refine_mode: &refine_mode,
+                min_score,
             })?;
             match format.as_str() {
                 "json" => println!(

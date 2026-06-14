@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn min_score_gate_drops_subthreshold_candidates() {
+    // The relevance gate (used by always-on hooks) must drop candidates below the
+    // threshold before packing/trace, so an impossibly high gate yields empty knowledge
+    // while no gate returns the same chunk.
+    let (kb, _f) = tmp_kb();
+    let id = kb
+        .add(
+            "Prefer composition over inheritance",
+            "note",
+            Some("design principle"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+
+    let base = RecallParams {
+        query: "design principle",
+        budget: 6000,
+        trace: false,
+        include_sparks: false,
+        top: None,
+        source: "sdk",
+        expand_deps: "false",
+        allow_trim: false,
+        refine_mode: "off",
+        min_score: None,
+    };
+
+    // No gate: the chunk is retrievable.
+    let ungated = kb.recall(base.clone()).unwrap();
+    assert!(ungated
+        .knowledge
+        .iter()
+        .any(|c| c["id"].as_str() == Some(id.as_str())));
+
+    // Fused scores span at most ~1.05; a gate of 2.0 must drop everything.
+    let gated = kb
+        .recall(RecallParams {
+            min_score: Some(2.0),
+            ..base
+        })
+        .unwrap();
+    assert!(gated.knowledge.is_empty());
+    assert!(gated.empty);
+}
+
+#[test]
 fn add_and_recall() {
     let (kb, _f) = tmp_kb();
     let id = kb
@@ -26,6 +74,7 @@ fn add_and_recall() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
     assert!(!result.trace_id.is_empty());
@@ -61,6 +110,7 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
     assert!(first
@@ -91,6 +141,7 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
     assert!(
@@ -271,6 +322,7 @@ fn mcp_is_a_valid_event_source() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
     kb.record(RecordParams {
@@ -314,6 +366,7 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
     let before = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
@@ -350,6 +403,7 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
     let explicitly_unused: Vec<String> = vec![];
@@ -400,6 +454,7 @@ fn feedback_is_auditable_and_builds_contextual_governance_evidence() {
                 expand_deps: "false",
                 allow_trim: false,
                 refine_mode: "off",
+                min_score: None,
             })
             .unwrap();
         let used = vec![chunk_id.clone()];
@@ -559,6 +614,7 @@ fn refine_runs_only_in_adapt_mode() {
         expand_deps: "false",
         allow_trim: false,
         refine_mode: "off",
+        min_score: None,
     })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -573,6 +629,7 @@ fn refine_runs_only_in_adapt_mode() {
         expand_deps: "false",
         allow_trim: false,
         refine_mode: "adapt",
+        min_score: None,
     })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);

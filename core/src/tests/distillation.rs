@@ -891,6 +891,7 @@ fn recall_refreshes_vector_cache_after_external_write() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
 
@@ -917,6 +918,7 @@ fn recall_refreshes_vector_cache_after_external_write() {
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
+            min_score: None,
         })
         .unwrap();
     assert!(result

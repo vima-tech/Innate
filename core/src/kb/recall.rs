@@ -16,6 +16,11 @@ pub struct RecallParams<'a> {
     pub expand_deps: &'a str, // "false" | "direct" | "closure"
     pub allow_trim: bool,     // if true, invoke Refiner::trim when block doesn't fit
     pub refine_mode: &'a str, // "off" | "trim" | "adapt" — recorded in trace
+    /// Relevance gate: drop candidates whose fused score is below this value
+    /// **before** packing/trace, so the trace only records knowledge that was
+    /// actually surfaced. `None` disables the gate. Used by always-on hooks
+    /// (UserPromptSubmit / SessionStart) to stay high-frequency without noise.
+    pub min_score: Option<f64>,
 }
 
 impl KnowledgeBase {
@@ -30,6 +35,7 @@ impl KnowledgeBase {
             expand_deps,
             allow_trim,
             refine_mode,
+            min_score,
         } = params;
         let expand_deps = if expand_deps.is_empty() {
             "false"
@@ -55,7 +61,13 @@ impl KnowledgeBase {
         self.apply_soft_dep_bonus(&mut candidates)?;
 
         // Score + anti-trigger penalty
-        let scored = self.score_candidates(candidates, query)?;
+        let mut scored = self.score_candidates(candidates, query)?;
+
+        // Relevance gate — drop sub-threshold candidates before packing/trace so the
+        // trace records only what was actually surfaced (keeps selected→used stats clean).
+        if let Some(min) = min_score {
+            scored.retain(|(fused, _)| *fused >= min);
+        }
 
         // First-fit pack with dep expansion
         let (selected, skipped, skipped_reasons) =

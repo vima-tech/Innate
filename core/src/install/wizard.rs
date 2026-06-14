@@ -216,6 +216,63 @@ pub fn run_install() -> anyhow::Result<()> {
                     ));
                 }
             }
+
+            // Install UserPromptSubmit hook: relevance-gated auto-recall on every prompt.
+            match configure_claude_prompt_hook(&agent.config, &binary_path) {
+                ConfigStatus::Updated(p) => {
+                    result_line(&format!(
+                        "{}: UserPromptSubmit hook → {}",
+                        bold("claude"),
+                        gray(&tilde_path(&p))
+                    ));
+                }
+                ConfigStatus::Unchanged(_) => {}
+                ConfigStatus::Skipped(_) => {}
+                ConfigStatus::Error(e) => {
+                    warn_line(&format!(
+                        "{}: \x1b[31mUserPromptSubmit hook error — {e}\x1b[0m",
+                        bold("claude")
+                    ));
+                }
+            }
+
+            // Install SessionStart hook: warm up project knowledge at session start.
+            match configure_claude_session_start_hook(&agent.config, &binary_path) {
+                ConfigStatus::Updated(p) => {
+                    result_line(&format!(
+                        "{}: SessionStart hook → {}",
+                        bold("claude"),
+                        gray(&tilde_path(&p))
+                    ));
+                }
+                ConfigStatus::Unchanged(_) => {}
+                ConfigStatus::Skipped(_) => {}
+                ConfigStatus::Error(e) => {
+                    warn_line(&format!(
+                        "{}: \x1b[31mSessionStart hook error — {e}\x1b[0m",
+                        bold("claude")
+                    ));
+                }
+            }
+
+            // Install SubagentStop hook so Task-tool subagents also feed session events.
+            match configure_claude_subagent_stop_hook(&agent.config, &binary_path) {
+                ConfigStatus::Updated(p) => {
+                    result_line(&format!(
+                        "{}: SubagentStop hook → {}",
+                        bold("claude"),
+                        gray(&tilde_path(&p))
+                    ));
+                }
+                ConfigStatus::Unchanged(_) => {}
+                ConfigStatus::Skipped(_) => {}
+                ConfigStatus::Error(e) => {
+                    warn_line(&format!(
+                        "{}: \x1b[31mSubagentStop hook error — {e}\x1b[0m",
+                        bold("claude")
+                    ));
+                }
+            }
         }
     }
     sep();

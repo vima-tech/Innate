@@ -52,6 +52,21 @@ Call: `innate_recall(query=<canonical_intent>, budget=4000, source="mcp")`
 Inject recalled chunks into your working context. Mention to the user which (if any) relevant
 prior knowledge was found — one sentence is enough.
 
+### Auto-Recall Hook
+
+When Innate is installed with hooks, a **UserPromptSubmit hook** may automatically inject an
+`<innate-recall>` block into the conversation — it already ran a relevance-gated recall for the
+prompt and carries a `trace_id`. When you see that block:
+
+- **Reuse its `trace_id`** for the closing `innate_record` — do **not** call `innate_recall`
+  again for the same task (that would create a duplicate, dangling trace).
+- Treat its chunks exactly like ones you recalled yourself: apply what helps, then close with a
+  per-chunk verdict (see below).
+- If the block is absent and the task warrants it, recall manually as above.
+
+The hook is relevance-gated, so its silence means "nothing scored high enough" — not "no
+knowledge exists". Recall manually if you suspect relevant prior knowledge the gate missed.
+
 ## When to Record
 
 Record **after** a task that produced a real outcome (success or failure). Skip recording for:
@@ -67,12 +82,28 @@ Record **after** a task that produced a real outcome (success or failure). Skip 
 | Task failed, approach was wrong, user had to correct course | `fail` |
 | Session cut off, outcome unclear | `unknown` |
 
-### Used Chunk IDs — Be Precise
+### Per-Chunk Verdict — Mandatory
 
-Only list chunks you **actively referenced** in your reasoning or response. One to three IDs
-is typical. **Empty is correct** if no prior knowledge was actually used (do not include
-chunks that were merely recalled but not applied — the difference matters for confidence
-scoring and future retrieval quality).
+This is the single most important contract in Innate: confidence ranking is only as good as the
+precision of what you report here. **Every recall that surfaced chunks (manual or hook-injected)
+must be closed with a per-chunk verdict.** For each chunk that was put in front of you, it falls
+into exactly one of three buckets:
+
+| Verdict | What it means | Where it goes |
+|---|---|---|
+| **Used + helped** | You applied it and it saved time / prevented a mistake | `used=[id]` **and** `feedback_up=[id]` |
+| **Used + misled** | You applied it but it was wrong or sent you the wrong way | `used=[id]` **and** `feedback_down=[id]` |
+| **Not used** | Recalled but you never applied it | omit entirely (do **not** list in `used`) |
+
+Rules that keep the signal clean:
+- `used` lists **only** chunks you actively referenced in your reasoning or output — typically
+  one to three. Never pad it with merely-recalled chunks.
+- If you applied **nothing**, that is a real, valuable signal: set `used=[]` explicitly
+  (known-none). Do not skip the record — silence is not the same as "nothing helped".
+- A chunk you `used` should almost always also carry an up **or** down signal. A used chunk with
+  no verdict wastes the strongest ranking input you can give.
+- Be honest about `feedback_down`. A wrong chunk you mark down gets reviewed and archived; a
+  wrong chunk you leave unmarked keeps misleading future sessions.
 
 ### Output Summary — Structured Format
 
@@ -100,20 +131,13 @@ project-specific detail only when the lesson cannot be generalized without losin
 
 Call: `innate_record(trace_id=<id>, outcome=<ok|fail|unknown>, used=[<chunk_ids>], output_summary=<sentence>)`
 
-### Explicit Feedback — Use It
+### Explicit Feedback — Why It Matters
 
-When a recalled chunk was **directly helpful** (saved significant time, prevented a mistake):
-```
-innate_record(..., feedback_up=[<chunk_id>])
-```
-
-When a recalled chunk was **wrong or misleading** (led you in the wrong direction):
-```
-innate_record(..., feedback_down=[<chunk_id>])
-```
-
-Feedback is the fastest signal for knowledge quality. Two down signals on the same chunk
-triggers a governance review; five triggers automatic archival. Use it.
+The `feedback_up` / `feedback_down` lists from the verdict table above are the fastest signal for
+knowledge quality, and they directly drive ranking and lifecycle: **two** down signals on the same
+chunk trigger a governance review; **five** trigger automatic archival. Conversely, repeated
+`used + feedback_up` is what promotes a `pending` chunk to `active`. Withholding feedback freezes
+the knowledge base; giving it is how good knowledge rises and bad knowledge falls out.
 
 ## Nomination — Rare, Explicit
 
