@@ -147,6 +147,14 @@ pub fn run_install() -> anyhow::Result<()> {
         }
 
         if agent.id == "claude" {
+            // Hooks must live in a settings.json file — Claude Code does NOT read hooks from
+            // ~/.claude.json (that file is MCP/OAuth/state only). In global scope agent.config
+            // points at ~/.claude.json (correct for MCP), so derive the hooks target separately.
+            let hook_config = if global {
+                home_dir().join(".claude").join("settings.json")
+            } else {
+                agent.config.clone()
+            };
             match install_skill() {
                 ConfigStatus::Updated(p) => {
                     result_line(&format!(
@@ -199,7 +207,7 @@ pub fn run_install() -> anyhow::Result<()> {
             }
 
             // Install Stop hook so daemon gets session events automatically.
-            match configure_claude_stop_hook(&agent.config, &binary_path) {
+            match configure_claude_stop_hook(&hook_config, &binary_path) {
                 ConfigStatus::Updated(p) => {
                     result_line(&format!(
                         "{}: Stop hook → {}",
@@ -218,7 +226,7 @@ pub fn run_install() -> anyhow::Result<()> {
             }
 
             // Install UserPromptSubmit hook: relevance-gated auto-recall on every prompt.
-            match configure_claude_prompt_hook(&agent.config, &binary_path) {
+            match configure_claude_prompt_hook(&hook_config, &binary_path) {
                 ConfigStatus::Updated(p) => {
                     result_line(&format!(
                         "{}: UserPromptSubmit hook → {}",
@@ -237,7 +245,7 @@ pub fn run_install() -> anyhow::Result<()> {
             }
 
             // Install SessionStart hook: warm up project knowledge at session start.
-            match configure_claude_session_start_hook(&agent.config, &binary_path) {
+            match configure_claude_session_start_hook(&hook_config, &binary_path) {
                 ConfigStatus::Updated(p) => {
                     result_line(&format!(
                         "{}: SessionStart hook → {}",
@@ -256,7 +264,7 @@ pub fn run_install() -> anyhow::Result<()> {
             }
 
             // Install SubagentStop hook so Task-tool subagents also feed session events.
-            match configure_claude_subagent_stop_hook(&agent.config, &binary_path) {
+            match configure_claude_subagent_stop_hook(&hook_config, &binary_path) {
                 ConfigStatus::Updated(p) => {
                     result_line(&format!(
                         "{}: SubagentStop hook → {}",
