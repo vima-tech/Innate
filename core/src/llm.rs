@@ -10,7 +10,7 @@ use crate::settings::{EmbeddingConfig, LlmConfig};
 // Prompt for distillation
 // ---------------------------------------------------------------------------
 
-const DISTILL_PROMPT_VERSION: &str = "3";
+const DISTILL_PROMPT_VERSION: &str = "4";
 
 fn safe_prompt_field(value: Option<&str>) -> String {
     let value = value.unwrap_or("");
@@ -58,6 +58,7 @@ Agent interaction:
 
 Output a JSON array. Each item has:
 {{
+  "skill_name": "<1-3 word skill/topic label for this principle>",
   "content": "<principle; when it applies; what to avoid>",
   "trigger_desc": "<2-6 word canonical phrase>",
   "anti_trigger_desc": "<when NOT to apply this, or null>"
@@ -65,6 +66,8 @@ Output a JSON array. Each item has:
 Return [] if nothing is worth keeping.
 
 Rules:
+- skill_name is a short human label (1-3 words) naming the skill/topic, e.g.
+  "error handling", "git rebase", "async retries"; not a sentence
 - content must be self-contained and actionable for a future agent reading cold
 - Prefer transferable methods and techniques; a principle that helps across many
   projects is worth far more than one tied to this codebase
@@ -347,6 +350,11 @@ fn distill_entry_with(
             .map(str::trim)
             .filter(|s| !s.is_empty());
         let Some(content) = content else { continue };
+        let skill_name = parsed
+            .get("skill_name")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty() && s.to_lowercase() != "null");
         let trigger_desc = parsed
             .get("trigger_desc")
             .and_then(Value::as_str)
@@ -359,6 +367,7 @@ fn distill_entry_with(
             .filter(|s| !s.is_empty() && s.to_lowercase() != "null");
         out.push(DistilledChunk {
             content: content.to_string(),
+            skill_name,
             trigger_desc,
             anti_trigger_desc,
             source_log_id: log_id.clone(),

@@ -30,6 +30,7 @@ impl Distiller for ContextAwareDistiller {
             .filter_map(|log| {
                 log["id"].as_str().map(|id| DistilledChunk {
                     content: "fallback".to_string(),
+                    skill_name: None,
                     trigger_desc: None,
                     anti_trigger_desc: None,
                     source_log_id: id.to_string(),
@@ -52,6 +53,7 @@ impl Distiller for ContextAwareDistiller {
         self.related_counts.lock().unwrap().push(related_count);
         Ok(vec![DistilledChunk {
             content: format!("context for {primary_id}"),
+            skill_name: None,
             trigger_desc: None,
             anti_trigger_desc: None,
             source_log_id: primary_id.to_string(),
@@ -68,6 +70,7 @@ impl Distiller for MultiChunkDistiller {
         Ok(vec![
             DistilledChunk {
                 content: "first chunk".to_string(),
+                skill_name: None,
                 trigger_desc: None,
                 anti_trigger_desc: None,
                 source_log_id: source_log_id.clone(),
@@ -75,6 +78,7 @@ impl Distiller for MultiChunkDistiller {
             },
             DistilledChunk {
                 content: "second chunk".to_string(),
+                skill_name: None,
                 trigger_desc: None,
                 anti_trigger_desc: None,
                 source_log_id,

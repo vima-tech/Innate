@@ -331,8 +331,16 @@ impl KnowledgeBase {
                 let now2 = utc_now_iso();
                 let chunk_id = gen_uuid();
                 let tokens = estimate_tokens(&content) as i64;
+                // Short label for the web UI's row-skill slot; fall back to the
+                // canonical trigger phrase when the distiller produced none.
+                let skill_name = dc
+                    .skill_name
+                    .clone()
+                    .or_else(|| dc.trigger_desc.clone())
+                    .filter(|s| !s.trim().is_empty());
                 let row = ChunkRow {
                     id: chunk_id,
+                    skill_name,
                     content: content.clone(),
                     trigger_desc: dc.trigger_desc.clone(),
                     anti_trigger_desc: dc.anti_trigger_desc,

@@ -82,6 +82,9 @@ pub struct DistillProvenance {
 #[derive(Debug, Clone)]
 pub struct DistilledChunk {
     pub content: String,
+    /// Short human-readable skill label (1-3 words) shown in the web UI's
+    /// `row-skill` slot. `None` falls back to `trigger_desc` at insert time.
+    pub skill_name: Option<String>,
     pub trigger_desc: Option<String>,
     pub anti_trigger_desc: Option<String>,
     pub source_log_id: String,
@@ -135,8 +138,15 @@ impl Distiller for HeuristicDistiller {
                         None
                     };
 
+                    // Short skill label: first few words of the trigger phrase.
+                    let skill_name = trigger_desc
+                        .as_deref()
+                        .map(|t| t.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+                        .filter(|s| !s.is_empty());
+
                     out.push(DistilledChunk {
                         content,
+                        skill_name,
                         trigger_desc,
                         anti_trigger_desc,
                         source_log_id: id,
@@ -152,7 +162,7 @@ impl Distiller for HeuristicDistiller {
         DistillProvenance {
             provider: Some("heuristic".to_string()),
             model: None,
-            prompt_version: Some("2".to_string()),
+            prompt_version: Some("3".to_string()),
         }
     }
 }

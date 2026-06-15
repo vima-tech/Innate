@@ -10,6 +10,7 @@ impl Distiller for SelectiveFailingDistiller {
         }
         Ok(vec![DistilledChunk {
             content: "isolated success".to_string(),
+            skill_name: Some("isolated".to_string()),
             trigger_desc: Some("success".to_string()),
             anti_trigger_desc: None,
             source_log_id: log["id"].as_str().unwrap().to_string(),

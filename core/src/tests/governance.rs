@@ -211,6 +211,7 @@ fn distilled_chunk_can_auto_promote_via_implicit_signals() {
                 .iter()
                 .map(|l| DistilledChunk {
                     content: "test principle from distillation".to_string(),
+                    skill_name: Some("test skill".to_string()),
                     trigger_desc: Some("test trigger".to_string()),
                     anti_trigger_desc: None,
                     source_log_id: l["id"].as_str().unwrap_or("").to_string(),
