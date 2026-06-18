@@ -22,7 +22,10 @@ pub mod web;
 mod tests;
 
 pub use errors::{InnateError, Result};
-pub use kb::{CurateReport, KnowledgeBase, RecallParams, RecallResult, RecordParams};
+pub use kb::{
+    AppraiseParams, Contributor, CurateReport, FlaggedPoint, KnowledgeBase, RecallParams,
+    RecallResult, RecordParams, Situation, Tier, Valence, Verdict,
+};
 
 /// Open a KnowledgeBase at `db_path`, injecting LLM providers from `~/.innate/settings.json`
 /// if configured. Falls back to DummyEmbeddingProvider + HeuristicDistiller when no LLM

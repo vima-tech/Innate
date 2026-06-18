@@ -10,6 +10,7 @@ mod distillation;
 mod evolve_retries;
 mod feedback;
 mod governance;
+mod intuition;
 mod reliability;
 mod restoration;
 

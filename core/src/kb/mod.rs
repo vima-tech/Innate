@@ -24,15 +24,21 @@ use crate::utils::{
     content_hash, estimate_tokens, gen_uuid, pack_embedding, utc_now_iso, SanitizeAction,
 };
 
+mod appraise;
 mod curate;
 mod evolve;
 mod inspection;
 mod lifecycle;
 mod recall;
 mod record;
+mod situation;
 
+pub use appraise::{
+    AppraiseParams, Contributor, FlaggedPoint, Tier, Valence, Verdict,
+};
 pub use recall::RecallParams;
 pub use record::RecordParams;
+pub use situation::Situation;
 
 // ---------------------------------------------------------------------------
 // Tuning defaults
@@ -63,6 +69,16 @@ const DECAY_FLOOR: f64 = 0.20;
 const EVOLVE_THRESHOLD: i64 = 5;
 const DISTILL_BATCH_SIZE: usize = 20;
 const PENDING_RECALL_PENALTY: f64 = 0.60;
+
+// Intuition / appraise critic defaults (Spec §8). The appraise path reuses the
+// same fused score as recall; these only govern how that score is tiered/flagged.
+const APPRAISE_TIER_WEAK: f64 = 0.30;
+const APPRAISE_TIER_STRONG: f64 = 0.65;
+const APPRAISE_MIN_STRENGTH: f64 = 0.40;
+const APPRAISE_TOP: usize = 8;
+const APPRAISE_TRIGGER_HIT_MIN: f64 = 0.50;
+const APPRAISE_CANDIDATE_IN_EMBED: bool = true;
+const SITUATION_COARSE_KEYS: &str = "stage,error_class,file_type";
 const GOVERNANCE_ARCHIVE_THRESHOLD: i64 = 3;
 const NEGATIVE_FEEDBACK_ARCHIVE_THRESHOLD: i64 = 5;
 const GOVERNANCE_EVOLVE_THRESHOLD: i64 = 3;
@@ -171,6 +187,15 @@ pub struct KnowledgeBase {
     failure_max_success_rate: f64,
     failure_confidence_max: f64,
     log_compact_days: i64,
+
+    // Intuition / appraise critic params
+    appraise_tier_weak: f64,
+    appraise_tier_strong: f64,
+    appraise_min_strength: f64,
+    appraise_top: usize,
+    appraise_trigger_hit_min: f64,
+    appraise_candidate_in_embed: bool,
+    situation_coarse_keys: String,
 }
 
 impl KnowledgeBase {
@@ -260,6 +285,13 @@ impl KnowledgeBase {
             failure_max_success_rate: FAILURE_MAX_SUCCESS_RATE,
             failure_confidence_max: FAILURE_CONFIDENCE_MAX,
             log_compact_days: LOG_COMPACT_DAYS,
+            appraise_tier_weak: APPRAISE_TIER_WEAK,
+            appraise_tier_strong: APPRAISE_TIER_STRONG,
+            appraise_min_strength: APPRAISE_MIN_STRENGTH,
+            appraise_top: APPRAISE_TOP,
+            appraise_trigger_hit_min: APPRAISE_TRIGGER_HIT_MIN,
+            appraise_candidate_in_embed: APPRAISE_CANDIDATE_IN_EMBED,
+            situation_coarse_keys: SITUATION_COARSE_KEYS.to_string(),
         };
         kb.init_meta()?;
         kb.load_params()?;
@@ -328,6 +360,13 @@ impl KnowledgeBase {
             ("curate.failure_max_success_rate", "0.20"),
             ("curate.failure_confidence_max", "0.35"),
             ("curate.log_compact_days", "30"),
+            ("appraise.tier_weak", "0.30"),
+            ("appraise.tier_strong", "0.65"),
+            ("appraise.min_strength", "0.40"),
+            ("appraise.top", "8"),
+            ("appraise.trigger_hit_min", "0.50"),
+            ("appraise.candidate_in_embed", "true"),
+            ("situation.coarse_keys", "stage,error_class,file_type"),
         ];
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
@@ -418,6 +457,25 @@ impl KnowledgeBase {
         self.failure_confidence_max =
             f("curate.failure_confidence_max", FAILURE_CONFIDENCE_MAX).clamp(0.0, 1.0);
         self.log_compact_days = i("curate.log_compact_days", LOG_COMPACT_DAYS).max(1);
+        let s = |k: &str, d: &str| -> String {
+            self.storage
+                .get_meta(k)
+                .ok()
+                .flatten()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| d.to_string())
+        };
+        self.appraise_tier_weak = f("appraise.tier_weak", APPRAISE_TIER_WEAK).clamp(0.0, 1.0);
+        self.appraise_tier_strong =
+            f("appraise.tier_strong", APPRAISE_TIER_STRONG).clamp(0.0, 1.0);
+        self.appraise_min_strength =
+            f("appraise.min_strength", APPRAISE_MIN_STRENGTH).clamp(0.0, 1.0);
+        self.appraise_top = i("appraise.top", APPRAISE_TOP as i64).max(1) as usize;
+        self.appraise_trigger_hit_min =
+            f("appraise.trigger_hit_min", APPRAISE_TRIGGER_HIT_MIN).clamp(0.0, 1.0);
+        self.appraise_candidate_in_embed =
+            b("appraise.candidate_in_embed", APPRAISE_CANDIDATE_IN_EMBED);
+        self.situation_coarse_keys = s("situation.coarse_keys", SITUATION_COARSE_KEYS);
         Ok(())
     }
 }

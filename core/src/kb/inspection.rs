@@ -262,6 +262,31 @@ impl KnowledgeBase {
             }));
         }
 
+        // Intuition honesty (PRD §4): does high strength actually predict success, and is
+        // the critic crying wolf? Only nudge once enough appraisals carry an outcome.
+        let intuition = self.intuition_calibration(&metric_window_start)?;
+        let appraisals = intuition.get("appraisals").and_then(Value::as_i64).unwrap_or(0);
+        let mono_gap = intuition
+            .get("monotonicity_gap")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let false_alarm = intuition
+            .get("false_alarm_rate")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if appraisals >= 20 && mono_gap <= 0.0 {
+            suggestions.push(json!({
+                "action": "tune recall.w_* / situation.coarse_keys",
+                "reason": "appraise strength may be noise — strong tier does not beat weak on task_ok"
+            }));
+        }
+        if appraisals >= 20 && false_alarm >= 0.5 {
+            suggestions.push(json!({
+                "action": "review caution chunks / raise appraise.tier_strong",
+                "reason": format!("intuition false-alarm rate {false_alarm} — strong cautions often end ok")
+            }));
+        }
+
         // Storage growth metrics — trace/log bloat is driven by recall/record
         // activity over time, independent of chunk count, so it is surfaced here
         // for monitoring before it becomes a problem.
@@ -310,6 +335,7 @@ impl KnowledgeBase {
                     "high": confidence_row.and_then(|row| row.get("high")).and_then(Value::as_i64).unwrap_or(0),
                 }
             },
+            "intuition_calibration": intuition,
             "distill_cost_estimate": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
             "recurring_sparks": recurring_sparks.len(),
             "recurring_spark_ids": recurring_spark_ids,
@@ -330,6 +356,123 @@ impl KnowledgeBase {
                 "evolve.schedule_interval_hours": self.evolve_schedule_interval_hours,
             },
             "suggestions": suggestions
+        }))
+    }
+
+    // ------------------------------------------------------------------
+    // Intuition honesty metrics (PRD §4 / Spec §7)
+    //
+    // The core KPI is not recall but discrimination quality: "loud when it should
+    // be, silent when it shouldn't." All inputs already exist — appraise persists
+    // {valence, tier, strength} into episodic_log.recall_snapshot, and record fills
+    // in `outcome`. We bucket appraisals by tier and check the actual task_ok rate.
+    // ------------------------------------------------------------------
+
+    fn intuition_calibration(&self, window_start: &str) -> Result<Value> {
+        let rows = self.storage.query_chunks_params(
+            "SELECT recall_snapshot, outcome FROM episodic_log
+             WHERE ts >= ? AND recall_snapshot LIKE '%\"appraise\"%'",
+            rusqlite::params![window_start],
+        )?;
+
+        // Per-tier accumulators: (n_total, n_with_outcome, ok, sum_strength_with_outcome).
+        let mut buckets: std::collections::BTreeMap<String, [f64; 4]> =
+            std::collections::BTreeMap::new();
+        for tier in ["weak", "medium", "strong"] {
+            buckets.insert(tier.to_string(), [0.0; 4]);
+        }
+        let mut total = 0_i64;
+        let mut silent = 0_i64;
+        let mut caution_strong = 0_i64;
+        let mut caution_strong_false = 0_i64;
+
+        for row in &rows {
+            let snapshot = row
+                .get("recall_snapshot")
+                .and_then(Value::as_str)
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+            let Some(appraise) = snapshot.as_ref().and_then(|s| s.get("appraise")) else {
+                continue;
+            };
+            let tier = appraise
+                .get("tier")
+                .and_then(Value::as_str)
+                .unwrap_or("weak");
+            let valence = appraise
+                .get("valence")
+                .and_then(Value::as_str)
+                .unwrap_or("neutral");
+            let strength = appraise
+                .get("strength")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let outcome = row.get("outcome").and_then(Value::as_str);
+
+            total += 1;
+            if tier == "weak" || valence == "neutral" {
+                silent += 1;
+            }
+            let has_outcome = matches!(outcome, Some("ok") | Some("fail"));
+            let is_ok = outcome == Some("ok");
+            if let Some(b) = buckets.get_mut(tier) {
+                b[0] += 1.0;
+                if has_outcome {
+                    b[1] += 1.0;
+                    b[3] += strength;
+                    if is_ok {
+                        b[2] += 1.0;
+                    }
+                }
+            }
+            if valence == "caution" && tier == "strong" && has_outcome {
+                caution_strong += 1;
+                if is_ok {
+                    caution_strong_false += 1;
+                }
+            }
+        }
+
+        let hit_rate = |b: &[f64; 4]| if b[1] > 0.0 { b[2] / b[1] } else { 0.0 };
+        let weak = buckets.get("weak").copied().unwrap_or([0.0; 4]);
+        let strong = buckets.get("strong").copied().unwrap_or([0.0; 4]);
+        let monotonicity_gap = hit_rate(&strong) - hit_rate(&weak);
+
+        // ECE: evidence-weighted gap between mean strength and actual hit rate per bucket.
+        let outcome_total: f64 = buckets.values().map(|b| b[1]).sum();
+        let ece = if outcome_total > 0.0 {
+            buckets
+                .values()
+                .filter(|b| b[1] > 0.0)
+                .map(|b| {
+                    let avg_strength = b[3] / b[1];
+                    (b[1] / outcome_total) * (avg_strength - hit_rate(b)).abs()
+                })
+                .sum::<f64>()
+        } else {
+            0.0
+        };
+
+        let bucket_detail: Vec<Value> = ["weak", "medium", "strong"]
+            .iter()
+            .map(|tier| {
+                let b = buckets.get(*tier).copied().unwrap_or([0.0; 4]);
+                json!({
+                    "tier": tier,
+                    "n": b[0] as i64,
+                    "n_with_outcome": b[1] as i64,
+                    "avg_strength": if b[1] > 0.0 { (b[3] / b[1] * 1000.0).round() / 1000.0 } else { 0.0 },
+                    "actual_hit_rate": (hit_rate(&b) * 1000.0).round() / 1000.0,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "appraisals": total,
+            "monotonicity_gap": (monotonicity_gap * 1000.0).round() / 1000.0,
+            "ece": (ece * 1000.0).round() / 1000.0,
+            "false_alarm_rate": ratio(caution_strong_false, caution_strong),
+            "silence_rate": ratio(silent, total),
+            "buckets": bucket_detail,
         }))
     }
 

@@ -57,6 +57,23 @@ class RecallResult:
     empty: bool = True
 
 
+@dataclass
+class Verdict:
+    """Critic judgement from :meth:`KnowledgeBase.appraise`.
+
+    Carries no answer text — only how much footing exists (``strength``/``tier``),
+    its polarity (``valence``: affirm | caution | mixed | neutral), and what to be
+    careful about (``flagged_points``).
+    """
+
+    valence: str = "neutral"
+    strength: float = 0.0
+    tier: str = "weak"
+    flagged_points: list[dict[str, Any]] = field(default_factory=list)
+    contributors: list[dict[str, Any]] = field(default_factory=list)
+    trace_id: str = ""
+
+
 class KnowledgeBase:
     """Programmatic access to Innate via the `innate` CLI binary."""
 
@@ -98,6 +115,51 @@ class KnowledgeBase:
             sparks=data.get("sparks", []),
             trace_id=data.get("trace_id", ""),
             empty=data.get("empty", True),
+        )
+
+    def appraise(
+        self,
+        query: str = "",
+        *,
+        last_error: str | None = None,
+        recent_actions: list[str] | None = None,
+        stage: str | None = None,
+        file_context: str | None = None,
+        candidate: str | None = None,
+        top: int | None = None,
+        min_strength: float | None = None,
+        source: str = "sdk",
+    ) -> Verdict:
+        """Critic check: judge how much footing exists for a candidate in a situation.
+
+        Returns a :class:`Verdict` — never an answer. Pair with :meth:`record`
+        (``feedback="down"`` on ``verdict.trace_id``) to flow an override back.
+        """
+        args = self._args() + ["appraise", "--format", "json", "--source", source]
+        if query:
+            args += ["--query", query]
+        if last_error:
+            args += ["--last-error", last_error]
+        if recent_actions:
+            args += ["--recent-actions", ",".join(recent_actions)]
+        if stage:
+            args += ["--stage", stage]
+        if file_context:
+            args += ["--file-context", file_context]
+        if candidate:
+            args += ["--candidate", candidate]
+        if top is not None:
+            args += ["--top", str(top)]
+        if min_strength is not None:
+            args += ["--min-strength", str(min_strength)]
+        data = _run(*args)
+        return Verdict(
+            valence=data.get("valence", "neutral"),
+            strength=data.get("strength", 0.0),
+            tier=data.get("tier", "weak"),
+            flagged_points=data.get("flagged_points", []),
+            contributors=data.get("contributors", []),
+            trace_id=data.get("trace_id", ""),
         )
 
     def record(

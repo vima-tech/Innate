@@ -19,7 +19,7 @@ Usage::
         return {"result": answer, "outcome": "ok"}
 """
 
-from .client import KnowledgeBase, RecallResult
+from .client import KnowledgeBase, RecallResult, Verdict
 from .errors import OutcomeConflictError
 
-__all__ = ["KnowledgeBase", "OutcomeConflictError", "RecallResult"]
+__all__ = ["KnowledgeBase", "OutcomeConflictError", "RecallResult", "Verdict"]

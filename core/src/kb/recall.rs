@@ -51,6 +51,12 @@ impl KnowledgeBase {
         let trace_id = gen_uuid();
         let now = utc_now_iso();
 
+        // Calibration path: derive the context_key from a Situation. A bare query degrades
+        // exactly to the legacy `content_hash(normalize_query(query))`, so recall stays
+        // zero-regression while sharing one key derivation with appraise (Spec §2.2).
+        let situation = Situation::from_query(query);
+        let context_key = situation.context_key(&self.situation_coarse_keys);
+
         let (q_content, q_trigger) = self
             .embedding
             .embed_both(query)
@@ -61,7 +67,7 @@ impl KnowledgeBase {
         self.apply_soft_dep_bonus(&mut candidates)?;
 
         // Score + anti-trigger penalty
-        let mut scored = self.score_candidates(candidates, query)?;
+        let mut scored = self.score_candidates(candidates, query, &context_key)?;
 
         // Relevance gate — drop sub-threshold candidates before packing/trace so the
         // trace records only what was actually surfaced (keeps selected→used stats clean).
@@ -105,6 +111,7 @@ impl KnowledgeBase {
             self.write_recall_trace(
                 &trace_id,
                 query,
+                &context_key,
                 &scored,
                 &visible,
                 &sparks,
@@ -127,7 +134,7 @@ impl KnowledgeBase {
         })
     }
 
-    fn ann_candidates(
+    pub(super) fn ann_candidates(
         &self,
         q_content: &[f32],
         q_trigger: &[f32],
@@ -190,7 +197,10 @@ impl KnowledgeBase {
         Ok(candidates)
     }
 
-    fn apply_soft_dep_bonus(&self, candidates: &mut HashMap<String, CandidateInfo>) -> Result<()> {
+    pub(super) fn apply_soft_dep_bonus(
+        &self,
+        candidates: &mut HashMap<String, CandidateInfo>,
+    ) -> Result<()> {
         // Collect non-spark candidate ids and batch-fetch their outgoing deps
         // in a single query (was one get_deps per candidate).
         let src_ids: Vec<String> = candidates
@@ -257,8 +267,8 @@ impl KnowledgeBase {
         &self,
         candidates: HashMap<String, CandidateInfo>,
         query: &str,
+        context_key: &str,
     ) -> Result<Vec<(f64, Value)>> {
-        let context_key = content_hash(&normalize_query(query));
         // Batch-fetch context scores for all candidates in one query
         // (was one context_score lookup per candidate).
         let cand_ids: Vec<String> = candidates
@@ -266,7 +276,7 @@ impl KnowledgeBase {
             .filter_map(|info| info.chunk.get("id").and_then(Value::as_str).map(str::to_string))
             .collect();
         let cand_refs: Vec<&str> = cand_ids.iter().map(String::as_str).collect();
-        let ctx_scores = self.storage.context_scores_batch(&cand_refs, &context_key)?;
+        let ctx_scores = self.storage.context_scores_batch(&cand_refs, context_key)?;
 
         let mut scored: Vec<(f64, Value)> = Vec::with_capacity(candidates.len());
         for info in candidates.into_values() {
@@ -590,6 +600,7 @@ impl KnowledgeBase {
         &self,
         trace_id: &str,
         query: &str,
+        context_key: &str,
         scored: &[(f64, Value)],
         visible: &[Value],
         sparks: &[Value],
@@ -700,7 +711,7 @@ impl KnowledgeBase {
                 event_source: source.to_string(),
                 task_state: "recalled".to_string(),
                 usage_state: "unknown".to_string(),
-                context_key: Some(content_hash(&normalize_query(query))),
+                context_key: Some(context_key.to_string()),
                 distill_state: "open".to_string(),
                 ..Default::default()
             };

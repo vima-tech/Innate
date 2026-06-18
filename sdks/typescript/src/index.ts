@@ -58,6 +58,42 @@ export interface InspectResult {
   params: Record<string, number>;
 }
 
+export interface FlaggedPoint {
+  chunk_id: string;
+  summary: string;
+  resonance: number;
+  calibration: number;
+  strength: number;
+}
+
+export interface Contributor {
+  chunk_id: string;
+  valence: "affirm" | "caution" | "mixed" | "neutral";
+  strength: number;
+}
+
+/**
+ * Critic judgement from `appraise`. Carries no answer text — only footing
+ * (`strength`/`tier`), polarity (`valence`), and things to be careful about
+ * (`flagged_points`).
+ */
+export interface Verdict {
+  valence: "affirm" | "caution" | "mixed" | "neutral";
+  strength: number;
+  tier: "weak" | "medium" | "strong";
+  flagged_points: FlaggedPoint[];
+  contributors: Contributor[];
+  trace_id: string;
+}
+
+export interface Situation {
+  query?: string;
+  lastError?: string;
+  recentActions?: string[];
+  stage?: string;
+  fileContext?: string;
+}
+
 export interface TracedResult<T> {
   result: T;
   outcome?: "ok" | "fail" | "unknown";
@@ -146,6 +182,33 @@ export class KnowledgeBase {
     if (options.includeSparks) args.push("--include-sparks");
     if (options.allowTrim) args.push("--allow-trim");
     return this.run<RecallResult>(...args);
+  }
+
+  /**
+   * Critic check: judge how much footing exists for a candidate in a situation.
+   * Returns a {@link Verdict} — never an answer. Pair with `record({ feedback: "down" })`
+   * on `verdict.trace_id` to flow an override back.
+   */
+  appraise(
+    situation: Situation = {},
+    options: {
+      candidate?: string;
+      top?: number;
+      minStrength?: number;
+      source?: string;
+    } = {}
+  ): Verdict {
+    const args = ["appraise", "--format", "json", "--source", options.source ?? "sdk"];
+    if (situation.query) args.push("--query", situation.query);
+    if (situation.lastError) args.push("--last-error", situation.lastError);
+    if (situation.recentActions?.length)
+      args.push("--recent-actions", situation.recentActions.join(","));
+    if (situation.stage) args.push("--stage", situation.stage);
+    if (situation.fileContext) args.push("--file-context", situation.fileContext);
+    if (options.candidate) args.push("--candidate", options.candidate);
+    if (options.top != null) args.push("--top", String(options.top));
+    if (options.minStrength != null) args.push("--min-strength", String(options.minStrength));
+    return this.run<Verdict>(...args);
   }
 
   record(
@@ -448,6 +511,25 @@ export class McpClient {
       ...(options.allowTrim != null ? { allow_trim: options.allowTrim } : {}),
       ...(options.refineMode != null ? { refine_mode: options.refineMode } : {}),
     }) as Promise<RecallResult>;
+  }
+
+  async appraise(situation: Situation = {}, options: {
+    candidate?: string;
+    top?: number;
+    minStrength?: number;
+    source?: string;
+  } = {}): Promise<Verdict> {
+    return this.toolCall("innate_appraise", {
+      ...(situation.query ? { query: situation.query } : {}),
+      ...(situation.lastError ? { last_error: situation.lastError } : {}),
+      ...(situation.recentActions?.length ? { recent_actions: situation.recentActions } : {}),
+      ...(situation.stage ? { stage: situation.stage } : {}),
+      ...(situation.fileContext ? { file_context: situation.fileContext } : {}),
+      ...(options.candidate ? { candidate: options.candidate } : {}),
+      ...(options.top != null ? { top: options.top } : {}),
+      ...(options.minStrength != null ? { min_strength: options.minStrength } : {}),
+      source: options.source ?? "sdk",
+    }) as Promise<Verdict>;
   }
 
   async record(traceId: string, options: {

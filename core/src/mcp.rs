@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use crate::kb::{KnowledgeBase, RecallParams, RecordParams};
+use crate::kb::{AppraiseParams, KnowledgeBase, RecallParams, RecordParams, Situation};
 
 #[cfg(target_os = "linux")]
 use libc;
@@ -20,6 +20,7 @@ use libc;
 const TOOLS: &[(&str, &str)] = &[
     ("innate_recall",         "Call FIRST at the start of any task — retrieve relevant knowledge from the knowledge base and get a trace_id for subsequent recording."),
     ("innate_record",         "Call LAST after completing any task — close the trace_id from recall with outcome ok/fail/unknown and optional feedback."),
+    ("innate_appraise",       "Critic check — given a situation (and optional candidate answer), return how much footing exists: {valence, strength, tier, flagged_points}. Never returns an answer. Use to gut-check before committing to a risky step; flagged_points = things to be careful about."),
     ("innate_add",            "Capture a confirmed insight as a knowledge chunk (always starts as pending for agent source)."),
     ("innate_spark",          "Save a quick idea / hypothesis for later incubation."),
     ("innate_inspect",        "Show knowledge base health: chunk counts, debt ratio, embed rebuild queue."),
@@ -250,6 +251,44 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 "empty": result.empty,
             }))
         }
+        "innate_appraise" => {
+            let query = s("query");
+            let last_error = so("last_error");
+            let stage = so("stage");
+            let file_context = so("file_context");
+            let candidate = so("candidate");
+            let recent_actions = arr("recent_actions");
+            let top = args.get("top").and_then(Value::as_u64).map(|v| v as usize);
+            let min_strength = args.get("min_strength").and_then(Value::as_f64);
+            let source = if s("source").is_empty() {
+                "mcp".to_string()
+            } else {
+                s("source")
+            };
+            let situation = Situation {
+                query: (!query.is_empty()).then_some(query.as_str()),
+                last_error: last_error.as_deref(),
+                recent_actions: &recent_actions,
+                stage: stage.as_deref(),
+                file_context: file_context.as_deref(),
+            };
+            let verdict = kb.appraise(AppraiseParams {
+                situation,
+                candidate: candidate.as_deref(),
+                min_strength,
+                top,
+                trace: true,
+                source: &source,
+            })?;
+            Ok(json!({
+                "valence": verdict.valence,
+                "strength": verdict.strength,
+                "tier": verdict.tier,
+                "flagged_points": verdict.flagged_points,
+                "contributors": verdict.contributors,
+                "trace_id": verdict.trace_id,
+            }))
+        }
         "innate_record" => {
             let trace_id = s("trace_id");
             let outcome = so("outcome");
@@ -423,6 +462,20 @@ fn tool_schema(name: &str) -> Value {
                 "min_score": {"type": "number", "description": "Relevance gate: drop candidates whose fused score is below this value (omit to disable)"}
             },
             "required": ["query"]
+        }),
+        "innate_appraise" => json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Explicit question/instruction (optional)"},
+                "last_error": {"type": "string", "description": "Current or last error text"},
+                "recent_actions": {"type": "array", "items": {"type": "string"}, "description": "Last few actions taken"},
+                "stage": {"type": "string", "description": "Task stage, e.g. merge | implement | review"},
+                "file_context": {"type": "string", "description": "File type/path summary in scope"},
+                "candidate": {"type": "string", "description": "Candidate answer under judgement (sanitized, never echoed back)"},
+                "top": {"type": "integer"},
+                "min_strength": {"type": "number"},
+                "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]}
+            }
         }),
         "innate_record" => json!({
             "type": "object",

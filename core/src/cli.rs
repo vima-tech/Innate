@@ -8,7 +8,7 @@ use serde_json::json;
 pub use crate::backup::BackupCommands;
 pub use crate::daemon::DaemonCommands;
 pub use crate::hook::HookCommands;
-use crate::{RecallParams, RecordParams};
+use crate::{AppraiseParams, RecallParams, RecordParams, Situation};
 
 fn default_db() -> PathBuf {
     crate::paths::default_db_path()
@@ -53,6 +53,36 @@ pub enum Commands {
         /// Keeps always-on hooks high-frequency without injecting noise.
         #[arg(long)]
         min_score: Option<f64>,
+    },
+    /// Critic: judge how much footing exists for a candidate in a situation.
+    /// Returns {valence, strength, tier, flagged_points} — never an answer.
+    Appraise {
+        /// Explicit question / instruction (optional).
+        #[arg(long, default_value = "")]
+        query: String,
+        /// Current or last error text.
+        #[arg(long)]
+        last_error: Option<String>,
+        /// Recent actions, comma-separated.
+        #[arg(long)]
+        recent_actions: Option<String>,
+        /// Task stage (e.g. merge, implement, review).
+        #[arg(long)]
+        stage: Option<String>,
+        /// File type / path summary in scope.
+        #[arg(long)]
+        file_context: Option<String>,
+        /// Candidate answer under judgement (folded into resonance, sanitized, never echoed).
+        #[arg(long)]
+        candidate: Option<String>,
+        #[arg(long)]
+        top: Option<usize>,
+        #[arg(long)]
+        min_strength: Option<f64>,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long, default_value = "json")]
+        format: String,
     },
     /// Close a trace with outcome
     Record {
@@ -332,6 +362,63 @@ pub fn run() -> anyhow::Result<()> {
                         println!("(no results)");
                     }
                 }
+            }
+        }
+        Commands::Appraise {
+            query,
+            last_error,
+            recent_actions,
+            stage,
+            file_context,
+            candidate,
+            top,
+            min_strength,
+            source,
+            format,
+        } => {
+            let actions: Vec<String> = recent_actions
+                .as_deref()
+                .map(|raw| {
+                    raw.split(',')
+                        .map(str::trim)
+                        .filter(|a| !a.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let situation = Situation {
+                query: (!query.is_empty()).then_some(query.as_str()),
+                last_error: last_error.as_deref(),
+                recent_actions: &actions,
+                stage: stage.as_deref(),
+                file_context: file_context.as_deref(),
+            };
+            let verdict = kb.appraise(AppraiseParams {
+                situation,
+                candidate: candidate.as_deref(),
+                min_strength,
+                top,
+                trace: true,
+                source: &source,
+            })?;
+            match format.as_str() {
+                "text" => {
+                    println!(
+                        "valence={:?} tier={:?} strength={:.3} trace_id={}",
+                        verdict.valence, verdict.tier, verdict.strength, verdict.trace_id
+                    );
+                    for fp in &verdict.flagged_points {
+                        println!("  ⚠ [{}] {} (s={:.3})", fp.chunk_id, fp.summary, fp.strength);
+                    }
+                }
+                _ => println!("{}", serde_json::to_string_pretty(&json!({
+                    "valence": verdict.valence,
+                    "strength": verdict.strength,
+                    "tier": verdict.tier,
+                    "flagged_points": verdict.flagged_points,
+                    "contributors": verdict.contributors,
+                    "trace_id": verdict.trace_id,
+                }))?),
             }
         }
         Commands::Record {
