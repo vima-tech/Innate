@@ -15,6 +15,7 @@ impl Distiller for SelectiveFailingDistiller {
             anti_trigger_desc: None,
             source_log_id: log["id"].as_str().unwrap().to_string(),
             nomination: None,
+            ..Default::default()
         }])
     }
 }

@@ -634,3 +634,40 @@ fn refine_runs_only_in_adapt_mode() {
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn actr_activation_zero_for_unused_chunks() {
+    use crate::kb::actr_activation;
+    // Never-used knowledge contributes nothing → recall stays zero-regression
+    // for freshly-added chunks (used_count == 0 or no last_used_at timestamp).
+    let now = "2026-06-19T00:00:00.000Z";
+    assert_eq!(actr_activation(0, Some("2026-06-18T00:00:00.000Z"), now), 0.0);
+    assert_eq!(actr_activation(5, None, now), 0.0);
+}
+
+#[test]
+fn actr_activation_recency_and_frequency_monotonic() {
+    use crate::kb::actr_activation;
+    let now = "2026-06-19T00:00:00.000Z";
+    let recent = actr_activation(3, Some("2026-06-18T00:00:00.000Z"), now); // 1 day ago
+    let stale = actr_activation(3, Some("2026-03-19T00:00:00.000Z"), now); // ~3 months ago
+    // More recent use ⇒ higher activation at equal frequency.
+    assert!(recent > stale, "recent {recent} should exceed stale {stale}");
+
+    let used_once = actr_activation(1, Some("2026-06-18T00:00:00.000Z"), now);
+    let used_many = actr_activation(20, Some("2026-06-18T00:00:00.000Z"), now);
+    // More uses ⇒ higher activation at equal recency.
+    assert!(used_many > used_once, "many {used_many} should exceed once {used_once}");
+}
+
+#[test]
+fn actr_activation_is_bounded_unit_interval() {
+    use crate::kb::actr_activation;
+    let now = "2026-06-19T00:00:00.000Z";
+    // Extreme frequency, just used: still strictly below 1.0.
+    let hot = actr_activation(100_000, Some("2026-06-19T00:00:00.000Z"), now);
+    assert!(hot > 0.0 && hot < 1.0, "activation {hot} must be in (0,1)");
+    // Single ancient use: still strictly above 0.0.
+    let cold = actr_activation(1, Some("2000-01-01T00:00:00.000Z"), now);
+    assert!(cold > 0.0 && cold < 1.0, "activation {cold} must be in (0,1)");
+}

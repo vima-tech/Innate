@@ -35,6 +35,7 @@ impl Distiller for ContextAwareDistiller {
                     anti_trigger_desc: None,
                     source_log_id: id.to_string(),
                     nomination: None,
+                    ..Default::default()
                 })
             })
             .collect())
@@ -58,6 +59,7 @@ impl Distiller for ContextAwareDistiller {
             anti_trigger_desc: None,
             source_log_id: primary_id.to_string(),
             nomination: None,
+            ..Default::default()
         }])
     }
 }
@@ -75,6 +77,7 @@ impl Distiller for MultiChunkDistiller {
                 anti_trigger_desc: None,
                 source_log_id: source_log_id.clone(),
                 nomination: None,
+                ..Default::default()
             },
             DistilledChunk {
                 content: "second chunk".to_string(),
@@ -83,6 +86,7 @@ impl Distiller for MultiChunkDistiller {
                 anti_trigger_desc: None,
                 source_log_id,
                 nomination: None,
+                ..Default::default()
             },
         ])
     }

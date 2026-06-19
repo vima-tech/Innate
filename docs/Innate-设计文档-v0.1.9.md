@@ -100,7 +100,7 @@ Daemon (innate daemon start) ← 后台日志/Hook 监听器；调用 CLI 子进
 | `storage/raw.rs` | 通用 SQL 帮助函数、`row_to_json` |
 | `embedding.rs` | `EmbeddingProvider` trait + `DummyEmbeddingProvider`（hash 派生，测试用）|
 | `llm.rs` | `HttpDistiller`（OpenAI 兼容 + Anthropic 单类型）、`LlmEmbeddingProvider`、HTTP 重试传输、蒸馏 Prompt |
-| `refine.rs` | `Sanitizer` / `Refiner` / `Distiller` trait 与默认实现 |
+| `refine.rs` | `Sanitizer` / `Refiner` / `Distiller` trait 与默认实现 + `ResilientDistiller`（包装 LLM distiller，按 log `distill_attempts` 在重试预算耗尽后确定性兜底，使知识创建不依赖 LLM 可用性；详见 `docs/Innate-设计-确定性兜底蒸馏-v1.md`）|
 | `errors.rs` | `InnateError` 枚举 |
 | `mcp.rs` | MCP stdio server——14 工具，JSON-RPC 2.0 分发 |
 | `web/` | `innate web`：本地 HTTP 服务（`tiny_http` 同步栈）。`mod` 启动与 token 生成、`api` 纯路由（读 + 治理、鉴权）、`assets` 内嵌前端（`include_str!`）|
@@ -223,12 +223,19 @@ query
 
 ```text
 score = 0.55*content_sim + 0.25*trigger_sim + 0.10*confidence + 0.15*context_score
+      + 0.08*activation
 ```
 
-- 权重和为 `1.05`，当前实现不再归一化（保持历史标定）。
+- 权重和为 `1.13`，当前实现不再归一化（保持历史标定）。
+- `activation` 为 ACT-R 基础水平激活：`σ( ln(1+used_count) − 0.5·ln(1+recency_days) )`，把使用**频次**与**近因**融成一个 `(0,1)` 信号（recency_days 取距 `last_used_at` 的小数天数）。**未被使用过的 chunk（`used_count==0` 或无 `last_used_at`）激活恒为 `0`**，故新加知识零回归。权重 `recall.w_activation` 可调。
 - 命中 `anti_trigger_desc` 时融合分乘以 `0.6`。
 - 候选数默认最多 `20`。Soft dependency 对候选内容相似度 +`0.05`；hard dependency 在装包阶段按 direct 或 closure 展开。
 - `pending` 候选最终融合分乘以 `0.60`。
+- `appraise`（直觉层 critic）复用同一融合公式，activation 计入其 calibration 分量。
+
+#### 5.2.1 召回质量评测套件（调参安全网）
+
+`core/src/tests/eval.rs` 是融合分调参（尤其 ACT-R `recall.w_activation`）的回归安全网。用**词袋特征哈希** embedding（`BowEmbeddingProvider`）产生真实词汇重叠相似度（生产 `DummyEmbeddingProvider` 整串哈希，只对精确匹配有相似度，无法分级排序），对标注 fixture（query → relevant ids）算 `precision@k / recall@k / MRR / nDCG@k`。四个测试：①基线质量阈值（整链路回归守门）；②默认权重在**对抗性**使用历史下不降质（distractor 堆高频近因仍压不过词汇相关性）；③过大权重（5.0）必然降质（证明指标对 activation 敏感、非恒绿，并界定安全区间）；④仅靠使用历史区分时，activation 把高频近因的 chunk 顶到前面。运行：`cargo test --release eval -- --nocapture`。
 
 ### 5.3 上下文分数
 

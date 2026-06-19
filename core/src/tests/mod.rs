@@ -7,11 +7,13 @@ use tempfile::NamedTempFile;
 mod basics;
 mod distill_failures;
 mod distillation;
+mod eval;
 mod evolve_retries;
 mod feedback;
 mod governance;
 mod intuition;
 mod reliability;
+mod resilient_distill;
 mod restoration;
 
 use crate::embedding::{DummyEmbeddingProvider, EmbeddingProvider};

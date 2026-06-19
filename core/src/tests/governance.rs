@@ -216,6 +216,7 @@ fn distilled_chunk_can_auto_promote_via_implicit_signals() {
                     anti_trigger_desc: None,
                     source_log_id: l["id"].as_str().unwrap_or("").to_string(),
                     nomination: None,
+                    ..Default::default()
                 })
                 .collect())
         }

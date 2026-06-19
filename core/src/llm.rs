@@ -375,6 +375,7 @@ fn distill_entry_with(
                 .get("nomination")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            provider_override: None,
         });
     }
     Ok(out)

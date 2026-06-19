@@ -3,7 +3,8 @@
 //! `recall()` is the **actor** side: "which knowledge should I load to act?". `appraise()` is
 //! the **critic** side: "do I have any footing on this candidate answer?". Both ride the *same*
 //! fused score (`w_content·sim_content + w_trigger·sim_trigger + w_confidence·conf +
-//! w_context·context_score`, with the pending/anti penalties); appraise does not introduce a
+//! w_context·context_score + w_activation·activation`, with the pending/anti penalties); appraise
+//! does not introduce a
 //! second scoring path. It only *re-reads* that score as strength + valence and surfaces what to
 //! be careful about.
 //!
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 
 use crate::errors::Result;
 use crate::storage::EpisodicLogRow;
+use super::actr_activation;
 use crate::utils::{gen_uuid, utc_now_iso, SanitizeAction};
 
 use super::{anti_trigger_hit, validate_source, KnowledgeBase, Situation, PENDING_RECALL_PENALTY};
@@ -191,7 +193,14 @@ impl KnowledgeBase {
 
             let resonance =
                 self.w_content * info.sim_content as f64 + self.w_trigger * info.sim_trigger as f64;
-            let calibration = self.w_confidence * conf + self.w_context * context_score;
+            // ACT-R activation (recency × frequency) — same usage-history signal recall fuses;
+            // grouped with calibration since it reflects accumulated use, not query resonance.
+            let used_count = chunk.get("used_count").and_then(Value::as_i64).unwrap_or(0);
+            let last_used_at = chunk.get("last_used_at").and_then(Value::as_str);
+            let activation = actr_activation(used_count, last_used_at, &now);
+            let calibration = self.w_confidence * conf
+                + self.w_context * context_score
+                + self.w_activation * activation;
             let mut fused = resonance + calibration;
             if chunk.get("state").and_then(Value::as_str) == Some("pending") {
                 fused *= PENDING_RECALL_PENALTY;

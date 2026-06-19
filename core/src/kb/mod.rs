@@ -52,6 +52,7 @@ const W_CONTENT: f64 = 0.55;
 const W_TRIGGER: f64 = 0.25;
 const W_CONFIDENCE: f64 = 0.10;
 const W_CONTEXT: f64 = 0.15;
+const W_ACTIVATION: f64 = 0.08;
 const TOP_K_CANDIDATES: usize = 20;
 const ANTI_TRIGGER_PENALTY: f64 = 0.6;
 const DENSITY_REFILL: bool = true;
@@ -162,6 +163,7 @@ pub struct KnowledgeBase {
     w_trigger: f64,
     w_confidence: f64,
     w_context: f64,
+    w_activation: f64,
     top_k_candidates: usize,
     anti_trigger_penalty: f64,
     density_refill: bool,
@@ -261,6 +263,7 @@ impl KnowledgeBase {
             w_trigger: W_TRIGGER,
             w_confidence: W_CONFIDENCE,
             w_context: W_CONTEXT,
+            w_activation: W_ACTIVATION,
             top_k_candidates: TOP_K_CANDIDATES,
             anti_trigger_penalty: ANTI_TRIGGER_PENALTY,
             density_refill: DENSITY_REFILL,
@@ -334,6 +337,7 @@ impl KnowledgeBase {
             ("recall.w_trigger", "0.25"),
             ("recall.w_confidence", "0.10"),
             ("recall.w_context", "0.15"),
+            ("recall.w_activation", "0.08"),
             ("recall.top_k_candidates", "20"),
             ("recall.anti_trigger_penalty", "0.6"),
             ("recall.density_refill", "true"),
@@ -412,6 +416,7 @@ impl KnowledgeBase {
         self.w_trigger = f("recall.w_trigger", W_TRIGGER);
         self.w_confidence = f("recall.w_confidence", W_CONFIDENCE);
         self.w_context = f("recall.w_context", W_CONTEXT);
+        self.w_activation = f("recall.w_activation", W_ACTIVATION);
         self.top_k_candidates =
             i("recall.top_k_candidates", TOP_K_CANDIDATES as i64).max(1) as usize;
         self.anti_trigger_penalty = f("recall.anti_trigger_penalty", ANTI_TRIGGER_PENALTY);
@@ -710,6 +715,45 @@ fn iso_days_diff(now_iso: &str, past_iso: &str) -> i64 {
     } else {
         0
     }
+}
+
+/// Fractional days between two ISO timestamps (≥ 0). Finer than `iso_days_diff`
+/// so the activation recency term keeps sub-day resolution.
+fn iso_fractional_days(now_iso: &str, past_iso: &str) -> f64 {
+    use chrono::{DateTime, Utc};
+    let parse = |s: &str| s.parse::<DateTime<Utc>>().ok();
+    if let (Some(a), Some(b)) = (parse(now_iso), parse(past_iso)) {
+        ((a - b).num_seconds().max(0)) as f64 / 86_400.0
+    } else {
+        0.0
+    }
+}
+
+/// ACT-R decay exponent for the base-level activation recency term.
+const ACTR_DECAY: f64 = 0.5;
+
+/// ACT-R-inspired base-level activation, bounded to `(0, 1)`.
+///
+/// Fuses **frequency** (how often a chunk has been used) and **recency** (time
+/// since last use) into one re-ranking signal, following the standard ACT-R
+/// approximation `B = ln(n) − d·ln(t)` (Petrov 2006), here using
+/// `B = ln(1 + used_count) − d·ln(1 + recency_days)` and squashed with a
+/// logistic so it stays on the same `[0, 1]` scale as the other fused-score
+/// terms (content/trigger sim, confidence, context).
+///
+/// Returns `0.0` for never-used chunks (no usage history → no boost), which
+/// keeps recall **zero-regression** for freshly-added knowledge: a chunk with
+/// `used_count == 0` contributes nothing to the fused score.
+pub(super) fn actr_activation(used_count: i64, last_used_at: Option<&str>, now_iso: &str) -> f64 {
+    if used_count <= 0 {
+        return 0.0;
+    }
+    let Some(last) = last_used_at else {
+        return 0.0;
+    };
+    let recency_days = iso_fractional_days(now_iso, last);
+    let b = (1.0 + used_count as f64).ln() - ACTR_DECAY * (1.0 + recency_days).ln();
+    1.0 / (1.0 + (-b).exp())
 }
 
 /// DFS-based cycle detection on the hard-dep graph. Returns list of cycles (each is a Vec of ids).

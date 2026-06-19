@@ -19,6 +19,9 @@ cd core && cargo build --release
 # Run tests
 cd core && cargo test
 
+# Recall-quality eval suite (regression safety net for fused-score / ACT-R tuning)
+cd core && cargo test --release eval -- --nocapture
+
 # Run the CLI (after adding to PATH or using full path)
 innate recall "query" --format json
 innate inspect
@@ -54,10 +57,20 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 ## Architecture
 
+### Conceptual model — 记忆 · 技能 · 直觉 (Memory · Skill · Intuition)
+
+Innate presents as three cooperating layers over one procedural-knowledge core. Keep this framing when writing user-facing copy, and map each layer to its real mechanism:
+
+| Layer | Mechanism in code |
+|---|---|
+| **记忆 Memory** | `recall → record → evolve` flywheel; confidence EMA + decay + curate (`kb/recall.rs`, `kb/record/`, `kb/evolve.rs`, `kb/curate.rs`) |
+| **技能 Skill** | `kind="skill"` / `origin="installed"` chunks; `innate-memory` SKILL.md; `install/` wizard |
+| **直觉 Intuition** | `appraise` critic — synchronous, no-LLM, value-domain-safe (no answer text) (`kb/appraise.rs`, `innate_appraise`) |
+
 Five access modules, one Rust KnowledgeBase Core:
 
 ```
-MCP    (innate mcp)          ← JSON-RPC 2.0 over stdio; 14 tools; direct Core calls
+MCP    (innate mcp)          ← JSON-RPC 2.0 over stdio; 15 tools; direct Core calls
 CLI    (innate <cmd>)        ← clap thin wrapper; direct Core calls
 Web    (innate web)          ← local read + governance HTTP UI; direct Core calls (read-write)
 SDKs   (Python / TypeScript) ← subprocess wrapper over CLI binary
@@ -94,13 +107,14 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `kb/curate.rs` | aggregate → archive → promote → decay → dedupe → governance |
 | `kb/lifecycle.rs` | `add` / spark family / `approve` / `archive` / `invalidate` / `restore` |
 | `kb/inspection.rs` | `inspect` — closed-loop health metrics |
+| `kb/appraise.rs` | `appraise` — 直觉/intuition critic; synchronous no-LLM footing check, reuses recall's fused score, returns valence/strength/tier/flagged_points (never an answer) |
 | `storage/{mod,chunks,traces,evolution,meta,raw}.rs` | rusqlite backend; schema init, BLOB-vector search, SQL helpers |
 | `embedding.rs` | `EmbeddingProvider` trait + `DummyEmbeddingProvider` (hash-based, for tests) |
 | `llm.rs` | `HttpDistiller` (OpenAI-compatible + Anthropic, one type) + `LlmEmbeddingProvider`; HTTP retry transport |
 | `llm_trace.rs` | LLM/embedding call tracing — `post_json_retry` emits JSONL to `~/.innate/logs/llm_trace.log` (request/response previews, latency, retries, errors; never the API key). Read by `innate web` `/api/llm-traces` |
-| `refine.rs` | `Sanitizer`/`Refiner`/`Distiller` traits + `DefaultSanitizer`/`NoopSanitizer`/`NullRefiner`/`HeuristicDistiller` defaults |
+| `refine.rs` | `Sanitizer`/`Refiner`/`Distiller` traits + `DefaultSanitizer`/`NoopSanitizer`/`NullRefiner`/`HeuristicDistiller` defaults + `ResilientDistiller` (wraps LLM distiller with deterministic fallback after retry-budget exhaustion, so capture never depends on the LLM) |
 | `errors.rs` | `InnateError` enum covering all error kinds |
-| `mcp.rs` | MCP stdio server — 14 tools, JSON-RPC 2.0 dispatcher |
+| `mcp.rs` | MCP stdio server — 15 tools, JSON-RPC 2.0 dispatcher |
 | `cli.rs` | CLI commands (clap), thin wrappers over KnowledgeBase |
 | `web/{mod,api,assets}.rs` | `innate web` — local HTTP UI (`tiny_http` sync). `mod` serve+token; `api` pure router (read + governance, auth); `assets` embedded frontend via `include_str!` |
 | `daemon/{mod,watch,events,process,state,command}.rs` | Background daemon — log/JSON-hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
@@ -130,9 +144,11 @@ All local state lives under `~/.innate/`, split into three subdirectories with o
 - `paths::ensure_layout()` runs at CLI and MCP startup: creates the subdirs and relocates files from the old flat layout (`~/.innate/<file>`). Idempotent, best-effort, moves only when the target is absent; the db moves together with its `-shm`/`-wal` sidecars.
 - Default db is `~/.innate/data/personal.db` (override with `--db`). `innate vacuum` checkpoints the WAL and VACUUMs to reclaim space after curate compaction.
 
-### The 8 Public APIs (on `KnowledgeBase`)
+### The Public APIs (on `KnowledgeBase`)
 
 `recall` → `record` → `evolve` → `approve/archive/invalidate/restore` → `add` → `spark/mature_spark/promote_spark/drop_spark` → `inspect`
+
+Plus `appraise` — the 直觉/intuition critic (synchronous, no-LLM, reuses recall's fused score; never returns an answer).
 
 ### Key Data Flow
 
@@ -195,6 +211,7 @@ Both SDKs wrap the CLI binary via subprocess — they are not native Rust FFI bi
 |---|---|
 | `innate_recall` | `KnowledgeBase::recall` |
 | `innate_record` | `KnowledgeBase::record` |
+| `innate_appraise` | `KnowledgeBase::appraise` (直觉 / intuition critic) |
 | `innate_add` | `KnowledgeBase::add` |
 | `innate_spark` | `KnowledgeBase::spark` |
 | `innate_evolve` | `KnowledgeBase::evolve` |

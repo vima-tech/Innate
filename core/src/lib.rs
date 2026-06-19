@@ -38,10 +38,18 @@ pub fn open_kb(db_path: impl AsRef<std::path::Path>) -> Result<KnowledgeBase> {
         Arc::new(llm::LlmEmbeddingProvider::new(c.clone())) as Arc<dyn embedding::EmbeddingProvider>
     });
 
-    let distiller: Option<Arc<dyn refine::Distiller>> = s
-        .llm
-        .as_ref()
-        .map(|c| llm::build_distiller(c) as Arc<dyn refine::Distiller>);
+    // When a remote LLM distiller is configured, wrap it with a deterministic
+    // fallback so knowledge creation never depends on the LLM staying available:
+    // the LLM gets the first 2 attempts per log (quality); after that the
+    // deterministic HeuristicDistiller guarantees capture (stability).
+    let distiller: Option<Arc<dyn refine::Distiller>> = s.llm.as_ref().map(|c| {
+        let primary = llm::build_distiller(c) as Arc<dyn refine::Distiller>;
+        Arc::new(refine::ResilientDistiller::new(
+            primary,
+            Arc::new(refine::HeuristicDistiller),
+            2,
+        )) as Arc<dyn refine::Distiller>
+    });
 
     KnowledgeBase::open_with(db_path, embedding, None, distiller, None, None)
 }

@@ -338,6 +338,12 @@ impl KnowledgeBase {
                     .clone()
                     .or_else(|| dc.trigger_desc.clone())
                     .filter(|s| !s.trim().is_empty());
+                // Per-chunk fallback provenance wins over the batch-level provider,
+                // so heuristic-fallback chunks are tagged accurately.
+                let distill_provider = dc
+                    .provider_override
+                    .clone()
+                    .or_else(|| provenance.provider.clone());
                 let row = ChunkRow {
                     id: chunk_id,
                     skill_name,
@@ -348,7 +354,7 @@ impl KnowledgeBase {
                     token_count: Some(tokens),
                     origin: "distilled".to_string(),
                     distilled_from: Some(dc.source_log_id),
-                    distill_provider: provenance.provider.clone(),
+                    distill_provider,
                     distill_model: provenance.model.clone(),
                     distill_prompt_version: provenance.prompt_version.clone(),
                     state: "pending".to_string(),

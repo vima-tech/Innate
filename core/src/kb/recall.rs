@@ -67,7 +67,7 @@ impl KnowledgeBase {
         self.apply_soft_dep_bonus(&mut candidates)?;
 
         // Score + anti-trigger penalty
-        let mut scored = self.score_candidates(candidates, query, &context_key)?;
+        let mut scored = self.score_candidates(candidates, query, &context_key, &now)?;
 
         // Relevance gate — drop sub-threshold candidates before packing/trace so the
         // trace records only what was actually surfaced (keeps selected→used stats clean).
@@ -268,6 +268,7 @@ impl KnowledgeBase {
         candidates: HashMap<String, CandidateInfo>,
         query: &str,
         context_key: &str,
+        now: &str,
     ) -> Result<Vec<(f64, Value)>> {
         // Batch-fetch context scores for all candidates in one query
         // (was one context_score lookup per candidate).
@@ -287,10 +288,20 @@ impl KnowledgeBase {
                 .unwrap_or(0.5);
             let chunk_id = info.chunk.get("id").and_then(Value::as_str).unwrap_or("");
             let context_score = ctx_scores.get(chunk_id).copied().unwrap_or(0.0);
+            // ACT-R base-level activation: recency × frequency from usage history.
+            // Zero for never-used chunks, so freshly-added knowledge is unaffected.
+            let used_count = info
+                .chunk
+                .get("used_count")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let last_used_at = info.chunk.get("last_used_at").and_then(Value::as_str);
+            let activation = actr_activation(used_count, last_used_at, now);
             let mut fused = self.w_content * info.sim_content as f64
                 + self.w_trigger * info.sim_trigger as f64
                 + self.w_confidence * conf
-                + self.w_context * context_score;
+                + self.w_context * context_score
+                + self.w_activation * activation;
             if info.chunk.get("state").and_then(Value::as_str) == Some("pending") {
                 fused *= PENDING_RECALL_PENALTY;
             }
@@ -304,6 +315,7 @@ impl KnowledgeBase {
             }
             let mut chunk = info.chunk;
             chunk["_context_score"] = json!(context_score);
+            chunk["_activation"] = json!(activation);
             chunk["_fused_score"] = json!(fused);
             scored.push((fused, chunk));
         }

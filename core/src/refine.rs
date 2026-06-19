@@ -1,6 +1,7 @@
 use crate::errors::Result;
 use crate::utils::{sanitize, SanitizeAction};
 use serde_json::Value;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Sanitizer — injectable content sanitizer (§二·六)
@@ -79,7 +80,7 @@ pub struct DistillProvenance {
     pub prompt_version: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DistilledChunk {
     pub content: String,
     /// Short human-readable skill label (1-3 words) shown in the web UI's
@@ -89,6 +90,11 @@ pub struct DistilledChunk {
     pub anti_trigger_desc: Option<String>,
     pub source_log_id: String,
     pub nomination: Option<String>,
+    /// Per-chunk override for `ChunkRow.distill_provider`. Set by
+    /// [`ResilientDistiller`] to `"heuristic_fallback"` so operators can tell
+    /// which chunks were produced by the deterministic fallback rather than the
+    /// primary (LLM) distiller. `None` ⇒ use the batch-level `provenance()`.
+    pub provider_override: Option<String>,
 }
 
 /// Heuristic distiller: extracts chunks from log output / nomination fields.
@@ -151,6 +157,7 @@ impl Distiller for HeuristicDistiller {
                         anti_trigger_desc,
                         source_log_id: id,
                         nomination: entry["nomination"].as_str().map(str::to_string),
+                        provider_override: None,
                     });
                 }
             }
@@ -164,5 +171,98 @@ impl Distiller for HeuristicDistiller {
             model: None,
             prompt_version: Some("3".to_string()),
         }
+    }
+}
+
+/// Resilient distiller — wraps a `primary` distiller (e.g. the LLM `HttpDistiller`)
+/// with a deterministic `fallback` (e.g. `HeuristicDistiller`) so knowledge
+/// creation never depends on the primary staying available.
+///
+/// Policy (see `docs/Innate-设计-确定性兜底蒸馏-v1.md`): the primary gets the
+/// first `llm_attempt_budget` attempts at a log — measured by the log's
+/// `distill_attempts` counter, which only increments on a `failed` terminal
+/// state. While attempts remain, a primary error is **propagated** so the
+/// existing `failed → recover → retry` machinery gives the primary another
+/// chance (preserving quality). Once `distill_attempts >= llm_attempt_budget`,
+/// a primary error triggers the deterministic fallback instead of failing the
+/// log (guaranteeing eventual capture). A primary *success* — including a valid
+/// empty result (nothing worth distilling) — is always used as-is and never
+/// falls back.
+///
+/// This is **not** a second LLM: the fallback is a deterministic, local pass, so
+/// it stays within the single-LLM fault-tolerance contract.
+pub struct ResilientDistiller {
+    primary: Arc<dyn Distiller>,
+    fallback: Arc<dyn Distiller>,
+    llm_attempt_budget: i64,
+}
+
+impl ResilientDistiller {
+    pub fn new(
+        primary: Arc<dyn Distiller>,
+        fallback: Arc<dyn Distiller>,
+        llm_attempt_budget: i64,
+    ) -> Self {
+        Self {
+            primary,
+            fallback,
+            llm_attempt_budget,
+        }
+    }
+
+    fn budget_exhausted(&self, log: &Value) -> bool {
+        log.get("distill_attempts")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            >= self.llm_attempt_budget
+    }
+
+    fn tag_fallback(mut chunks: Vec<DistilledChunk>) -> Vec<DistilledChunk> {
+        for c in &mut chunks {
+            c.provider_override = Some("heuristic_fallback".to_string());
+        }
+        chunks
+    }
+}
+
+impl Distiller for ResilientDistiller {
+    fn distill(&self, log_entries: &[Value]) -> Result<Vec<DistilledChunk>> {
+        match self.primary.distill(log_entries) {
+            Ok(chunks) => Ok(chunks),
+            Err(e) => {
+                let exhausted = log_entries
+                    .first()
+                    .map(|l| self.budget_exhausted(l))
+                    .unwrap_or(false);
+                if exhausted {
+                    Ok(Self::tag_fallback(self.fallback.distill(log_entries)?))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    fn distill_with_context(
+        &self,
+        primary: &Value,
+        related_logs: &[Value],
+    ) -> Result<Vec<DistilledChunk>> {
+        match self.primary.distill_with_context(primary, related_logs) {
+            Ok(chunks) => Ok(chunks),
+            Err(e) => {
+                if self.budget_exhausted(primary) {
+                    Ok(Self::tag_fallback(
+                        self.fallback.distill_with_context(primary, related_logs)?,
+                    ))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    fn provenance(&self) -> DistillProvenance {
+        self.primary.provenance()
     }
 }

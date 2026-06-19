@@ -1,95 +1,114 @@
-# Innate — Self-Growing Procedural Knowledge Layer
+# Innate — 自成长 Agent 程序性知识层
 
-[中文文档](README.zh.md)
+<p align="center">
+  <img src="docs/social-preview.png" alt="Innate — 记忆 · 技能 · 直觉" width="860">
+</p>
 
-> **One-line pitch**: An embeddable, self-growing, engine-swappable procedural knowledge layer for AI agents.
-> It does not orchestrate (neutral to LangGraph / Claude Code / raw API calls). It solves one thing — **assembling the most relevant, precise knowledge within a token budget, and letting that knowledge evolve through real use.**
+[English](README.en.md)
 
-Innate does not manage *declarative memory* ("what the world looks like / user preferences") or a *static skill repository* written once and never updated. It manages **procedural knowledge** — "how to do things, which approach works better in this context." Every knowledge chunk is evaluated by real outcomes from the moment it enters the store: effective chunks gain confidence, stale ones decay and archive, sparks incubate and promote, and the whole library gets sharper with use.
+> **一句话定位**: 一个**可嵌入可外挂、自成长、引擎可换**的 agent 程序性知识层系统。  
+> 它不做编排(对 LangGraph / Claude Code / 裸 API 中立), 只解一件事——**在有限 context 预算内, 组装最相关、最精确的知识, 并让这套知识随使用自我进化。**
+
+Innate 管理的不是「世界是什么样 / 用户偏好是什么」那种**陈述性记忆**, 也不是一次写定再也不变的**静态技能仓库**。它管理的是**程序性知识(Procedural Knowledge)**——「事情该怎么做, 哪种方式在这个上下文里更有效」。每一块知识从进库起都在被真实使用结果考核: 好用的升权, 失效的降权归档, 灵感可孵化晋升, 整库越用越准。
 
 ---
 
-## Installation
+## 三重概念 — 记忆 · 技能 · 直觉
 
-### One-line install (Linux / macOS)
+Innate 在一个程序性知识内核之上，由三层协作构成：
+
+| 层 | 是什么 | 机制 |
+|---|---|---|
+| **记忆 · Memory** | 把经验蒸馏成可复用知识，并随真实结果自成长 | `recall → record → evolve` 飞轮；置信 EMA + 时间衰减 + curate |
+| **技能 · Skill** | 可安装、可复用的程序化技能，与习得知识同台召回排序 | `kind="skill"` chunk · `innate-memory` SKILL.md · `innate install` 向导 |
+| **直觉 · Intuition** | 同步、无 LLM 的 critic，在冒险动作前评估「有没有底」——返回 valence / strength / 注意点，**从不给答案** | `innate_appraise` · 纯 Rust 融合打分 · 价值域安全 |
+
+**记忆**沉淀并变准，**技能**封装并复用，**直觉**临门一脚做取证式 gut-check——三者合力，让 agent 的程序性 know-how 随使用复利增长。
+
+---
+
+## 安装
+
+### 一行安装（Linux / macOS）
 
 ```bash
 curl -fsSL https://innate.mengkai.ren/ | sh
 ```
 
-Downloads the pre-built binary for your platform, verifies the checksum, places it in `~/.local/bin`, and runs `innate install` to configure agent integration — all in one step.
+自动检测平台并下载预编译二进制，验证 sha256 校验和，安装到 `~/.local/bin`，并运行 `innate install` 配置 Agent 集成——一步完成。
 
-Options:
+可选参数：
 
 ```bash
-# Pin a specific version
+# 固定安装版本
 curl -fsSL https://innate.mengkai.ren/ | INNATE_VERSION=0.1.8 sh
 
-# Skip agent setup (binary only)
+# 仅安装二进制，跳过 Agent 配置
 curl -fsSL https://innate.mengkai.ren/ | NO_INNATE_SETUP=1 sh
 
-# Custom install directory
+# 指定安装目录
 curl -fsSL https://innate.mengkai.ren/ | INNATE_DIR=/usr/local/bin sh
 ```
 
-### Other install methods
+### 其他安装方式
 
 ```bash
-# Rust
+# Rust（推荐）
 cargo install innate
 
-# Python installer (downloads pre-built binary, no Rust required)
+# Python 安装器——自动下载预编译二进制，无需 Rust
 pip install innate-ai
 
-# npm installer (downloads pre-built binary, no Rust required)
+# npm 安装器——自动下载预编译二进制，无需 Rust
 npm install -g @vima_tech/innate
 
-# Build from source
+# 从源码编译
 cd core && cargo build --release
 cp target/release/innate ~/.local/bin/
 ```
 
-Verify the install:
+验证安装：
 
 ```bash
 innate inspect
 ```
 
-### Configure agent integration
+### 配置 Agent 集成
 
-After the binary is on your PATH, run the interactive wizard to configure the MCP server and install the `innate-memory` agent skill (skipped automatically by the one-line installer above):
+二进制在 PATH 上之后，运行交互式向导配置 MCP 服务并安装 `innate-memory` agent skill（一行安装脚本已自动执行此步骤）：
 
 ```bash
 innate install
 ```
 
-Detects Claude Code, Codex CLI, and opencode automatically.
+自动检测 Claude Code、Codex CLI 和 opencode。
 
-### Let an agent install for you
+### 让 Agent 帮你安装
 
-Paste the following prompt into Claude Code (or any agent with shell access):
+将以下提示词粘贴到 Claude Code（或任何拥有 shell 访问权限的 Agent）中：
 
 ```
-Install Innate by running: curl -fsSL https://innate.mengkai.ren/ | sh
-This downloads the binary, verifies the checksum, and configures the MCP server and agent skill automatically.
-Verify with `innate inspect` when done.
+运行以下命令安装 Innate：
+curl -fsSL https://innate.mengkai.ren/ | sh
+该脚本会自动下载二进制、验证校验和并配置 MCP 服务和 agent skill。
+完成后用 `innate inspect` 验证安装。
 ```
 
-### Python SDK (programmatic use)
+### Python SDK（程序化调用）
 
 ```bash
 pip install innate-py
 ```
 
-### TypeScript SDK (programmatic use)
+### TypeScript SDK（程序化调用）
 
 ```bash
 npm install @innate/sdk
 ```
 
-### MCP server (Claude Code / Claude Desktop)
+### MCP 服务 (Claude Code / Claude Desktop)
 
-Add to `.claude/settings.json`:
+在 `.claude/settings.json` 中添加:
 
 ```json
 {
@@ -102,11 +121,11 @@ Add to `.claude/settings.json`:
 }
 ```
 
-Once configured, the agent can call `innate_recall`, `innate_record`, and other MCP tools directly — no CLI invocation needed.
+配置后 Agent 可直接使用 `innate_recall`、`innate_record` 等 MCP 工具, 无需手动调用 CLI。
 
 ### Daemon (Linux only)
 
-Background process that watches log directories and JSON hook events and bridges them into the knowledge layer:
+后台守护进程，监听指定目录下的日志文件和 JSON Hook 事件，自动桥接到知识层：
 
 ```bash
 innate daemon start --watch /path/to/log/dir
@@ -114,77 +133,77 @@ innate daemon status
 innate daemon stop
 ```
 
-The daemon calls the `innate` CLI via subprocess and never opens the database directly. Its state (file offsets, processed events, session traces) is stored in a separate `daemon_state.sqlite`.
+Daemon 通过 subprocess 调用 `innate` CLI，不直接打开知识库；其自身状态（文件偏移、已处理事件、会话 trace）记录在独立的 `daemon_state.sqlite` 中。
 
-### Uninstall
+### 卸载
 
 ```bash
-innate uninstall              # interactive — keeps data
-innate uninstall -y           # skip prompts, keep data
-innate uninstall -y --purge-data  # remove everything including ~/.innate/
+innate uninstall              # 交互式，保留数据
+innate uninstall -y           # 跳过确认，保留数据
+innate uninstall -y --purge-data  # 同时删除 ~/.innate/ 数据目录
 ```
 
 ---
 
-## Quick Start
+## 快速开始
 
 ```bash
-# 1. Add a knowledge chunk
-innate add "List comprehensions are more readable than map/filter in Python" \
-  --kind note --trigger "python list processing"
+# 1. 写入知识
+innate add "Python 列表推导式比 map/filter 更易读" --kind note --trigger "python 列表处理"
 
-# 2. Recall knowledge (returns top chunks + trace_id)
-innate recall "python list optimization" --budget 2000 --format json
+# 2. 召回知识 (返回 top 块, 含 trace_id)
+innate recall "python 列表优化" --budget 2000 --format json
 
-# 3. Close the trace (complete the experience loop)
+# 3. 补全 trace (闭合经验链路)
 innate record <trace_id> --outcome ok --used <chunk_id1>,<chunk_id2>
 
-# 4. Trigger growth (distil + curate)
+# 4. 触发成长 (蒸馏 + 治理)
 innate evolve --trigger manual
 
-# 5. Health check
+# 5. 体检 (健康信号 + 建议命令)
 innate inspect
 ```
 
 ---
 
-## Core Loop
+## 核心闭环
 
-Five loops must all be complete — any missing one means it is not a "knowledge layer":
+五个核心闭环必须完整, 缺一就不算"知识层":
 
-| Loop | Path |
+| 闭环 | 路径 |
 |---|---|
-| **Recall** | `query → recall → context` (dual-vector cosine + scalar filter, synchronous pure math) |
-| **Observe** | `context → use → trace` (records which chunks were used and the outcome) |
-| **Grow** | `trace → distil → pending` (offline distillation of new experience) |
-| **Govern** | `usage → confidence → curate` (EMA confidence update + archive) |
-| **Safety** | `pending / archived / no hard delete` (default sanitize hook, blacklist + red action) |
+| **召回** | `query → recall → context`（双向量余弦相似度 + 标量过滤，同步纯数学） |
+| **观测** | `context → use → trace`（记录哪些块被用了、结果如何） |
+| **成长** | `trace → distill → pending`（离线蒸馏新经验） |
+| **治理** | `usage → confidence → curate`（EMA 置信度更新 + Curate 归档） |
+| **安全** | `pending/archived/不物理删`（默认 sanitize 钩子，黑名单 + red action） |
 
-> The default synchronous recall path **never calls any LLM** — Innate is the librarian, not the reader and editor. Only when the caller explicitly enables the optional Refiner does trim/adapt execute.
+> 默认同步召回路径**绝不调用任何 LLM/小模型**——Innate 是图书管理员，不是阅读者兼编辑。只有调用方显式开启可选 Refiner 时才执行 trim/adapt。
 
 ---
 
-## MCP Integration
+## 接入 Agent (MCP 配置)
 
-The recommended way to connect an agent is through the MCP server.
+推荐方式: MCP 服务 — Agent 通过 MCP 工具直接操作知识库, 无需 CLI 权限。
 
-### Agent workflow protocol
+### Agent 工作规范
 
-After configuration, give your agent the following protocol:
+配置完成后, 将以下工作规范发送给 Agent:
 
-| Operation | MCP tool |
+| 操作类别 | MCP 工具 |
 |---|---|
-| Agent may call freely | `innate_recall` · `innate_record` · `innate_evolve` · `innate_inspect` |
-| Confirm before calling | `innate_add` · `innate_spark` |
-| Human governance only | `innate_approve` · `innate_archive` · `innate_invalidate` · `innate_restore` · `innate_mature_spark` · `innate_promote_spark` · `innate_drop_spark` |
+| Agent 可直接执行 | `innate_recall` · `innate_record` · `innate_appraise` · `innate_evolve` · `innate_inspect` |
+| 确认后执行 | `innate_add` · `innate_spark` |
+| 仅人工治理 | `innate_approve` · `innate_archive` · `innate_invalidate` · `innate_restore` · `innate_mature_spark` · `innate_promote_spark` · `innate_drop_spark` |
 
-**Workflow**
+**工作流程**
 
-- Call `innate_recall(query="<task intent>")` before each task; incorporate the result into your plan
-- Call `innate_record(trace_id=..., outcome="ok"|"fail")` after each task to close the trace
-- When you find experience worth keeping, distil it and confirm with the user before calling `innate_add` or `innate_spark`
-- When knowledge seems stale, propose governance — never execute governance actions autonomously
-- Call `innate_evolve(trigger="manual")` at the end of a session to trigger distillation
+- 每次任务开始前调用 `innate_recall(query="<任务意图>")`, 将结果纳入计划
+- 冒险动作前调用 `innate_appraise(situation=...)`(**直觉**层)做 gut-check——它只告诉你「要注意什么」, 从不给答案
+- 任务结束后调用 `innate_record(trace_id=..., outcome="ok"|"fail")`, 闭合 trace
+- 发现值得保留的经验或灵感时, 先提炼并向用户确认; 得到同意后调用 `innate_add` 或 `innate_spark`
+- 判断知识已失效时, 只提出治理建议, 不直接执行治理动作
+- 会话结束时调用 `innate_evolve(trigger="manual")` 触发蒸馏
 
 ---
 
@@ -193,36 +212,36 @@ After configuration, give your agent the following protocol:
 ```python
 from innate import KnowledgeBase
 
-kb = KnowledgeBase("personal.db")  # or set INNATE_DB env var
+kb = KnowledgeBase("personal.db")  # 或通过 INNATE_DB 环境变量指定
 
-# Add knowledge
-note_id = kb.add("insight text", kind="note", trigger_desc="when to use this")
-spark_id = kb.spark("a hypothesis to explore", trigger_desc="related context")
+# 写入
+note_id = kb.add("经验内容", kind="note", trigger_desc="触发场景")
+spark_id = kb.spark("一个待探索的灵感", trigger_desc="相关场景")
 
-# Recall (synchronous, pure math)
-ctx = kb.recall("task description", budget=6000, include_sparks=True)
+# 召回 (同步纯数学)
+ctx = kb.recall("任务描述", budget=6000, include_sparks=True)
 for chunk in ctx.knowledge:
     print(chunk["id"], chunk["content"])
 
-# Record usage
-kb.record(ctx.trace_id, outcome="ok", used=[note_id], output_summary="solved X")
+# 记录使用
+kb.record(ctx.trace_id, outcome="ok", used=[note_id], output_summary="解决了 X")
 
-# Grow
+# 成长
 result = kb.evolve(trigger="manual")
 
-# Governance (human-initiated)
+# 治理 (人工操作)
 kb.approve(pending_id)
 kb.archive(note_id, reason="stale")
-kb.invalidate(note_id, reason="logic error")
+kb.invalidate(note_id, reason="逻辑错误")
 kb.restore(archived_id)
 
-# Spark lifecycle
+# 灵感生命周期
 kb.mature_spark(spark_id, to="sprouting")
 kb.mature_spark(spark_id, to="incubating")
 new_id = kb.promote_spark(spark_id, to="note")
-kb.drop_spark(spark_id, reason="disproved")
+kb.drop_spark(spark_id, reason="已证伪")
 
-# Health check
+# 体检
 report = kb.inspect()
 ```
 
@@ -233,22 +252,22 @@ report = kb.inspect()
 ```typescript
 import { KnowledgeBase, McpClient } from "@innate/sdk";
 
-// CLI subprocess mode (synchronous, suitable for scripts)
+// CLI subprocess 模式 (同步, 适合脚本)
 const kb = new KnowledgeBase({ dbPath: "personal.db" });
 
-const ctx = kb.recall("task description", { budget: 6000 });
+const ctx = kb.recall("任务描述", { budget: 6000 });
 kb.record(ctx.trace_id, { outcome: "ok", used: [chunkId] });
-kb.add("insight text", { kind: "note", triggerDesc: "when to use this" });
+kb.add("经验内容", { kind: "note", triggerDesc: "触发场景" });
 kb.evolve("manual");
 const report = kb.inspect();
 
-// MCP client mode (async, suitable for agent integration)
+// MCP 客户端模式 (异步, 适合 Agent 集成)
 const client = new McpClient({ dbPath: "personal.db" });
 await client.initialize();
 
-const result = await client.recall("task description", { budget: 6000 });
+const result = await client.recall("任务描述", { budget: 6000 });
 await client.record(result.trace_id, { outcome: "ok" });
-await client.add("new insight", { kind: "note" });
+await client.add("新知识", { kind: "note" });
 await client.inspect();
 
 client.close();
@@ -256,144 +275,148 @@ client.close();
 
 ---
 
-## CLI Reference
+## CLI 子命令一览
 
-The CLI is a thin wrapper over the SDK public API — it adds no knowledge-layer logic beyond argument parsing and output formatting.
+CLI 是 SDK Public API 的**薄封装**, 不新增任何知识层逻辑——只做参数解析和格式化输出。
 
-| Command | Domain | Options |
+| 子命令 | 能力域 | 说明 |
 |---|---|---|
-| `innate recall <query>` | Read | `--budget` · `--top` · `--include-sparks` · `--format text\|json` |
-| `innate record <trace_id>` | Write | `--outcome ok\|fail\|unknown` · `--used` · `--output-summary` · `--nomination` · `--source` |
-| `innate evolve` | Grow | `--trigger manual\|scheduled\|threshold` |
-| `innate inspect` | Debug | Health check: 5 signals + current parameters |
-| `innate add <content>` | Write | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source` · `--depends-on <id>` (repeatable) · `--dep-kind hard\|soft` |
-| `innate spark <content>` | Spark | `--trigger` |
-| `innate mature-spark <id> <to>` | Govern | to: `sprouting\|incubating` (forward only) |
-| `innate promote-spark <id>` | Govern | `--to note\|skill` |
-| `innate drop-spark <id>` | Govern | `--reason` |
-| `innate approve <id>` | Govern | pending → active |
-| `innate archive <id>` | Govern | `--reason` |
-| `innate invalidate <id>` | Govern | `--reason` (archive + blacklist) |
-| `innate restore <id>` | Govern | archived → active; if previously invalidated, also clears hash blacklist |
-| `innate mcp` | Integrate | Start MCP stdio server (JSON-RPC 2.0) for Claude Code / Desktop |
-| `innate install` | Setup | Interactive wizard — configure agents, install binary, install skill |
-| `innate uninstall` | Setup | Remove Innate from all configured agents and PATH |
-| `innate daemon start` | Integrate | Background log/hook watcher `--watch <dir>` (Linux only) |
-| `innate daemon status` | Integrate | Show daemon status and error stats |
-| `innate daemon stop` | Integrate | Stop a running daemon |
-| `innate backup run\|status\|list\|prune` | Ops | Cloudflare R2 backup/restore/list/prune |
-| `innate upgrade` | Ops | Self-update from GitHub Releases `--version` · `--check` |
-| `innate migrate` | Ops | Apply schema migrations up to the current version |
-| `innate vacuum` | Ops | Checkpoint WAL + VACUUM to reclaim space after curate |
-| `innate hook stop` | Integrate | Process a Claude Code Stop payload from stdin into session events |
+| `innate recall <query>` | 读 | `--budget` · `--top` · `--include-sparks` · `--format text\|json` |
+| `innate appraise` | 直觉 | `--query` · `--last-error` · `--recent-actions` · `--stage` · `--file-context` · `--candidate` — 返回 `{valence, strength, tier, flagged_points}` |
+| `innate record <trace_id>` | 写 | `--outcome ok\|fail\|unknown` · `--used` · `--output-summary` · `--nomination` · `--source` |
+| `innate evolve` | 成长 | `--trigger manual\|scheduled\|threshold` |
+| `innate inspect` | 调试 | 库体检: 5 个健康信号 + 当前参数 |
+| `innate add <content>` | 写入 | `--kind note\|skill` · `--trigger` · `--anti-trigger` · `--skill-name` · `--source` · `--depends-on <id>`（可重复）· `--dep-kind hard\|soft` |
+| `innate spark <content>` | 灵感 | `--trigger` |
+| `innate mature-spark <id> <to>` | 治理 | to: `sprouting\|incubating` (只允许前向) |
+| `innate promote-spark <id>` | 治理 | `--to note\|skill` |
+| `innate drop-spark <id>` | 治理 | `--reason` |
+| `innate approve <id>` | 治理 | pending → active |
+| `innate archive <id>` | 治理 | `--reason` |
+| `innate invalidate <id>` | 治理 | `--reason` (归档 + 黑名单) |
+| `innate restore <id>` | 治理 | archived → active; 若此前 invalidate, 同步撤销 hash 黑名单 |
+| `innate mcp` | 集成 | 启动 MCP stdio 服务 (JSON-RPC 2.0), 供 Claude Code / Desktop 使用 |
+| `innate install` | 安装 | 交互式向导——配置 agent、安装二进制、安装 skill |
+| `innate uninstall` | 卸载 | 从所有已配置 agent 和 PATH 移除 Innate |
+| `innate daemon start` | 集成 | 后台日志/Hook 监听守护进程 `--watch <dir>` (Linux only) |
+| `innate daemon status` | 集成 | 查看 daemon 运行状态与错误统计 |
+| `innate daemon stop` | 集成 | 停止运行中的 daemon |
+| `innate backup run\|status\|list\|prune` | 运维 | Cloudflare R2 备份/恢复/列举/清理 |
+| `innate upgrade` | 运维 | 从 GitHub Releases 自更新 `--version` · `--check` |
+| `innate migrate` | 运维 | 将数据库 schema 迁移到当前版本 |
+| `innate vacuum` | 运维 | checkpoint WAL + VACUUM，回收 curate 压缩后的空间 |
+| `innate hook stop` | 集成 | 从 stdin 处理 Claude Code Stop 负载为会话事件 |
 
-### MCP tools (14 tools exposed by `innate mcp`)
+### MCP 工具 (`innate mcp` 暴露的 15 个工具)
 
-| MCP Tool | Capability |
+| MCP 工具 | 对应能力 |
 |---|---|
-| `innate_recall` | Recall knowledge — call FIRST at task start |
-| `innate_record` | Record trace outcome — call LAST after task completion |
-| `innate_add` | Write a knowledge chunk (optional `depends_on[]` + `dep_kind` to declare hard/soft deps) |
-| `innate_spark` | Create a spark (idea / hypothesis) |
-| `innate_evolve` | Trigger growth — call at session end |
-| `innate_inspect` | Health check |
-| `innate_approve` / `innate_archive` / `innate_invalidate` / `innate_restore` | Governance |
-| `innate_mature_spark` / `innate_promote_spark` / `innate_drop_spark` | Spark lifecycle |
-| `innate_backup` | Trigger a Cloudflare R2 backup |
+| `innate_recall` | 召回知识——任务开始时首先调用 |
+| `innate_record` | 记录 trace 结果——任务完成后最后调用 |
+| `innate_appraise` | **直觉** critic——评估某情境有没有底，返回 `{valence, strength, tier, flagged_points}`，从不给答案 |
+| `innate_add` | 写入知识块（可选 `depends_on[]` + `dep_kind` 声明 hard/soft 依赖） |
+| `innate_spark` | 创建灵感（想法/假设） |
+| `innate_evolve` | 触发成长——会话结束时调用 |
+| `innate_inspect` | 库体检 |
+| `innate_approve` / `innate_archive` / `innate_invalidate` / `innate_restore` | 治理 |
+| `innate_mature_spark` / `innate_promote_spark` / `innate_drop_spark` | 灵感生命周期 |
+| `innate_backup` | 触发一次 Cloudflare R2 备份 |
 
 ---
 
-## Architecture
+## 系统架构
 
-Four access modules share one Rust KnowledgeBase core:
+四种接入模块，共用一套 Rust KnowledgeBase Core：
 
 ```
-MCP    (innate mcp)          ──────────────────────────┐
-CLI    (innate <cmd>)         ──────────────────────────┤──> KnowledgeBase Core ──> SQLite
-SDKs   (Python / TypeScript)  ──> CLI ─────────────────┤
-Daemon (innate daemon start)  ──> CLI ─────────────────┘
+MCP    (innate mcp)           ──────────────────────────┐
+CLI    (innate <cmd>)          ──────────────────────────┤──> KnowledgeBase Core ──> SQLite
+SDKs   (Python / TypeScript)   ──> CLI ─────────────────┤
+Daemon (innate daemon start)   ──> CLI ─────────────────┘
 ```
 
-| Module | Implementation | Notes |
+| 模块 | 实现方式 | 说明 |
 |---|---|---|
-| **MCP** | Direct Core call | JSON-RPC 2.0 over stdio; 14 tools; for Claude Code / Claude Desktop |
-| **CLI** | Direct Core call | clap thin wrapper; full public API as CLI commands |
-| **Python SDK** | subprocess → CLI | `innate-py`, zero extra dependencies |
-| **TypeScript SDK** | subprocess → CLI + async MCP client | `@innate/sdk`, Node.js 18+ |
-| **Daemon** | subprocess → CLI | Background log/JSON hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
+| **MCP** | 直接调用 Core lib | JSON-RPC 2.0 over stdio；15 个工具；供 Claude Code / Claude Desktop 使用 |
+| **CLI** | 直接调用 Core lib | clap 薄封装；完整 Public API 的命令行入口 |
+| **Python SDK** | subprocess 调用 CLI | `innate-py`，零额外依赖 |
+| **TypeScript SDK** | subprocess 调用 CLI + async MCP client | `@innate/sdk`，Node.js 18+ |
+| **Daemon** | subprocess 调用 CLI | 后台监听日志/JSON Hook；自动触发 recall/record/evolve；事件幂等、会话 trace、错误统计、断点续读（Linux only） |
 
 ```
 Innate System
-├── Rust core (core/)
-│   ├── KnowledgeBase (lib)     8 public APIs, SQLite + pure-Rust cosine similarity
-│   ├── CLI (innate <cmd>)      clap thin wrapper → KnowledgeBase calls
-│   ├── MCP Server (innate mcp) JSON-RPC 2.0 over stdio, 14 MCP tools
-│   └── Daemon (innate daemon)  background log/hook watcher, subprocess → CLI (Linux only)
+├── Rust 核心 (core/)
+│   ├── KnowledgeBase (lib)      8 类 Public API, SQLite + 纯 Rust 余弦相似度
+│   ├── CLI (innate <cmd>)       clap 薄封装, 参数解析 → KnowledgeBase 调用
+│   ├── MCP Server (innate mcp)  JSON-RPC 2.0 over stdio, 15 个 MCP 工具
+│   └── Daemon (innate daemon)   后台日志/Hook 监听, subprocess → CLI (Linux only)
 │
-├── Vector search               f32 BLOB storage + full-scan cosine similarity (zero native extensions)
-│   ├── vec_content             content vector (BLOB)
-│   └── vec_trigger             trigger vector (BLOB)
+├── 向量搜索                     f32 BLOB 存储 + 全扫描余弦相似度 (零 native 扩展)
+│   ├── vec_content              内容向量 (BLOB)
+│   └── vec_trigger              触发向量 (BLOB)
 │
 ├── SDKs
-│   ├── sdks/python/            innate-py  — subprocess → CLI, zero extra dependencies
-│   └── sdks/typescript/        @innate/sdk — CLI subprocess + async MCP client
+│   ├── sdks/python/             innate-py  — subprocess → CLI, 零额外依赖
+│   └── sdks/typescript/         @innate/sdk — CLI subprocess + async MCP client
 │
-└── skills/innate-memory/       SKILL.md (MCP tools primary, CLI fallback)
+└── skills/innate-memory/        SKILL.md (MCP 工具为主, CLI 为 fallback)
 ```
 
 ---
 
-## Core Features
+## 核心特性
 
-- **Dual-vector recall**: `content_vec` + `trigger_vec`, fused ranking with configurable `w_content / w_trigger / w_confidence` weights
-- **Confidence-driven ranking**: EMA update + recency weighting (explicit signals) + time decay — knowledge improves with use
-- **Zero native extensions**: vectors stored as f32 BLOBs, cosine similarity in pure Rust — no sqlite-vec or C extension required
-- **Native MCP integration**: `innate mcp` exposes 14 tools, works out of the box with Claude Code and Claude Desktop
-- **Hard-dep fail-closed**: if a hard dependency is unavailable or archived at recall time, the entire seed is discarded — no partial closures returned
-- **Zero autonomous behavior**: the SDK never acts on its own; all growth is externally triggered (`evolve` trigger: manual / scheduled / threshold)
-- **Sanitize three-state contract**: hook returns `(cleaned, action)`, `action ∈ {allow, redact, discard}`; `discard` rejects the write, `redact` caps confidence at 0.4
-- **Spark independent lifecycle**: maturity = `seed → sprouting → incubating`, exits only on `promote` / `drop`; not included in confidence ranking, not archived by low score
-- **Atomic dual-vector write**: chunk + content_vec + trigger_vec written in a single `BEGIN IMMEDIATE` transaction; any failure rolls back
-- **Auto schema migration**: applies incremental migrations on startup; runs `schema.sql` directly on an empty database
-
----
-
-## Compatibility
-
-- Core runtime: Rust 1.70+ (bundled SQLite, zero external runtime dependencies)
-- Python SDK: Python 3.8+ (subprocess, zero extra dependencies)
-- TypeScript SDK: Node.js 18+ (child_process, zero extra dependencies)
-- Daemon: Linux only (requires `/proc` and `fork`; returns a clear error on non-Linux platforms)
-- Default database: `~/.innate/data/personal.db` (overridable via `INNATE_DB` env var or `--db` flag)
-- Platforms: Linux / macOS / Windows; Daemon is Linux only
+- **一核三层**: 记忆 Memory(自成长知识)· 技能 Skill(可安装程序)· 直觉 Intuition(`innate_appraise` critic)——同建于一个程序性知识内核之上
+- **直觉 critic (`appraise`)**: 同步、无 LLM 的「有没有底」评估，返回 `{valence, strength, tier, flagged_points}` 且**从不给答案**——价值域上对 lethal trifecta 安全
+- **双向量召回**: `content_vec` + `trigger_vec`, 按 `w_content / w_trigger / w_confidence / w_activation` 融合排序(末项为 ACT-R 近因×频次信号)
+- **置信度驱动**: EMA 更新 + 时效加权 (显式信号) + 时间衰减, 知识越用越准
+- **零 native 扩展**: 向量存为 f32 BLOB, Rust 原生余弦相似度, 无 sqlite-vec / C 扩展依赖
+- **MCP 原生集成**: `innate mcp` 暴露 15 个工具, Claude Code / Claude Desktop 开箱可用
+- **hard dep fail-closed**: 召回时若 hard 依赖不可用/被归档, 直接丢弃整个 seed, **绝不返回半截闭包**
+- **零主动行为**: SDK 永不自发行动, 所有成长由外部触发 (evolve trigger: manual / scheduled / threshold)
+- **sanitize 三态合同**: 钩子返回 `(cleaned, action)`, `action ∈ {allow, redact, discard}`; `discard` 拒绝写入, `redact` 落点 confidence 上限 0.4
+- **spark 独立生命周期**: maturity = `seed → sprouting → incubating`, 仅 `promote` / `drop` 时离场; 不参与 confidence 排序, 不被低分归档
+- **原子双向量写入**: chunk + content_vec + trigger_vec 同 `BEGIN IMMEDIATE` 事务写入, 任一失败回滚
+- **schema 自动迁移**: 启动时自动 apply 增量迁移, 库空直接 exec schema.sql
 
 ---
 
-## Documentation
+## 兼容性
 
-- [`docs/Innate-设计文档-v0.1.9.md`](docs/Innate-设计文档-v0.1.9.md) — Complete system design (authoritative baseline, latest; Chinese)
-- [`docs/Innate-设计文档-v0.1.8.md`](docs/Innate-设计文档-v0.1.8.md) — Prior baseline with full per-schema (4.8→4.14) change history (Chinese)
-- [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent skill metadata and usage protocol
+- 核心运行时: Rust 1.70+ (bundled SQLite, 零外部运行时依赖)
+- Python SDK: Python 3.8+ (subprocess, 零额外依赖)
+- TypeScript SDK: Node.js 18+ (child_process, 零额外依赖)
+- Daemon: Linux only (依赖 `/proc` 与 `fork`；非 Linux 平台返回明确错误)
+- 数据库默认位置: `~/.innate/data/personal.db` (可通过 `INNATE_DB` 环境变量或 `--db` 覆盖)
+- 平台: Linux / macOS / Windows；Daemon 仅 Linux
 
 ---
 
-## Development
+## 文档
+
+- [`docs/Innate-设计文档-v0.1.9.md`](docs/Innate-设计文档-v0.1.9.md) — 完整系统设计（最新权威基线）
+- [`docs/Innate-设计文档-v0.1.8.md`](docs/Innate-设计文档-v0.1.8.md) — 上一基线，含 4.8→4.14 逐版 schema 变更史
+- [`skills/innate-memory/SKILL.md`](skills/innate-memory/SKILL.md) — Agent Skill 元数据与使用规范
+
+---
+
+## 开发
 
 ```bash
-# Build
+# 编译
 cd core && cargo build --release
 
-# Run all tests
+# 运行全量测试
 cd core && cargo test
 
-# Run a specific test
+# 运行单个测试
 cd core && cargo test test_add_and_recall
 
-# Inspect the default knowledge base
+# 检视默认知识库
 innate inspect
 ```
 
-Tests (104 total, all passing) are grouped by responsibility under `core/src/tests/`: `basics` · `feedback` · `governance` · `distillation` · `distill_failures` · `evolve_retries` · `reliability` · `restoration`.
+测试共 155 个，全部通过，按职责分组于 `core/src/tests/`: `basics` · `feedback` · `governance` · `distillation` · `distill_failures` · `evolve_retries` · `reliability` · `restoration` · `intuition` · `eval`(召回质量基准)· `resilient_distill`(确定性兜底)。
 
 ---
 
