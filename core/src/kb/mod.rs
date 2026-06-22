@@ -21,7 +21,8 @@ use crate::refine::{
 };
 use crate::storage::{ChunkRow, EpisodicLogRow, Storage};
 use crate::utils::{
-    content_hash, estimate_tokens, gen_uuid, pack_embedding, utc_now_iso, SanitizeAction,
+    agent_source, content_hash, estimate_tokens, gen_uuid, pack_embedding, utc_now_iso,
+    SanitizeAction,
 };
 
 mod appraise;

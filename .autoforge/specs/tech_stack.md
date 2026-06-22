@@ -2,13 +2,13 @@
 
 ## Rust 核心
 
-核心使用 Rust edition 2021 编写，包名 innate，当前版本 0.1.15；release profile 启用 LTO、codegen-units=1、strip=true 以优化二进制体积。
+核心使用 Rust edition 2021 编写，包名 innate，当前版本 0.1.16；release profile 启用 LTO、codegen-units=1、strip=true 以优化二进制体积。
 
 ---
 
 ## SQLite 存储
 
-使用 rusqlite 0.32（bundled feature）作为唯一持久化引擎，schema 版本 4.16；向量相似度由 Rust 代码直接计算，不依赖 sqlite-vec 扩展。
+使用 rusqlite 0.32（bundled feature）作为唯一持久化引擎，schema 版本 4.17；向量相似度由 Rust 代码直接计算，不依赖 sqlite-vec 扩展。
 
 ---
 

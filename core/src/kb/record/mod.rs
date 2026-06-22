@@ -141,6 +141,7 @@ impl KnowledgeBase {
                         output_summary: output_summary.map(str::to_string),
                         outcome: outcome.map(str::to_string),
                         event_source: source.to_string(),
+                        agent: agent_source(),
                         task_state: if matches!(outcome, Some("ok") | Some("fail")) {
                             "completed".to_string()
                         } else {

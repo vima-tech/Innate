@@ -19,7 +19,7 @@ mod meta;
 mod raw;
 mod traces;
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.16";
+const EXPECTED_SCHEMA_VERSION: &str = "4.17";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("../schema.sql");
@@ -185,6 +185,7 @@ pub struct ChunkRow {
     pub token_count: Option<i64>,
     pub origin: String,
     pub source: Option<String>,
+    pub agent: Option<String>,
     pub maturity: Option<String>,
     pub related_ids: Option<String>,
     pub protected: i64,
@@ -223,6 +224,7 @@ pub struct EpisodicLogRow {
     pub output_summary: Option<String>,
     pub outcome: Option<String>,
     pub event_source: String,
+    pub agent: Option<String>,
     pub task_state: String,
     pub completed_at: Option<String>,
     pub usage_state: String,

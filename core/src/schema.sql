@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.16 (Rust edition)
+-- Innate knowledge layer schema v4.17 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.16');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.17');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 
     origin        TEXT NOT NULL CHECK(origin IN ('installed','distilled','captured','spark')),
     source        TEXT,
+    agent         TEXT,
     maturity      TEXT,
     related_ids   TEXT,
     protected     INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +160,7 @@ CREATE TABLE IF NOT EXISTS episodic_log (
     outcome         TEXT,
     event_source TEXT NOT NULL DEFAULT 'sdk'
                  CHECK(event_source IN ('mcp','sdk','cli','hook','daemon','augmented')),
+    agent        TEXT,
     task_state TEXT NOT NULL DEFAULT 'recalled'
         CHECK(task_state IN ('recalled','running','completed','abandoned','timed_out')),
     completed_at TEXT,

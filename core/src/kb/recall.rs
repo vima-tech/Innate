@@ -813,6 +813,7 @@ impl KnowledgeBase {
                 query: Some(query.to_string()),
                 recall_snapshot: Some(snapshot.to_string()),
                 event_source: source.to_string(),
+                agent: agent_source(),
                 task_state: "recalled".to_string(),
                 usage_state: usage_state.to_string(),
                 context_key: Some(context_key.to_string()),

@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::actr_activation;
 use crate::errors::Result;
 use crate::storage::EpisodicLogRow;
-use crate::utils::{gen_uuid, utc_now_iso, SanitizeAction};
+use crate::utils::{agent_source, gen_uuid, utc_now_iso, SanitizeAction};
 
 use super::{anti_trigger_hit, validate_source, KnowledgeBase, Situation, PENDING_RECALL_PENALTY};
 
@@ -512,6 +512,7 @@ impl KnowledgeBase {
                 query: Some(situation_text.chars().take(500).collect()),
                 recall_snapshot: Some(snapshot.to_string()),
                 event_source: source.to_string(),
+                agent: agent_source(),
                 task_state: "recalled".to_string(),
                 usage_state: "unknown".to_string(),
                 context_key: Some(context_key.to_string()),

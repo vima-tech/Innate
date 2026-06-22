@@ -192,8 +192,8 @@ impl Storage {
              (id, trace_id, lib_id, ts, query, recall_snapshot, output,
               output_summary, outcome, event_source, task_state, completed_at,
               usage_state, used_ids, used_attribution, used_complete, context_key, nomination, priority,
-              distill_state, distill_note, distill_attempts, distill_last_failed_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,0,NULL)",
+              distill_state, distill_note, distill_attempts, distill_last_failed_at, agent)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,0,NULL,?22)",
             params![
                 log.id,
                 log.trace_id,
@@ -215,7 +215,8 @@ impl Storage {
                 log.nomination,
                 log.priority,
                 log.distill_state,
-                log.distill_note
+                log.distill_note,
+                log.agent
             ],
         )?;
         Ok(())

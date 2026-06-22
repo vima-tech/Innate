@@ -52,6 +52,49 @@ fn min_score_gate_drops_subthreshold_candidates() {
 }
 
 #[test]
+fn agent_source_dimension_is_captured_and_orthogonal_to_channel() {
+    // The agent product identity (INNATE_AGENT) lands on both the chunk and the
+    // recall episodic_log, independently of the access channel (event_source).
+    let (kb, _f) = tmp_kb();
+    std::env::set_var("INNATE_AGENT", "claude-code");
+
+    let id = kb
+        .add(
+            "Use cargo build --release to compile innate",
+            "note",
+            Some("build the binary"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    let chunk = kb.storage.get_chunk(&id).unwrap().unwrap();
+    assert_eq!(chunk["agent"].as_str(), Some("claude-code"));
+
+    let res = kb
+        .recall(RecallParams {
+            query: "build the binary",
+            budget: 6000,
+            trace: true,
+            source: "cli",
+            expand_deps: "false",
+            refine_mode: "off",
+            ..Default::default()
+        })
+        .unwrap();
+    let log = kb
+        .storage
+        .get_episodic_log(&res.trace_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(log["agent"].as_str(), Some("claude-code"));
+    // Channel and agent are distinct dimensions.
+    assert_eq!(log["event_source"].as_str(), Some("cli"));
+
+    std::env::remove_var("INNATE_AGENT");
+}
+
+#[test]
 fn add_and_recall() {
     let (kb, _f) = tmp_kb();
     let id = kb

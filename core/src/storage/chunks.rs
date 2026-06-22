@@ -11,11 +11,11 @@ impl Storage {
                 distill_provider, distill_model, distill_prompt_version, parent_id,
                 selected_count, used_count, used_success_count,
                 success_trace_ids_count, last_success_at, last_agg_ts,
-                embed_version, created_at, updated_at, last_used_at
+                embed_version, created_at, updated_at, last_used_at, agent
             ) VALUES (
                 ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,
                 ?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,
-                ?26,?27,?28,?29,?30,?31,?32,?33,?34,?35
+                ?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36
             )",
             params![
                 c.id,
@@ -52,7 +52,8 @@ impl Storage {
                 c.embed_version,
                 c.created_at,
                 c.updated_at,
-                c.last_used_at
+                c.last_used_at,
+                c.agent
             ],
         )?;
         Ok(())

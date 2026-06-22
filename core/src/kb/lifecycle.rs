@@ -171,6 +171,7 @@ impl KnowledgeBase {
             token_count: Some(tokens),
             origin: origin.to_string(),
             source: Some(source.to_string()),
+            agent: agent_source(),
             protected: prot,
             state: state.to_string(),
             state_reason: Some(final_state_reason),
@@ -317,6 +318,7 @@ impl KnowledgeBase {
             content_hash: h,
             token_count: Some(tokens),
             origin: "spark".to_string(),
+            agent: agent_source(),
             maturity: Some("seed".to_string()),
             related_ids: if related.is_empty() {
                 None
@@ -482,6 +484,12 @@ impl KnowledgeBase {
             token_count: Some(estimate_tokens(&content) as i64),
             origin: origin.to_string(),
             source: Some("manual".to_string()),
+            // 提升时继承 spark 创建时的 agent;旧 spark 缺列则回退当前 agent。
+            agent: spark
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(agent_source),
             protected: prot,
             state: state.to_string(),
             state_reason: Some(state_reason.to_string()),

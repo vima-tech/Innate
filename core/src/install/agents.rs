@@ -127,8 +127,13 @@ pub(super) fn configure_claude(agent: &Agent, binary: &Path, auto_allow: bool) -
             .and_then(Value::as_array)
             .map(|arr| arr.iter().any(|v| v.as_str() == Some("mcp__innate__*")))
             .unwrap_or(false);
+    // Backfill the agent-source env on re-run even when command/permissions match.
+    let env_ok = settings
+        .pointer("/mcpServers/innate/env/INNATE_AGENT")
+        .and_then(Value::as_str)
+        == Some("claude-code");
 
-    if existing_cmd == binary_str && already_allowed {
+    if existing_cmd == binary_str && already_allowed && env_ok {
         return ConfigStatus::Unchanged(path.clone());
     }
 
@@ -149,7 +154,10 @@ pub(super) fn configure_claude(agent: &Agent, binary: &Path, auto_allow: bool) -
         json!({
             "type": "stdio",
             "command": binary_str,
-            "args": ["mcp"]
+            "args": ["mcp"],
+            // Agent-source dimension: tags recalled/recorded/distilled knowledge
+            // with the driving agent product (innate utils::agent_source).
+            "env": {"INNATE_AGENT": "claude-code"}
         }),
     );
 
@@ -199,14 +207,17 @@ pub(super) fn configure_codex(agent: &Agent, binary: &Path, auto_allow: bool) ->
     // Check if already configured
     let already = existing.contains("[mcp_servers.innate]");
     if already {
-        // Check if command matches
-        if existing.contains(&format!("command = \"{binary_str}\"")) {
+        // Check if command matches and the agent-source env is already present.
+        if existing.contains(&format!("command = \"{binary_str}\""))
+            && existing.contains("INNATE_AGENT")
+        {
             return ConfigStatus::Unchanged(path.clone());
         }
     }
 
-    let mut addition =
-        format!("\n[mcp_servers.innate]\ncommand = \"{binary_str}\"\nargs = [\"mcp\"]\n");
+    let mut addition = format!(
+        "\n[mcp_servers.innate]\ncommand = \"{binary_str}\"\nargs = [\"mcp\"]\nenv = {{ INNATE_AGENT = \"codex\" }}\n"
+    );
 
     if auto_allow {
         for tool in INNATE_TOOLS {
@@ -250,14 +261,18 @@ pub(super) fn configure_opencode(agent: &Agent, binary: &Path, _auto_allow: bool
 
     let binary_str = binary.to_string_lossy().to_string();
 
-    // Check if already configured
+    // Check if already configured (command matches AND agent-source env present).
     if let Some(existing_cmd) = config.pointer("/mcp/innate/command") {
-        let already = existing_cmd
+        let cmd_ok = existing_cmd
             .as_array()
             .and_then(|a| a.first())
             .and_then(Value::as_str)
             == Some(&binary_str);
-        if already {
+        let env_ok = config
+            .pointer("/mcp/innate/environment/INNATE_AGENT")
+            .and_then(Value::as_str)
+            == Some("opencode");
+        if cmd_ok && env_ok {
             return ConfigStatus::Unchanged(path.clone());
         }
     }
@@ -273,7 +288,9 @@ pub(super) fn configure_opencode(agent: &Agent, binary: &Path, _auto_allow: bool
         json!({
             "type": "local",
             "command": [binary_str, "mcp"],
-            "enabled": true
+            "enabled": true,
+            // Agent-source dimension (innate utils::agent_source).
+            "environment": {"INNATE_AGENT": "opencode"}
         }),
     );
 

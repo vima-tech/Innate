@@ -11,6 +11,24 @@ pub fn gen_uuid() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// Resolve the agent-product identity (which AI agent tool drives this binary —
+/// e.g. `claude-code`, `codex`, `opencode`, `gemini-cli`) from the `INNATE_AGENT`
+/// env var. The caller (MCP config / hook / shell) injects it; the binary cannot
+/// know it otherwise. Returns `None` when unset/blank so the `agent` column stays
+/// NULL (backward compatible). This is orthogonal to the access channel recorded
+/// in `usage_trace.source` / `episodic_log.event_source` (mcp/cli/hook/...).
+/// Trimmed and length-capped; intentionally not enum-constrained.
+pub fn agent_source() -> Option<String> {
+    std::env::var("INNATE_AGENT").ok().and_then(|v| {
+        let s: String = v.trim().chars().take(64).collect();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    })
+}
+
 pub fn content_hash(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());

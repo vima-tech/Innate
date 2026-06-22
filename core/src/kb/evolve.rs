@@ -353,6 +353,12 @@ impl KnowledgeBase {
                     content_hash: h,
                     token_count: Some(tokens),
                     origin: "distilled".to_string(),
+                    // 蒸馏 chunk 继承源 episodic_log 的 agent(经验来自哪个 agent),
+                    // 而非运行 evolve 的进程(可能是 daemon/cron)。
+                    agent: log
+                        .get("agent")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     distilled_from: Some(dc.source_log_id),
                     distill_provider,
                     distill_model: provenance.model.clone(),

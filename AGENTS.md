@@ -121,12 +121,12 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
 | `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |
 | `upgrade.rs` | `innate upgrade` — GitHub Releases self-update + SHA-256 verify + atomic swap |
-| `migrate.rs` | Schema migration chain 4.0 → 4.16, each step atomic |
+| `migrate.rs` | Schema migration chain 4.0 → 4.17, each step atomic |
 | `hook.rs` | `innate hook stop` — Claude Code Stop payload → session.log events |
 | `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
 | `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `sanitize()`, cosine similarity |
 | `settings.rs` | `settings.json` parsing (LLM / Embedding / Daemon / Backup) |
-| `schema.sql` | Embedded schema (v4.16); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v4.17); `include_str!` at compile time |
 
 ### Filesystem layout (`~/.innate/`)
 
@@ -173,6 +173,8 @@ Two opt-in levers, both **off by default** so the no-LLM hot path is unchanged:
 Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k N]` (reports P@1 / Recall@k / MRR / nDCG@k using the configured provider). Template: `scripts/recall_eval_template.jsonl`. This is distinct from `cargo test eval`, which validates the ranking math on dummy-embedding fixtures.
 
 ## Non-Obvious Implementation Constraints
+
+**Agent-source dimension (`agent` column, schema 4.17)** — `chunks.agent` and `episodic_log.agent` record *which agent product* drove the call (`claude-code` / `codex` / `opencode` / …). This is **orthogonal** to the access channel in `usage_trace.source` / `episodic_log.event_source` (`mcp/cli/hook/daemon/...`): the channel says *which entry point*, `agent` says *which agent*. Source of truth is `utils::agent_source()`, which reads the `INNATE_AGENT` env var (injected by `innate install` into each agent's MCP config; `None`/NULL when unset — backward compatible, never enum-constrained). Distilled chunks **inherit** `agent` from their source `episodic_log` (not the process running `evolve`, which may be a daemon/cron); promoted sparks inherit from the spark. The Stop/hook capture channel is not yet env-tagged (records land with NULL agent) — follow-up.
 
 **Time functions** — `utc_now_iso()` in `utils.rs` is the **only** time source. Format: `YYYY-MM-DDTHH:MM:SS.mmmZ` (fixed 3-digit ms). Never use system time directly. All SQL cutoff comparisons rely on lexicographic ordering of this format.
 
