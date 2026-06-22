@@ -159,11 +159,7 @@ impl Storage {
         sql.push_str(" ORDER BY created_at DESC LIMIT :limit OFFSET :offset");
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let names: Vec<String> = stmt
-            .column_names()
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let names: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
         let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
         if let Some(s) = state.as_ref() {
             params.push((":state", s));
@@ -185,7 +181,9 @@ impl Storage {
     }
 
     pub fn get_chunk(&self, id: &str) -> Result<Option<Value>> {
-        let mut stmt = self.conn.prepare_cached("SELECT * FROM chunks WHERE id=?")?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT * FROM chunks WHERE id=?")?;
         let row = stmt.query_row([id], row_to_json);
         match row {
             Ok(v) => Ok(Some(v)),

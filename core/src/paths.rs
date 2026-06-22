@@ -108,9 +108,15 @@ pub fn ensure_layout_at(home: &std::path::Path) {
         (home.join("personal.db"), data.join("personal.db")),
         (home.join("personal.db-shm"), data.join("personal.db-shm")),
         (home.join("personal.db-wal"), data.join("personal.db-wal")),
-        (home.join("daemon_state.sqlite"), data.join("daemon_state.sqlite")),
+        (
+            home.join("daemon_state.sqlite"),
+            data.join("daemon_state.sqlite"),
+        ),
         (home.join("daemon.pid"), data.join("daemon.pid")),
-        (home.join("backup_state.json"), data.join("backup_state.json")),
+        (
+            home.join("backup_state.json"),
+            data.join("backup_state.json"),
+        ),
         (home.join("daemon.log"), logs.join("daemon.log")),
         (home.join("mcp.log"), logs.join("mcp.log")),
     ];

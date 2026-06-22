@@ -28,6 +28,7 @@ fn min_score_gate_drops_subthreshold_candidates() {
         allow_trim: false,
         refine_mode: "off",
         min_score: None,
+        session_only: false,
     };
 
     // No gate: the chunk is retrievable.
@@ -41,6 +42,7 @@ fn min_score_gate_drops_subthreshold_candidates() {
     let gated = kb
         .recall(RecallParams {
             min_score: Some(2.0),
+            session_only: false,
             ..base
         })
         .unwrap();
@@ -75,6 +77,7 @@ fn add_and_recall() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     assert!(!result.trace_id.is_empty());
@@ -111,6 +114,7 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     assert!(first
@@ -142,6 +146,7 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     assert!(
@@ -323,6 +328,7 @@ fn mcp_is_a_valid_event_source() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     kb.record(RecordParams {
@@ -367,6 +373,7 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     let before = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
@@ -404,6 +411,7 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     let explicitly_unused: Vec<String> = vec![];
@@ -455,6 +463,7 @@ fn feedback_is_auditable_and_builds_contextual_governance_evidence() {
                 allow_trim: false,
                 refine_mode: "off",
                 min_score: None,
+                session_only: false,
             })
             .unwrap();
         let used = vec![chunk_id.clone()];
@@ -477,6 +486,7 @@ fn feedback_is_auditable_and_builds_contextual_governance_evidence() {
             priority: 0,
             task_state: None,
             source: "sdk",
+            ..Default::default()
         })
         .unwrap();
     }
@@ -615,6 +625,7 @@ fn refine_runs_only_in_adapt_mode() {
         allow_trim: false,
         refine_mode: "off",
         min_score: None,
+        session_only: false,
     })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -630,6 +641,7 @@ fn refine_runs_only_in_adapt_mode() {
         allow_trim: false,
         refine_mode: "adapt",
         min_score: None,
+        session_only: false,
     })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -641,7 +653,10 @@ fn actr_activation_zero_for_unused_chunks() {
     // Never-used knowledge contributes nothing → recall stays zero-regression
     // for freshly-added chunks (used_count == 0 or no last_used_at timestamp).
     let now = "2026-06-19T00:00:00.000Z";
-    assert_eq!(actr_activation(0, Some("2026-06-18T00:00:00.000Z"), now), 0.0);
+    assert_eq!(
+        actr_activation(0, Some("2026-06-18T00:00:00.000Z"), now),
+        0.0
+    );
     assert_eq!(actr_activation(5, None, now), 0.0);
 }
 
@@ -651,13 +666,19 @@ fn actr_activation_recency_and_frequency_monotonic() {
     let now = "2026-06-19T00:00:00.000Z";
     let recent = actr_activation(3, Some("2026-06-18T00:00:00.000Z"), now); // 1 day ago
     let stale = actr_activation(3, Some("2026-03-19T00:00:00.000Z"), now); // ~3 months ago
-    // More recent use ⇒ higher activation at equal frequency.
-    assert!(recent > stale, "recent {recent} should exceed stale {stale}");
+                                                                           // More recent use ⇒ higher activation at equal frequency.
+    assert!(
+        recent > stale,
+        "recent {recent} should exceed stale {stale}"
+    );
 
     let used_once = actr_activation(1, Some("2026-06-18T00:00:00.000Z"), now);
     let used_many = actr_activation(20, Some("2026-06-18T00:00:00.000Z"), now);
     // More uses ⇒ higher activation at equal recency.
-    assert!(used_many > used_once, "many {used_many} should exceed once {used_once}");
+    assert!(
+        used_many > used_once,
+        "many {used_many} should exceed once {used_once}"
+    );
 }
 
 #[test]
@@ -669,5 +690,8 @@ fn actr_activation_is_bounded_unit_interval() {
     assert!(hot > 0.0 && hot < 1.0, "activation {hot} must be in (0,1)");
     // Single ancient use: still strictly above 0.0.
     let cold = actr_activation(1, Some("2000-01-01T00:00:00.000Z"), now);
-    assert!(cold > 0.0 && cold < 1.0, "activation {cold} must be in (0,1)");
+    assert!(
+        cold > 0.0 && cold < 1.0,
+        "activation {cold} must be in (0,1)"
+    );
 }

@@ -146,6 +146,7 @@ fn completed_trace_without_outcome_reaches_a_terminal_distill_state() {
         priority: 0,
         task_state: Some("completed"),
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
 
@@ -180,6 +181,7 @@ fn usage_annotation_rate_excludes_non_completed_traces() {
         priority: 0,
         task_state: Some("running"),
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
     kb.record(RecordParams {
@@ -260,7 +262,7 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
 
     assert_eq!(
         crate::migrate::run_migrations(file.path()).unwrap(),
-        vec!["4.11→4.12", "4.12→4.13", "4.13→4.14"]
+        vec!["4.11→4.12", "4.12→4.13", "4.13→4.14", "4.14→4.15"]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     let values = conn
@@ -332,7 +334,7 @@ fn migration_4_14_repairs_existing_4_13_baselines_and_cost_history() {
 
     assert_eq!(
         crate::migrate::run_migrations(file.path()).unwrap(),
-        vec!["4.13→4.14"]
+        vec!["4.13→4.14", "4.14→4.15"]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     let values = conn

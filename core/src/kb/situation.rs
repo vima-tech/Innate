@@ -143,9 +143,7 @@ impl<'a> Situation<'a> {
         // Typed error name: an identifier ending in Error / Exception.
         if let Some(name) = err
             .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .find(|tok| {
-                tok.len() > 3 && (tok.ends_with("Error") || tok.ends_with("Exception"))
-            })
+            .find(|tok| tok.len() > 3 && (tok.ends_with("Error") || tok.ends_with("Exception")))
         {
             return name.to_string();
         }
@@ -188,7 +186,10 @@ fn find_rust_error_code(err: &str) -> Option<String> {
     let bytes = err.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if (bytes[i] == b'E' || bytes[i] == b'e') && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+        if (bytes[i] == b'E' || bytes[i] == b'e')
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
             let start = i;
             let mut j = i + 1;
             while j < bytes.len() && bytes[j].is_ascii_digit() {
@@ -234,7 +235,10 @@ mod tests {
         };
         let keys = "stage,error_class,file_type";
         assert_eq!(a.context_key(keys), b.context_key(keys));
-        assert_eq!(a.coarse_signature(keys), "stage=merge|err=TypeError|file=tsx");
+        assert_eq!(
+            a.coarse_signature(keys),
+            "stage=merge|err=TypeError|file=tsx"
+        );
     }
 
     #[test]

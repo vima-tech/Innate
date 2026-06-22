@@ -25,6 +25,7 @@ fn pending_chunks_receive_a_recall_penalty() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     let active_score = active
@@ -51,6 +52,7 @@ fn pending_chunks_receive_a_recall_penalty() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     let pending_score = pending
@@ -226,6 +228,7 @@ fn anonymous_feedback_does_not_create_governance_consensus() {
             priority: 0,
             task_state: None,
             source: "sdk",
+            ..Default::default()
         })
         .unwrap();
     }
@@ -309,6 +312,7 @@ fn record_rejects_retrieved_but_unselected_attribution() {
             priority: 0,
             task_state: None,
             source: "sdk",
+            ..Default::default()
         })
         .unwrap_err();
     assert!(matches!(error, InnateError::InvalidState(_)));
@@ -416,6 +420,7 @@ fn record_rejects_conflicting_feedback_for_same_chunk() {
             priority: 0,
             task_state: None,
             source: "sdk",
+            ..Default::default()
         })
         .unwrap_err();
     assert!(matches!(error, InnateError::InvalidState(_)));
@@ -485,6 +490,7 @@ fn complete_usage_without_outcome_records_selected_unused() {
         priority: 0,
         task_state: Some("running"),
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
 

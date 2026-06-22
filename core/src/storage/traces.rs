@@ -21,9 +21,19 @@ impl Storage {
              (trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts)
              VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         )?;
-        Ok(stmt.execute(
-            params![trace_id, chunk_id, event, strength, similarity, refine_mode, tokens, rank, attribution, source, ts],
-        )?)
+        Ok(stmt.execute(params![
+            trace_id,
+            chunk_id,
+            event,
+            strength,
+            similarity,
+            refine_mode,
+            tokens,
+            rank,
+            attribution,
+            source,
+            ts
+        ])?)
     }
 
     pub fn replace_used_trace(
@@ -317,14 +327,16 @@ impl Storage {
         reason: &str,
         context_key: Option<&str>,
         ts: &str,
+        provenance: &str,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO confidence_evidence
-             (id, trace_id, chunk_id, kind, target, alpha, reason, context_key, ts)
-             VALUES (?,?,?,?,?,?,?,?,?)
+             (id, trace_id, chunk_id, kind, target, alpha, reason, context_key, ts, provenance)
+             VALUES (?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(trace_id, chunk_id, kind) WHERE trace_id IS NOT NULL
              DO UPDATE SET target=excluded.target, alpha=excluded.alpha,
-                           reason=excluded.reason, context_key=excluded.context_key",
+                           reason=excluded.reason, context_key=excluded.context_key,
+                           provenance=excluded.provenance",
             params![
                 id,
                 trace_id,
@@ -334,9 +346,199 @@ impl Storage {
                 alpha,
                 reason,
                 context_key,
-                ts
+                ts,
+                provenance
             ],
         )?;
+        Ok(())
+    }
+
+    /// 方案 C / 门3:某 chunk 实际观测到的结果数(只数 provenance='observed' 的
+    /// outcome 证据)。供 appraise 门3「证据充分性」判断邻居是否有观测历史。
+    pub fn observed_outcome_count(&self, chunk_id: &str) -> Result<i64> {
+        let n = self.conn.query_row(
+            "SELECT COUNT(*) FROM confidence_evidence
+             WHERE chunk_id=? AND provenance='observed'
+               AND kind IN ('outcome_ok','outcome_fail')",
+            params![chunk_id],
+            |r| r.get::<_, i64>(0),
+        )?;
+        Ok(n)
+    }
+
+    /// 方案 F 门2:返回在给定 context_key(coarse signature 桶)下**有校准历史**的
+    /// chunk 集合。rich 嵌入说「近」的邻居里,有多少在 signature 通道也「近」(有该
+    /// 情境类的观测),低 = rich 嵌入在撒谎(疑似假共振)。
+    pub fn context_stat_present_batch(
+        &self,
+        chunk_ids: &[&str],
+        context_key: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut set = std::collections::HashSet::new();
+        if chunk_ids.is_empty() {
+            return Ok(set);
+        }
+        let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT chunk_id FROM chunk_context_stats
+             WHERE context_key=? AND chunk_id IN ({placeholders})"
+        );
+        let mut params: Vec<&str> = Vec::with_capacity(chunk_ids.len() + 1);
+        params.push(context_key);
+        params.extend_from_slice(chunk_ids);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
+        for row in rows {
+            set.insert(row?);
+        }
+        Ok(set)
+    }
+
+    /// 方案 B:写一条 verdict_log(emit 时)。表态填 valence/conf/strength/tier,
+    /// 弃权填 abstain_reason(其余 NULL)。outcome 列留空,等 record 回填。
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_verdict_log(
+        &self,
+        verdict_id: &str,
+        trace_id: &str,
+        situation_sig: &str,
+        emitted_valence: Option<&str>,
+        emitted_conf: Option<f64>,
+        emitted_strength: f64,
+        emitted_tier: Option<&str>,
+        abstain_reason: Option<&str>,
+        emitted_at: &str,
+    ) -> Result<()> {
+        // verdict_id is a freshly minted UUID, so there is exactly one row per
+        // appraise — a plain INSERT documents that invariant (no silent OR IGNORE).
+        self.conn.execute(
+            "INSERT INTO verdict_log
+             (verdict_id, trace_id, situation_sig, emitted_valence, emitted_conf,
+              emitted_strength, emitted_tier, abstain_reason, emitted_at)
+             VALUES (?,?,?,?,?,?,?,?,?)",
+            params![
+                verdict_id,
+                trace_id,
+                situation_sig,
+                emitted_valence,
+                emitted_conf,
+                emitted_strength,
+                emitted_tier,
+                abstain_reason,
+                emitted_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 方案 B/H:用 record 的实际结果回填 verdict_log。`provenance` 区分
+    /// 'observed'(真实采取动作并观测到结果,计入校准)与
+    /// 'counterfactual_censored'(因警告回避了动作,**不计入校准**,见原则 3)。
+    pub fn backfill_verdict_outcome(
+        &self,
+        trace_id: &str,
+        observed_outcome: f64,
+        provenance: &str,
+        observed_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE verdict_log
+                SET observed_outcome=?, outcome_observed_at=?, outcome_provenance=?
+              WHERE trace_id=? AND outcome_observed_at IS NULL",
+            params![observed_outcome, observed_at, provenance, trace_id],
+        )?;
+        Ok(())
+    }
+
+    /// 方案 E:加载校准映射(分桶查表)。返回 (claimed_lo, claimed_hi, observed_rate)。
+    pub fn load_calibration_map(&self) -> Result<Vec<(f64, f64, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT claimed_lo, claimed_hi, observed_rate FROM calibration_map ORDER BY bucket",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 方案 E/B:取所有「observed」回填的 (emitted_strength, emitted_conf, hit) 三元组,
+    /// 供 curate 重算校准映射(按 **strength** 分桶,因为 emit 时 `calibrate_confidence`
+    /// 正是用原始 strength 查表)与 inspect 算 ECE(按 **conf** 分桶,衡量声称置信度的
+    /// 真实兑现率)。两者域不同,故同时返回,调用方各取所需。
+    ///
+    /// `hit` = verdict 的关切是否兑现,只对**方向性** verdict 有良定义:
+    ///   affirm → 命中=结果 ok(observed_outcome<0);caution → 命中=结果 fail。
+    /// neutral(无信号)与 mixed(方向歧义)不参与校准 —— 否则把「没表态」误记成
+    /// 「预测失败」,污染校准映射与 ECE。
+    pub fn verdict_calibration_samples(&self) -> Result<Vec<(f64, f64, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT emitted_strength, emitted_conf,
+                    CASE WHEN emitted_valence='affirm'
+                         THEN (CASE WHEN observed_outcome < 0 THEN 1.0 ELSE 0.0 END)
+                         ELSE (CASE WHEN observed_outcome > 0 THEN 1.0 ELSE 0.0 END) END
+               FROM verdict_log
+              WHERE outcome_provenance='observed'
+                AND emitted_conf IS NOT NULL AND emitted_strength IS NOT NULL
+                AND observed_outcome IS NOT NULL
+                AND emitted_valence IN ('affirm','caution')",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 方案 B:verdict_log 概览 (total, abstained, with_observed_outcome)。供 inspect 仪表盘。
+    pub fn verdict_log_overview(&self) -> Result<(i64, i64, i64)> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM verdict_log", [], |r| r.get(0))?;
+        let abstained: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM verdict_log WHERE abstain_reason IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let observed: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM verdict_log WHERE outcome_provenance='observed'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((total, abstained, observed))
+    }
+
+    /// 方案 E:重写 calibration_map(curate 调用)。`buckets` = (lo, hi, rate, n)。
+    pub fn replace_calibration_map(
+        &self,
+        buckets: &[(f64, f64, f64, i64)],
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute("DELETE FROM calibration_map", [])?;
+        for (i, (lo, hi, rate, n)) in buckets.iter().enumerate() {
+            self.conn.execute(
+                "INSERT INTO calibration_map
+                 (bucket, claimed_lo, claimed_hi, observed_rate, n, updated_at)
+                 VALUES (?,?,?,?,?,?)",
+                params![i as i64, lo, hi, rate, n, now],
+            )?;
+        }
         Ok(())
     }
 
@@ -371,9 +573,10 @@ impl Storage {
     }
 
     pub fn confidence_evidence_for_chunk(&self, chunk_id: &str) -> Result<Vec<Value>> {
+        // 方案 C:只让观测结果驱动置信度;verdict_derived 证据留痕但不参与重算。
         self.query_json(
             "SELECT target, alpha, reason, ts, id
-             FROM confidence_evidence WHERE chunk_id=?
+             FROM confidence_evidence WHERE chunk_id=? AND provenance='observed'
              ORDER BY ts ASC,
                       CASE kind
                         WHEN 'outcome_ok' THEN 1
@@ -478,7 +681,13 @@ impl Storage {
         Ok(())
     }
 
-    pub fn context_score(&self, chunk_id: &str, context_key: &str) -> Result<f64> {
+    pub fn context_score(
+        &self,
+        chunk_id: &str,
+        context_key: &str,
+        prior_m: f64,
+        base_rate: f64,
+    ) -> Result<f64> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT success_count, failure_count, positive_feedback, negative_feedback
              FROM chunk_context_stats WHERE chunk_id=? AND context_key=?",
@@ -496,7 +705,9 @@ impl Storage {
         let Some((success, failure, positive, negative)) = row else {
             return Ok(0.0);
         };
-        Ok(context_score_from_counts(success, failure, positive, negative))
+        Ok(context_score_from_counts(
+            success, failure, positive, negative, prior_m, base_rate,
+        ))
     }
 
     /// Batch variant of `context_score`: one query for many chunk ids under a
@@ -505,6 +716,8 @@ impl Storage {
         &self,
         chunk_ids: &[&str],
         context_key: &str,
+        prior_m: f64,
+        base_rate: f64,
     ) -> Result<HashMap<String, f64>> {
         if chunk_ids.is_empty() {
             return Ok(HashMap::new());
@@ -533,7 +746,7 @@ impl Storage {
             let (id, success, failure, positive, negative) = row?;
             map.insert(
                 id,
-                context_score_from_counts(success, failure, positive, negative),
+                context_score_from_counts(success, failure, positive, negative, prior_m, base_rate),
             );
         }
         Ok(map)
@@ -541,11 +754,24 @@ impl Storage {
 }
 
 /// Shared scoring math for `context_score` / `context_scores_batch`.
-fn context_score_from_counts(success: i64, failure: i64, positive: i64, negative: i64) -> f64 {
+///
+/// 方案 D —— 基率锚定先验:prior = Beta(α0, β0),α0 = m·g0,β0 = m·(1-g0),
+/// 其中 g0 是全局「好结果」基率、m 是伪观测数(谦逊度旋钮)。证据稀疏时后验回归
+/// 到 g0 而非 0.5。`m=2, g0=0.5` 与旧 Laplace `(wins+1)/(evidence+2)` 完全等价。
+fn context_score_from_counts(
+    success: i64,
+    failure: i64,
+    positive: i64,
+    negative: i64,
+    prior_m: f64,
+    base_rate: f64,
+) -> f64 {
     let wins = success as f64 + positive as f64 * 2.0;
     let losses = failure as f64 + negative as f64 * 2.0;
     let evidence = wins + losses;
-    let posterior = (wins + 1.0) / (evidence + 2.0);
+    let alpha0 = prior_m * base_rate;
+    let beta0 = prior_m * (1.0 - base_rate);
+    let posterior = (wins + alpha0) / (evidence + alpha0 + beta0);
     let evidence_weight = (evidence / 5.0).min(1.0);
     (posterior - 0.5) * 2.0 * evidence_weight
 }

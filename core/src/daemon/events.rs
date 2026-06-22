@@ -197,7 +197,17 @@ pub(in crate::daemon) fn call_cli_recall(db_path: &str, query: &str) -> anyhow::
     let self_exe = std::env::current_exe()?;
     let output = std::process::Command::new(&self_exe)
         .args([
-            "--db", db_path, "recall", query, "--format", "json", "--source", "daemon",
+            "--db",
+            db_path,
+            "recall",
+            query,
+            "--format",
+            "json",
+            "--source",
+            "daemon",
+            // Session trace only: the daemon discards the recalled knowledge and
+            // keeps just the trace_id, so it must not claim any `selected` chunks.
+            "--session",
         ])
         .output()?;
     if !output.status.success() {

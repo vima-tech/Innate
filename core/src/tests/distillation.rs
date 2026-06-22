@@ -582,7 +582,8 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             "4.10→4.11",
             "4.11→4.12",
             "4.12→4.13",
-            "4.13→4.14"
+            "4.13→4.14",
+            "4.14→4.15"
         ]
     );
 
@@ -602,7 +603,7 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "4.14");
+    assert_eq!(version, "4.15");
 }
 
 #[test]
@@ -900,6 +901,7 @@ fn recall_refreshes_vector_cache_after_external_write() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
 
@@ -927,6 +929,7 @@ fn recall_refreshes_vector_cache_after_external_write() {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     assert!(result
@@ -971,8 +974,10 @@ impl EmbeddingProvider for LyingEmbeddingProvider {
 #[test]
 fn add_rejects_dimension_mismatched_vector() {
     let file = NamedTempFile::new().unwrap();
-    let embedding: Arc<dyn EmbeddingProvider> =
-        Arc::new(LyingEmbeddingProvider { declared: 4, actual: 2 });
+    let embedding: Arc<dyn EmbeddingProvider> = Arc::new(LyingEmbeddingProvider {
+        declared: 4,
+        actual: 2,
+    });
     let kb =
         KnowledgeBase::open_with(file.path(), Some(embedding), None, None, None, None).unwrap();
 
@@ -991,5 +996,8 @@ fn add_rejects_dimension_mismatched_vector() {
             rusqlite::params!["mismatched"],
         )
         .unwrap();
-    assert!(rows.is_empty(), "no chunk should persist on a bad-dim write");
+    assert!(
+        rows.is_empty(),
+        "no chunk should persist on a bad-dim write"
+    );
 }

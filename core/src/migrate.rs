@@ -31,9 +31,10 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("4.11", "4.12", include_str!("migrations/4.11_to_4.12.sql")),
     ("4.12", "4.13", include_str!("migrations/4.12_to_4.13.sql")),
     ("4.13", "4.14", include_str!("migrations/4.13_to_4.14.sql")),
+    ("4.14", "4.15", include_str!("migrations/4.14_to_4.15.sql")),
 ];
 
-const TARGET: &str = "4.14";
+const TARGET: &str = "4.15";
 
 /// Run all pending migrations on `db_path`. Idempotent if already at target.
 /// Returns the list of migration steps executed.
@@ -64,11 +65,23 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
             )));
         }
         let copy_last_used = *to == "4.12" && column_exists(&conn, "chunks", "last_used_at")?;
+        // 方案 C:provenance 列在 4.14→4.15 条件添加(ALTER ADD COLUMN 无 IF NOT EXISTS)。
+        let add_provenance =
+            *to == "4.15" && !column_exists(&conn, "confidence_evidence", "provenance")?;
         // Run the step atomically.
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = conn.execute_batch(sql);
         match r {
             Ok(()) => {
+                if add_provenance {
+                    if let Err(error) = conn.execute_batch(
+                        "ALTER TABLE confidence_evidence
+                         ADD COLUMN provenance TEXT NOT NULL DEFAULT 'observed'",
+                    ) {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(error.into());
+                    }
+                }
                 if copy_last_used {
                     if let Err(error) = conn.execute(
                         "UPDATE chunks

@@ -8,7 +8,7 @@ use serde_json::json;
 pub use crate::backup::BackupCommands;
 pub use crate::daemon::DaemonCommands;
 pub use crate::hook::HookCommands;
-use crate::{AppraiseParams, RecallParams, RecordParams, Situation};
+use crate::{AppraiseParams, RecallParams, RecordParams, Situation, APPRAISE_ADVISORY};
 
 fn default_db() -> PathBuf {
     crate::paths::default_db_path()
@@ -53,6 +53,11 @@ pub enum Commands {
         /// Keeps always-on hooks high-frequency without injecting noise.
         #[arg(long)]
         min_score: Option<f64>,
+        /// Session trace: open a trace for later record-correlation but record no
+        /// `selected`/`retrieved` events. For callers (e.g. the daemon) that do
+        /// not inject the recalled knowledge into a model context.
+        #[arg(long)]
+        session: bool,
     },
     /// Critic: judge how much footing exists for a candidate in a situation.
     /// Returns {valence, strength, tier, flagged_points} — never an answer.
@@ -120,6 +125,11 @@ pub enum Commands {
         task_state: Option<String>,
         #[arg(long, default_value = "0")]
         priority: i64,
+        /// This trace came from an `appraise` whose caution was heeded — the
+        /// action was avoided, so the outcome is counterfactual and must NOT
+        /// count toward the critic's calibration (provenance=counterfactual_censored).
+        #[arg(long)]
+        verdict_heeded: bool,
     },
     /// Add a knowledge chunk
     Add {
@@ -207,6 +217,13 @@ pub enum Commands {
     Migrate,
     /// Reclaim disk space: checkpoint the WAL and VACUUM the database
     Vacuum,
+    /// Repair pre-fix trace pollution: drop false daemon `selected` events,
+    /// recompute `selected_count`, and retire orphaned `open` episodic logs.
+    RepairTraces {
+        /// Report what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Upgrade the innate binary to the latest (or specified) release
     Upgrade {
         /// Install this specific version, e.g. 0.3.0 or v0.3.0 (default: latest)
@@ -308,6 +325,7 @@ pub fn run() -> anyhow::Result<()> {
             refine_mode,
             source,
             min_score,
+            session,
         } => {
             let result = kb.recall(RecallParams {
                 query: &query,
@@ -320,6 +338,7 @@ pub fn run() -> anyhow::Result<()> {
                 allow_trim,
                 refine_mode: &refine_mode,
                 min_score,
+                session_only: session,
             })?;
             match format.as_str() {
                 "json" => println!(
@@ -403,22 +422,42 @@ pub fn run() -> anyhow::Result<()> {
             })?;
             match format.as_str() {
                 "text" => {
-                    println!(
-                        "valence={:?} tier={:?} strength={:.3} trace_id={}",
-                        verdict.valence, verdict.tier, verdict.strength, verdict.trace_id
-                    );
+                    println!("ℹ {APPRAISE_ADVISORY}");
+                    if verdict.abstained {
+                        println!(
+                            "ABSTAIN reason={:?} strength={:.3} trace_id={}",
+                            verdict.abstain_reason, verdict.strength, verdict.trace_id
+                        );
+                    } else {
+                        println!(
+                            "valence={:?} tier={:?} strength={:.3} confidence={:.3} dispersion={:.3} trace_id={}",
+                            verdict.valence, verdict.tier, verdict.strength,
+                            verdict.confidence, verdict.dispersion, verdict.trace_id
+                        );
+                    }
                     for fp in &verdict.flagged_points {
-                        println!("  ⚠ [{}] {} (s={:.3})", fp.chunk_id, fp.summary, fp.strength);
+                        println!(
+                            "  ⚠ [{}] {} (s={:.3})",
+                            fp.chunk_id, fp.summary, fp.strength
+                        );
                     }
                 }
-                _ => println!("{}", serde_json::to_string_pretty(&json!({
-                    "valence": verdict.valence,
-                    "strength": verdict.strength,
-                    "tier": verdict.tier,
-                    "flagged_points": verdict.flagged_points,
-                    "contributors": verdict.contributors,
-                    "trace_id": verdict.trace_id,
-                }))?),
+                _ => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "advisory": APPRAISE_ADVISORY,
+                        "valence": verdict.valence,
+                        "strength": verdict.strength,
+                        "tier": verdict.tier,
+                        "confidence": verdict.confidence,
+                        "dispersion": verdict.dispersion,
+                        "abstained": verdict.abstained,
+                        "abstain_reason": verdict.abstain_reason,
+                        "flagged_points": verdict.flagged_points,
+                        "contributors": verdict.contributors,
+                        "trace_id": verdict.trace_id,
+                    }))?
+                ),
             }
         }
         Commands::Record {
@@ -438,6 +477,7 @@ pub fn run() -> anyhow::Result<()> {
             feedback_reason,
             task_state,
             priority,
+            verdict_heeded,
         } => {
             let used_ids = used.as_deref().map(|raw| {
                 raw.split(',')
@@ -480,6 +520,7 @@ pub fn run() -> anyhow::Result<()> {
                 priority,
                 task_state: task_state.as_deref(),
                 source: &source,
+                verdict_heeded,
             })?;
             println!("recorded");
         }
@@ -590,6 +631,19 @@ pub fn run() -> anyhow::Result<()> {
                 mb(before),
                 mb(after),
                 mb(before - after)
+            );
+        }
+        Commands::RepairTraces { dry_run } => {
+            let r = kb.repair_traces(dry_run)?;
+            let tag = if dry_run {
+                "[dry-run] would repair"
+            } else {
+                "repaired"
+            };
+            println!(
+                "{tag}: deleted {} false daemon selection events, retired {} orphaned open logs, \
+                 selected_count {} → {}",
+                r.daemon_events_deleted, r.open_logs_retired, r.selected_before, r.selected_after
             );
         }
         Commands::Web {

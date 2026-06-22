@@ -387,12 +387,18 @@ pub(super) fn configure_claude_prompt_hook(config_path: &Path, binary: &Path) ->
 /// Append a SubagentStop hook so Task-tool subagents also feed session events to the daemon.
 /// Reuses the same `hook stop` handler — the subagent stop payload carries the same transcript
 /// reference, plus `agent_id`/`agent_type` for attribution.
-pub(super) fn configure_claude_subagent_stop_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
+pub(super) fn configure_claude_subagent_stop_hook(
+    config_path: &Path,
+    binary: &Path,
+) -> ConfigStatus {
     configure_claude_hook(config_path, binary, "SubagentStop", "hook stop")
 }
 
 /// Append a SessionStart hook that warms up context with high-relevance project knowledge.
-pub(super) fn configure_claude_session_start_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
+pub(super) fn configure_claude_session_start_hook(
+    config_path: &Path,
+    binary: &Path,
+) -> ConfigStatus {
     configure_claude_hook(config_path, binary, "SessionStart", "hook session-start")
 }
 

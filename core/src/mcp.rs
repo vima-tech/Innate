@@ -11,7 +11,9 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use crate::kb::{AppraiseParams, KnowledgeBase, RecallParams, RecordParams, Situation};
+use crate::kb::{
+    AppraiseParams, KnowledgeBase, RecallParams, RecordParams, Situation, APPRAISE_ADVISORY,
+};
 
 #[cfg(target_os = "linux")]
 use libc;
@@ -20,7 +22,7 @@ use libc;
 const TOOLS: &[(&str, &str)] = &[
     ("innate_recall",         "Call FIRST at the start of any task — retrieve relevant knowledge from the knowledge base and get a trace_id for subsequent recording."),
     ("innate_record",         "Call LAST after completing any task — close the trace_id from recall with outcome ok/fail/unknown and optional feedback."),
-    ("innate_appraise",       "Critic check — given a situation (and optional candidate answer), return how much footing exists: {valence, strength, tier, flagged_points}. Never returns an answer. Use to gut-check before committing to a risky step; flagged_points = things to be careful about."),
+    ("innate_appraise",       "Critic check — given a situation (and optional candidate answer), return how much footing exists: {valence, strength, tier, confidence, dispersion, abstained, abstain_reason, flagged_points}. May abstain (abstained=true) when there is no footing — abstaining is correct, not a failure. Never returns an answer. Use to gut-check before committing to a risky step; flagged_points = things to be careful about."),
     ("innate_add",            "Capture a confirmed insight as a knowledge chunk (always starts as pending for agent source)."),
     ("innate_spark",          "Save a quick idea / hypothesis for later incubation."),
     ("innate_inspect",        "Show knowledge base health: chunk counts, debt ratio, embed rebuild queue."),
@@ -243,6 +245,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 allow_trim,
                 refine_mode: &refine_mode,
                 min_score,
+                session_only: false,
             })?;
             Ok(json!({
                 "trace_id": result.trace_id,
@@ -281,9 +284,15 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 source: &source,
             })?;
             Ok(json!({
+                // 显式声明:直觉仅供参考,不是精准答案。随每个 verdict 返给 agent。
+                "advisory": APPRAISE_ADVISORY,
                 "valence": verdict.valence,
                 "strength": verdict.strength,
                 "tier": verdict.tier,
+                "confidence": verdict.confidence,
+                "dispersion": verdict.dispersion,
+                "abstained": verdict.abstained,
+                "abstain_reason": verdict.abstain_reason,
                 "flagged_points": verdict.flagged_points,
                 "contributors": verdict.contributors,
                 "trace_id": verdict.trace_id,
@@ -345,6 +354,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 priority: n("priority", 0),
                 task_state: task_state.as_deref(),
                 source: &source,
+                verdict_heeded: b("verdict_heeded", false),
             })?;
             Ok(json!({"ok": true}))
         }
@@ -496,6 +506,7 @@ fn tool_schema(name: &str) -> Value {
                 "output_summary": {"type": "string"},
                 "nomination": {"type": "string"},
                 "priority": {"type": "integer"},
+                "verdict_heeded": {"type": "boolean", "description": "Set when this trace came from an appraise whose caution was heeded (action avoided): the outcome is counterfactual and is excluded from the critic's calibration."},
                 "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]}
             },
             "required": ["trace_id"]

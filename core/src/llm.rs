@@ -153,12 +153,9 @@ fn post_json_retry(
             Ok(mut response) => {
                 let code = response.status().as_u16();
                 if (200..300).contains(&code) {
-                    break response
-                        .body_mut()
-                        .read_json::<Value>()
-                        .map_err(|e| {
-                            InnateError::Other(format!("{label} response parse error: {e}"))
-                        });
+                    break response.body_mut().read_json::<Value>().map_err(|e| {
+                        InnateError::Other(format!("{label} response parse error: {e}"))
+                    });
                 }
                 let retry_after = response
                     .headers()
@@ -353,7 +350,13 @@ fn distill_entry_with(
         let skill_name = parsed
             .get("skill_name")
             .and_then(Value::as_str)
-            .map(|s| s.trim().split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+            .map(|s| {
+                s.trim()
+                    .split_whitespace()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .filter(|s| !s.is_empty() && s.to_lowercase() != "null");
         let trigger_desc = parsed
             .get("trigger_desc")
@@ -449,7 +452,10 @@ mod tests {
     fn embedding_response_is_parsed_fail_closed() {
         // Happy path: correct dimension parses.
         let resp = json!({"data": [{"embedding": [0.1, 0.2, 0.3]}]});
-        assert_eq!(parse_embedding_response(&resp, 3).unwrap(), vec![0.1f32, 0.2, 0.3]);
+        assert_eq!(
+            parse_embedding_response(&resp, 3).unwrap(),
+            vec![0.1f32, 0.2, 0.3]
+        );
 
         // Wrong dimension is rejected, not silently accepted.
         assert!(parse_embedding_response(&resp, 4).is_err());
@@ -571,12 +577,7 @@ impl LlmEmbeddingProvider {
         });
 
         let auth = format!("Bearer {api_key}");
-        let resp_json = post_json_retry(
-            &url,
-            &[("Authorization", &auth)],
-            &body,
-            "Embedding",
-        )?;
+        let resp_json = post_json_retry(&url, &[("Authorization", &auth)], &body, "Embedding")?;
 
         parse_embedding_response(&resp_json, self.config.dim)
     }

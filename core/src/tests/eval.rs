@@ -91,7 +91,11 @@ fn precision_at_k(ranked: &[String], relevant: &HashSet<String>, k: usize) -> f6
     if k == 0 {
         return 0.0;
     }
-    let hits = ranked.iter().take(k).filter(|id| relevant.contains(*id)).count();
+    let hits = ranked
+        .iter()
+        .take(k)
+        .filter(|id| relevant.contains(*id))
+        .count();
     hits as f64 / k as f64
 }
 
@@ -99,7 +103,11 @@ fn recall_at_k(ranked: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
     if relevant.is_empty() {
         return 0.0;
     }
-    let hits = ranked.iter().take(k).filter(|id| relevant.contains(*id)).count();
+    let hits = ranked
+        .iter()
+        .take(k)
+        .filter(|id| relevant.contains(*id))
+        .count();
     hits as f64 / relevant.len() as f64
 }
 
@@ -140,18 +148,66 @@ fn ndcg_at_k(ranked: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
 
 /// (label, content, trigger) for one knowledge chunk.
 const CORPUS: &[(&str, &str, &str)] = &[
-    ("rust_build", "Build the release binary using cargo build release profile", "compile rust release binary cargo"),
-    ("rust_test", "Run the rust test suite with the cargo test command", "run rust tests cargo suite"),
-    ("git_branch", "Create a new git branch before committing your changes", "git branch commit workflow"),
-    ("git_merge", "Resolve git merge conflicts by editing the conflicted files", "git merge conflict resolution"),
-    ("sqlite_tx", "Use begin immediate for exclusive write transactions in sqlite", "sqlite transaction locking immediate"),
-    ("sql_index", "Add a database index to speed up slow sql queries", "sql query performance index optimization"),
-    ("async_block", "Avoid blocking the async runtime with synchronous blocking io", "async runtime blocking io"),
-    ("tokio_spawn", "Spawn background tasks using tokio spawn for concurrency", "tokio spawn background task concurrency"),
-    ("unit_test", "Write unit tests asserting the expected behavior of functions", "unit test assertion behavior"),
-    ("env_config", "Configure environment variables through the settings file", "environment variable configuration settings"),
-    ("api_docs", "Document public apis with rust doc comments and examples", "api documentation doc comments"),
-    ("mem_profile", "Profile memory usage to find and fix memory leaks", "memory profiling leak detection"),
+    (
+        "rust_build",
+        "Build the release binary using cargo build release profile",
+        "compile rust release binary cargo",
+    ),
+    (
+        "rust_test",
+        "Run the rust test suite with the cargo test command",
+        "run rust tests cargo suite",
+    ),
+    (
+        "git_branch",
+        "Create a new git branch before committing your changes",
+        "git branch commit workflow",
+    ),
+    (
+        "git_merge",
+        "Resolve git merge conflicts by editing the conflicted files",
+        "git merge conflict resolution",
+    ),
+    (
+        "sqlite_tx",
+        "Use begin immediate for exclusive write transactions in sqlite",
+        "sqlite transaction locking immediate",
+    ),
+    (
+        "sql_index",
+        "Add a database index to speed up slow sql queries",
+        "sql query performance index optimization",
+    ),
+    (
+        "async_block",
+        "Avoid blocking the async runtime with synchronous blocking io",
+        "async runtime blocking io",
+    ),
+    (
+        "tokio_spawn",
+        "Spawn background tasks using tokio spawn for concurrency",
+        "tokio spawn background task concurrency",
+    ),
+    (
+        "unit_test",
+        "Write unit tests asserting the expected behavior of functions",
+        "unit test assertion behavior",
+    ),
+    (
+        "env_config",
+        "Configure environment variables through the settings file",
+        "environment variable configuration settings",
+    ),
+    (
+        "api_docs",
+        "Document public apis with rust doc comments and examples",
+        "api documentation doc comments",
+    ),
+    (
+        "mem_profile",
+        "Profile memory usage to find and fix memory leaks",
+        "memory profiling leak detection",
+    ),
 ];
 
 /// (query, relevant labels)
@@ -171,7 +227,9 @@ const CASES: &[(&str, &[&str])] = &[
 /// Build a KB with the BoW provider, the optional activation weight applied, and
 /// the labelled corpus loaded. Returns the KB, a label→id map, and the temp file
 /// (kept alive for the KB's lifetime).
-fn build_corpus_kb(w_activation: Option<f64>) -> (KnowledgeBase, HashMap<String, String>, NamedTempFile) {
+fn build_corpus_kb(
+    w_activation: Option<f64>,
+) -> (KnowledgeBase, HashMap<String, String>, NamedTempFile) {
     let file = NamedTempFile::new().unwrap();
     // Params are loaded once at open(), so set the weight *before* the handle we
     // actually use: write it on a throwaway handle, drop it, then reopen.
@@ -262,6 +320,7 @@ fn ranked_ids(kb: &KnowledgeBase, query: &str, top: usize) -> Vec<String> {
             allow_trim: false,
             refine_mode: "off",
             min_score: None,
+            session_only: false,
         })
         .unwrap();
     res.knowledge
@@ -338,9 +397,24 @@ fn actr_activation_does_not_regress_quality() {
         on.p_at_1, on.mrr, on.ndcg_at_5
     );
     // No regression (allow a hair of float slack).
-    assert!(on.mrr >= off.mrr - 1e-9, "activation regressed MRR: {:.4} < {:.4}", on.mrr, off.mrr);
-    assert!(on.ndcg_at_5 >= off.ndcg_at_5 - 1e-9, "activation regressed nDCG: {:.4} < {:.4}", on.ndcg_at_5, off.ndcg_at_5);
-    assert!(on.p_at_1 >= off.p_at_1 - 1e-9, "activation regressed P@1: {:.4} < {:.4}", on.p_at_1, off.p_at_1);
+    assert!(
+        on.mrr >= off.mrr - 1e-9,
+        "activation regressed MRR: {:.4} < {:.4}",
+        on.mrr,
+        off.mrr
+    );
+    assert!(
+        on.ndcg_at_5 >= off.ndcg_at_5 - 1e-9,
+        "activation regressed nDCG: {:.4} < {:.4}",
+        on.ndcg_at_5,
+        off.ndcg_at_5
+    );
+    assert!(
+        on.p_at_1 >= off.p_at_1 - 1e-9,
+        "activation regressed P@1: {:.4} < {:.4}",
+        on.p_at_1,
+        off.p_at_1
+    );
 }
 
 #[test]
@@ -394,10 +468,24 @@ fn actr_activation_breaks_ties_by_recency_and_frequency() {
 
     let trigger = "deploy service rollout procedure";
     let hot = kb
-        .add("deploy service rollout procedure variant alpha", "note", Some(trigger), None, "manual", None)
+        .add(
+            "deploy service rollout procedure variant alpha",
+            "note",
+            Some(trigger),
+            None,
+            "manual",
+            None,
+        )
         .unwrap();
     let cold = kb
-        .add("deploy service rollout procedure variant beta", "note", Some(trigger), None, "manual", None)
+        .add(
+            "deploy service rollout procedure variant beta",
+            "note",
+            Some(trigger),
+            None,
+            "manual",
+            None,
+        )
         .unwrap();
 
     // hot: used 30× and just now; cold: never used.
@@ -412,7 +500,10 @@ fn actr_activation_breaks_ties_by_recency_and_frequency() {
     let pos = |id: &str| ranked.iter().position(|x| x == id);
     let (hp, cp) = (pos(&hot), pos(&cold));
     eprintln!("[eval] tie-break ranked={ranked:?} hot@{hp:?} cold@{cp:?}");
-    assert!(hp.is_some() && cp.is_some(), "both variants should be retrieved");
+    assert!(
+        hp.is_some() && cp.is_some(),
+        "both variants should be retrieved"
+    );
     assert!(
         hp.unwrap() < cp.unwrap(),
         "activation should rank the hot (used 30×, recent) variant above the cold one"

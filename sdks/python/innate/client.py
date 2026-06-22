@@ -69,6 +69,14 @@ class Verdict:
     valence: str = "neutral"
     strength: float = 0.0
     tier: str = "weak"
+    # 直觉仅供参考,不是精准答案;``advisory`` 是随每个 verdict 一起返回的固定声明。
+    advisory: str = ""
+    # 方案 A:弃权是一等输出。``abstained`` 为真时直觉明确「没有基础」(正确行为,非失败),
+    # ``abstain_reason`` ∈ weak_resonance | false_resonance | sparse_evidence | conflicted。
+    confidence: float = 0.0
+    dispersion: float = 0.0
+    abstained: bool = False
+    abstain_reason: str | None = None
     flagged_points: list[dict[str, Any]] = field(default_factory=list)
     contributors: list[dict[str, Any]] = field(default_factory=list)
     trace_id: str = ""
@@ -157,6 +165,11 @@ class KnowledgeBase:
             valence=data.get("valence", "neutral"),
             strength=data.get("strength", 0.0),
             tier=data.get("tier", "weak"),
+            advisory=data.get("advisory", ""),
+            confidence=data.get("confidence", 0.0),
+            dispersion=data.get("dispersion", 0.0),
+            abstained=data.get("abstained", False),
+            abstain_reason=data.get("abstain_reason"),
             flagged_points=data.get("flagged_points", []),
             contributors=data.get("contributors", []),
             trace_id=data.get("trace_id", ""),
@@ -180,6 +193,7 @@ class KnowledgeBase:
         feedback_reason: str | None = None,
         task_state: str | None = None,
         priority: int = 0,
+        verdict_heeded: bool = False,
         source: str = "sdk",
     ) -> None:
         args = self._args() + ["record", trace_id, "--source", source]
@@ -208,6 +222,8 @@ class KnowledgeBase:
             args += ["--task-state", task_state]
         if priority:
             args += ["--priority", str(priority)]
+        if verdict_heeded:
+            args += ["--verdict-heeded"]
         _run(*args)
 
     def add(

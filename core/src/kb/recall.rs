@@ -21,6 +21,13 @@ pub struct RecallParams<'a> {
     /// actually surfaced. `None` disables the gate. Used by always-on hooks
     /// (UserPromptSubmit / SessionStart) to stay high-frequency without noise.
     pub min_score: Option<f64>,
+    /// Session trace mode: open an episodic log for later record-correlation but
+    /// write **no** per-chunk `retrieved`/`selected` usage events. Used by the
+    /// daemon, which recalls only to obtain a `trace_id` and discards the
+    /// knowledge without ever placing it in a model context. `selected` must
+    /// strictly mean "entered the model context", so a caller that does not
+    /// inject the result must set this. Defaults to `false` (full injection).
+    pub session_only: bool,
 }
 
 impl KnowledgeBase {
@@ -36,6 +43,7 @@ impl KnowledgeBase {
             allow_trim,
             refine_mode,
             min_score,
+            session_only,
         } = params;
         let expand_deps = if expand_deps.is_empty() {
             "false"
@@ -120,6 +128,7 @@ impl KnowledgeBase {
                 refine_mode,
                 source,
                 &now,
+                session_only,
             )?;
         }
 
@@ -205,9 +214,7 @@ impl KnowledgeBase {
         // in a single query (was one get_deps per candidate).
         let src_ids: Vec<String> = candidates
             .iter()
-            .filter(|(_, info)| {
-                info.chunk.get("origin").and_then(Value::as_str) != Some("spark")
-            })
+            .filter(|(_, info)| info.chunk.get("origin").and_then(Value::as_str) != Some("spark"))
             .map(|(cid, _)| cid.clone())
             .collect();
         if src_ids.is_empty() {
@@ -274,10 +281,21 @@ impl KnowledgeBase {
         // (was one context_score lookup per candidate).
         let cand_ids: Vec<String> = candidates
             .values()
-            .filter_map(|info| info.chunk.get("id").and_then(Value::as_str).map(str::to_string))
+            .filter_map(|info| {
+                info.chunk
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .collect();
         let cand_refs: Vec<&str> = cand_ids.iter().map(String::as_str).collect();
-        let ctx_scores = self.storage.context_scores_batch(&cand_refs, context_key)?;
+        // 方案 D 与 recall 解耦:recall 恒用中性 Laplace 先验,不读 intuition.* 旋钮。
+        let ctx_scores = self.storage.context_scores_batch(
+            &cand_refs,
+            context_key,
+            RECALL_PRIOR_M,
+            RECALL_BASE_RATE,
+        )?;
 
         let mut scored: Vec<(f64, Value)> = Vec::with_capacity(candidates.len());
         for info in candidates.into_values() {
@@ -621,66 +639,95 @@ impl KnowledgeBase {
         refine_mode: &str,
         source: &str,
         now: &str,
+        session_only: bool,
     ) -> Result<()> {
         let lib_id = self.storage.lib_id()?;
+        // `selected` must strictly mean "entered the model context". Record the
+        // per-chunk retrieved/selected/refined events only when the result is
+        // actually surfaced: skip them for empty results (nothing surfaced) and
+        // for session-only recalls (daemon discards the knowledge). The episodic
+        // log is still written in both cases — an empty result as a terminal
+        // `known_none`/`discarded` row (no-answer telemetry, never `open`), a
+        // session recall as an `open` row for later record-correlation.
+        let is_empty = visible.is_empty() && sparks.is_empty();
+        let record_selection = !is_empty && !session_only;
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {
-            for (rank, (_, chunk)) in scored.iter().enumerate() {
-                let cid = chunk["id"].as_str().unwrap_or("");
-                let sim = chunk.get("_fused_score").and_then(Value::as_f64);
-                // For dep-skipped seeds, record their skip reason as refine_mode.
-                let rm = skipped_reasons
-                    .get(cid)
-                    .map(|r| format!("skipped:{r}"))
-                    .or_else(|| {
-                        if refine_mode != "off" && !refine_mode.is_empty() {
-                            Some(refine_mode.to_string())
-                        } else {
-                            None
-                        }
-                    });
-                self.storage.insert_usage_trace(
-                    trace_id,
-                    Some(cid),
-                    "retrieved",
-                    1.0,
-                    sim,
-                    rm.as_deref(),
-                    None,
-                    Some((rank + 1) as i64),
-                    None,
-                    source,
-                    now,
-                )?;
-            }
-            for (rank, chunk) in visible.iter().enumerate() {
-                let cid = chunk["id"].as_str().unwrap_or("");
-                self.storage.insert_usage_trace(
-                    trace_id,
-                    Some(cid),
-                    "selected",
-                    1.0,
-                    None,
-                    None,
-                    None,
-                    Some((rank + 1) as i64),
-                    None,
-                    source,
-                    now,
-                )?;
-                // Write 'refined' event for chunks that came through the trim path.
-                if chunk
-                    .get("_trimmed")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
+            if record_selection {
+                for (rank, (_, chunk)) in scored.iter().enumerate() {
+                    let cid = chunk["id"].as_str().unwrap_or("");
+                    let sim = chunk.get("_fused_score").and_then(Value::as_f64);
+                    // For dep-skipped seeds, record their skip reason as refine_mode.
+                    let rm = skipped_reasons
+                        .get(cid)
+                        .map(|r| format!("skipped:{r}"))
+                        .or_else(|| {
+                            if refine_mode != "off" && !refine_mode.is_empty() {
+                                Some(refine_mode.to_string())
+                            } else {
+                                None
+                            }
+                        });
                     self.storage.insert_usage_trace(
                         trace_id,
                         Some(cid),
-                        "refined",
+                        "retrieved",
+                        1.0,
+                        sim,
+                        rm.as_deref(),
+                        None,
+                        Some((rank + 1) as i64),
+                        None,
+                        source,
+                        now,
+                    )?;
+                }
+                for (rank, chunk) in visible.iter().enumerate() {
+                    let cid = chunk["id"].as_str().unwrap_or("");
+                    self.storage.insert_usage_trace(
+                        trace_id,
+                        Some(cid),
+                        "selected",
                         1.0,
                         None,
-                        Some("trim"),
+                        None,
+                        None,
+                        Some((rank + 1) as i64),
+                        None,
+                        source,
+                        now,
+                    )?;
+                    // Write 'refined' event for chunks that came through the trim path.
+                    if chunk
+                        .get("_trimmed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        self.storage.insert_usage_trace(
+                            trace_id,
+                            Some(cid),
+                            "refined",
+                            1.0,
+                            None,
+                            Some("trim"),
+                            None,
+                            Some((rank + 1) as i64),
+                            None,
+                            source,
+                            now,
+                        )?;
+                    }
+                }
+                // Write 'retrieved' events for sparks (for recurring-spark count tracking).
+                for (rank, chunk) in sparks.iter().enumerate() {
+                    let cid = chunk["id"].as_str().unwrap_or("");
+                    self.storage.insert_usage_trace(
+                        trace_id,
+                        Some(cid),
+                        "retrieved",
+                        1.0,
+                        None,
+                        Some("spark"),
                         None,
                         Some((rank + 1) as i64),
                         None,
@@ -689,30 +736,26 @@ impl KnowledgeBase {
                     )?;
                 }
             }
-            // Write 'retrieved' events for sparks (for recurring-spark count tracking).
-            for (rank, chunk) in sparks.iter().enumerate() {
-                let cid = chunk["id"].as_str().unwrap_or("");
-                self.storage.insert_usage_trace(
-                    trace_id,
-                    Some(cid),
-                    "retrieved",
-                    1.0,
-                    None,
-                    Some("spark"),
-                    None,
-                    Some((rank + 1) as i64),
-                    None,
-                    source,
-                    now,
-                )?;
-            }
+            // The snapshot mirrors what was surfaced: empty for known_none and
+            // session-only recalls so no chunk is credited with a selection.
             let snapshot = json!({
-                "retrieved": scored.iter().map(|(_, c)| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>(),
-                "selected": visible.iter().map(|c| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>(),
-                "sparks": sparks.iter().map(|c| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>(),
+                "retrieved": if record_selection { scored.iter().map(|(_, c)| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>() } else { vec![] },
+                "selected": if record_selection { visible.iter().map(|c| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>() } else { vec![] },
+                "sparks": if record_selection { sparks.iter().map(|c| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>() } else { vec![] },
                 "depth_skipped": depth_skipped,
                 "skipped_reasons": skipped_reasons,
+                "session_only": session_only,
             });
+            // Empty recall → terminal known_none/discarded (kept out of the `open`
+            // pool that feeds trace-completion stats). Otherwise `open` for the
+            // record() outcome transition (incl. session-only daemon traces).
+            // `usage_state='known_none'` is the no-answer signal; `task_state`
+            // stays 'recalled' (both bounded by schema CHECK constraints).
+            let (usage_state, distill_state) = if is_empty {
+                ("known_none", "discarded")
+            } else {
+                ("unknown", "open")
+            };
             let log = EpisodicLogRow {
                 id: gen_uuid(),
                 trace_id: trace_id.to_string(),
@@ -722,9 +765,9 @@ impl KnowledgeBase {
                 recall_snapshot: Some(snapshot.to_string()),
                 event_source: source.to_string(),
                 task_state: "recalled".to_string(),
-                usage_state: "unknown".to_string(),
+                usage_state: usage_state.to_string(),
                 context_key: Some(context_key.to_string()),
-                distill_state: "open".to_string(),
+                distill_state: distill_state.to_string(),
                 ..Default::default()
             };
             self.storage.upsert_episodic_log(&log)?;

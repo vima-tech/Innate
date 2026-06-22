@@ -31,13 +31,16 @@ mod inspection;
 mod lifecycle;
 mod recall;
 mod record;
+mod repair;
 mod situation;
 
 pub use appraise::{
-    AppraiseParams, Contributor, FlaggedPoint, Tier, Valence, Verdict,
+    AbstainReason, AppraiseParams, Contributor, FlaggedPoint, Tier, Valence, Verdict,
+    APPRAISE_ADVISORY,
 };
 pub use recall::RecallParams;
 pub use record::RecordParams;
+pub use repair::TraceRepairReport;
 pub use situation::Situation;
 
 // ---------------------------------------------------------------------------
@@ -79,6 +82,25 @@ const APPRAISE_MIN_STRENGTH: f64 = 0.40;
 const APPRAISE_TOP: usize = 8;
 const APPRAISE_TRIGGER_HIT_MIN: f64 = 0.50;
 const APPRAISE_CANDIDATE_IN_EMBED: bool = true;
+// 弃权门(方案 A/F/G)。默认值保持现行行为(门2/门3/门4 关闭),由 meta 调参激活。
+//   门2 signature_floor=0.0   → 关闭(任何一致度都放行)
+//   门3 min_evidence=0        → 关闭(不要求观测历史)
+//   门4 conflict_ceiling=1.0  → 关闭(离散度上界恒不触发)
+// 门1 弱共振无需阈值:prune 后候选为空即弃权(WeakResonance),天然作动。
+const APPRAISE_SIGNATURE_FLOOR: f64 = 0.0;
+const APPRAISE_MIN_EVIDENCE: i64 = 0;
+const APPRAISE_CONFLICT_CEILING: f64 = 1.0;
+// 方案 D 基率锚定先验:prior = Beta(m·g0, m·(1-g0))。默认 m=2, g0=0.5 与旧 Laplace
+// (wins+1)/(evidence+2) 完全等价 → 零行为变化,调大 m / 设真实基率即激活。
+// **仅作用于 appraise(直觉/校准)路径**:实施文档明确范围不含 recall。
+const INTUITION_PRIOR_M: f64 = 2.0;
+const INTUITION_BASE_RATE: f64 = 0.5;
+// recall(图书管理员)路径恒用中性 Laplace 先验(m=2, g0=0.5),与历史
+// (wins+1)/(evidence+2) 逐位等价,绝不受 intuition.* 校准旋钮影响。方案 D 与 recall 解耦。
+const RECALL_PRIOR_M: f64 = 2.0;
+const RECALL_BASE_RATE: f64 = 0.5;
+// 方案 E 校准映射桶数。
+const CALIBRATION_BINS: i64 = 10;
 const SITUATION_COARSE_KEYS: &str = "stage,error_class,file_type";
 const GOVERNANCE_ARCHIVE_THRESHOLD: i64 = 3;
 const NEGATIVE_FEEDBACK_ARCHIVE_THRESHOLD: i64 = 5;
@@ -197,6 +219,12 @@ pub struct KnowledgeBase {
     appraise_top: usize,
     appraise_trigger_hit_min: f64,
     appraise_candidate_in_embed: bool,
+    appraise_signature_floor: f64,
+    appraise_min_evidence: i64,
+    appraise_conflict_ceiling: f64,
+    intuition_prior_m: f64,
+    intuition_base_rate: f64,
+    calibration_bins: i64,
     situation_coarse_keys: String,
 }
 
@@ -294,6 +322,12 @@ impl KnowledgeBase {
             appraise_top: APPRAISE_TOP,
             appraise_trigger_hit_min: APPRAISE_TRIGGER_HIT_MIN,
             appraise_candidate_in_embed: APPRAISE_CANDIDATE_IN_EMBED,
+            appraise_signature_floor: APPRAISE_SIGNATURE_FLOOR,
+            appraise_min_evidence: APPRAISE_MIN_EVIDENCE,
+            appraise_conflict_ceiling: APPRAISE_CONFLICT_CEILING,
+            intuition_prior_m: INTUITION_PRIOR_M,
+            intuition_base_rate: INTUITION_BASE_RATE,
+            calibration_bins: CALIBRATION_BINS,
             situation_coarse_keys: SITUATION_COARSE_KEYS.to_string(),
         };
         kb.init_meta()?;
@@ -370,6 +404,12 @@ impl KnowledgeBase {
             ("appraise.top", "8"),
             ("appraise.trigger_hit_min", "0.50"),
             ("appraise.candidate_in_embed", "true"),
+            ("appraise.signature_floor", "0.0"),
+            ("appraise.min_evidence", "0"),
+            ("appraise.conflict_ceiling", "1.0"),
+            ("intuition.prior_m", "2.0"),
+            ("intuition.base_rate", "0.5"),
+            ("intuition.calibration_bins", "10"),
             ("situation.coarse_keys", "stage,error_class,file_type"),
         ];
         self.storage.begin_immediate()?;
@@ -471,8 +511,7 @@ impl KnowledgeBase {
                 .unwrap_or_else(|| d.to_string())
         };
         self.appraise_tier_weak = f("appraise.tier_weak", APPRAISE_TIER_WEAK).clamp(0.0, 1.0);
-        self.appraise_tier_strong =
-            f("appraise.tier_strong", APPRAISE_TIER_STRONG).clamp(0.0, 1.0);
+        self.appraise_tier_strong = f("appraise.tier_strong", APPRAISE_TIER_STRONG).clamp(0.0, 1.0);
         self.appraise_min_strength =
             f("appraise.min_strength", APPRAISE_MIN_STRENGTH).clamp(0.0, 1.0);
         self.appraise_top = i("appraise.top", APPRAISE_TOP as i64).max(1) as usize;
@@ -480,6 +519,14 @@ impl KnowledgeBase {
             f("appraise.trigger_hit_min", APPRAISE_TRIGGER_HIT_MIN).clamp(0.0, 1.0);
         self.appraise_candidate_in_embed =
             b("appraise.candidate_in_embed", APPRAISE_CANDIDATE_IN_EMBED);
+        self.appraise_signature_floor =
+            f("appraise.signature_floor", APPRAISE_SIGNATURE_FLOOR).clamp(0.0, 1.0);
+        self.appraise_min_evidence = i("appraise.min_evidence", APPRAISE_MIN_EVIDENCE).max(0);
+        self.appraise_conflict_ceiling =
+            f("appraise.conflict_ceiling", APPRAISE_CONFLICT_CEILING).clamp(0.0, 1.0);
+        self.intuition_prior_m = f("intuition.prior_m", INTUITION_PRIOR_M).max(0.0);
+        self.intuition_base_rate = f("intuition.base_rate", INTUITION_BASE_RATE).clamp(0.0, 1.0);
+        self.calibration_bins = i("intuition.calibration_bins", CALIBRATION_BINS).clamp(2, 100);
         self.situation_coarse_keys = s("situation.coarse_keys", SITUATION_COARSE_KEYS);
         Ok(())
     }

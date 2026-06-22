@@ -54,9 +54,11 @@ impl Storage {
     /// `(before_bytes, after_bytes)`. Must run outside any transaction.
     pub fn vacuum(&self) -> Result<(i64, i64)> {
         let before = self.db_size_bytes()?;
-        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         self.conn.execute_batch("VACUUM;")?;
-        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         // VACUUM rebuilds the file but preserves all rows; in-memory vector caches
         // stay valid (same data), so they are intentionally left untouched.
         let after = self.db_size_bytes()?;

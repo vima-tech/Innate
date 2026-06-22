@@ -149,6 +149,8 @@ impl KnowledgeBase {
             reason,
             context_key,
             now,
+            // record() 路径写的全是实际观测结果(outcome/feedback/selected_unused)。
+            "observed",
         )?;
         self.recompute_chunk_confidence(chunk_id, now)
     }

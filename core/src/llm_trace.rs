@@ -125,7 +125,9 @@ fn classify_error(msg: &str) -> String {
 fn extract_status_code(lower: &str) -> Option<u16> {
     let bytes = lower.as_bytes();
     for i in 0..bytes.len().saturating_sub(2) {
-        if bytes[i].is_ascii_digit() && bytes[i + 1].is_ascii_digit() && bytes[i + 2].is_ascii_digit()
+        if bytes[i].is_ascii_digit()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
         {
             let three = &lower[i..i + 3];
             if let Ok(code) = three.parse::<u16>() {
@@ -225,7 +227,10 @@ mod tests {
 
     #[test]
     fn host_strips_scheme_and_path() {
-        assert_eq!(host_of("https://dashscope.aliyuncs.com/v1/embeddings"), "dashscope.aliyuncs.com");
+        assert_eq!(
+            host_of("https://dashscope.aliyuncs.com/v1/embeddings"),
+            "dashscope.aliyuncs.com"
+        );
         assert_eq!(host_of("http://127.0.0.1:8788/x"), "127.0.0.1:8788");
     }
 
@@ -240,16 +245,32 @@ mod tests {
 
     #[test]
     fn classifies_statuses() {
-        assert_eq!(classify_error("LLM HTTP error: ... status: 404 ..."), "http_4xx");
-        assert_eq!(classify_error("LLM HTTP error: ... status: 503 ..."), "http_5xx");
-        assert_eq!(classify_error("Embedding HTTP error: Transport(...)"), "transport");
+        assert_eq!(
+            classify_error("LLM HTTP error: ... status: 404 ..."),
+            "http_4xx"
+        );
+        assert_eq!(
+            classify_error("LLM HTTP error: ... status: 503 ..."),
+            "http_5xx"
+        );
+        assert_eq!(
+            classify_error("Embedding HTTP error: Transport(...)"),
+            "transport"
+        );
     }
 
     #[test]
     fn build_entry_redacts_to_host_and_records_outcome() {
         let req = json!({"model": "text-embedding-v4", "input": "secret prompt"});
         let ok: Result<Value> = Ok(json!({"data":[1], "usage":{"prompt_tokens":3}}));
-        let e = build_entry("Embedding", "https://h.example.com/v1/embeddings", &req, &ok, 1, Duration::from_millis(42));
+        let e = build_entry(
+            "Embedding",
+            "https://h.example.com/v1/embeddings",
+            &req,
+            &ok,
+            1,
+            Duration::from_millis(42),
+        );
         assert_eq!(e["kind"], "embedding");
         assert_eq!(e["host"], "h.example.com");
         assert_eq!(e["status"], "ok");
@@ -257,7 +278,10 @@ mod tests {
         assert_eq!(e["latency_ms"], 42);
         assert_eq!(e["token_usage"]["prompt_tokens"], 3);
         // Request body (prompt) is captured; no api key is anywhere in the entry.
-        assert!(e["request_preview"].as_str().unwrap().contains("secret prompt"));
+        assert!(e["request_preview"]
+            .as_str()
+            .unwrap()
+            .contains("secret prompt"));
         assert!(!e.to_string().contains("Authorization"));
     }
 }

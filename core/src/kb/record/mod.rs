@@ -27,6 +27,11 @@ pub struct RecordParams<'a> {
     pub priority: i64,
     pub task_state: Option<&'a str>,
     pub source: &'a str,
+    /// 方案 H — 反事实审查:此 trace 若来自一次 appraise,且 actor **因警告回避了动作**
+    /// (没有真正采取该步,outcome 反映的是回避后的世界),则该结果不能当作直觉对错的
+    /// 证据 —— 标记为 `counterfactual_censored`,不计入校准映射 / ECE。默认 `false`
+    /// (actor 实际采取动作并观测到结果 → `observed`,计入校准)。
+    pub verdict_heeded: bool,
 }
 
 impl KnowledgeBase {
@@ -49,6 +54,7 @@ impl KnowledgeBase {
             priority,
             task_state,
             source,
+            verdict_heeded,
         } = params;
         let used_attribution = if used_attribution.is_empty() {
             "explicit"
@@ -254,6 +260,23 @@ impl KnowledgeBase {
                     )?;
                     self.storage.insert_usage_trace(
                         trace_id, None, event, strength, None, None, None, None, None, source, &now,
+                    )?;
+                    // 方案 B/H:回填 verdict_log 的实际结果(若该 trace 是一次 appraise)。
+                    // observed_outcome = +1 坏结果发生(fail) / -1 好结果(ok)。
+                    // provenance='observed':actor 实际采取动作并观测到结果,计入校准。
+                    // verdict_heeded=true:因警告回避了动作,outcome 是反事实,不计校准
+                    // (counterfactual_censored,见原则 3 / 方案 H)。
+                    let observed_outcome = if event == "task_fail" { 1.0 } else { -1.0 };
+                    let provenance = if verdict_heeded {
+                        "counterfactual_censored"
+                    } else {
+                        "observed"
+                    };
+                    self.storage.backfill_verdict_outcome(
+                        trace_id,
+                        observed_outcome,
+                        provenance,
+                        &now,
                     )?;
                 }
             }

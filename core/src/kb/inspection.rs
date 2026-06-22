@@ -265,7 +265,10 @@ impl KnowledgeBase {
         // Intuition honesty (PRD §4): does high strength actually predict success, and is
         // the critic crying wolf? Only nudge once enough appraisals carry an outcome.
         let intuition = self.intuition_calibration(&metric_window_start)?;
-        let appraisals = intuition.get("appraisals").and_then(Value::as_i64).unwrap_or(0);
+        let appraisals = intuition
+            .get("appraisals")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         let mono_gap = intuition
             .get("monotonicity_gap")
             .and_then(Value::as_f64)
@@ -467,6 +470,36 @@ impl KnowledgeBase {
             })
             .collect();
 
+        // 方案 B —— verdict_log 仪表盘:可证伪的 ECE / 弃权率(头号体检指标)。
+        // 与上面基于 recall_snapshot 的 tier-bucket 指标互补:verdict_log 直接用
+        // emitted_conf 分桶 + observed 回填算 ECE,且把弃权率作为一等健康信号。
+        let (vl_total, vl_abstained, vl_observed) =
+            self.storage.verdict_log_overview().unwrap_or((0, 0, 0));
+        let samples = self.storage.verdict_calibration_samples().unwrap_or_default();
+        let bins = self.calibration_bins.max(2);
+        let mut vhit = vec![0.0_f64; bins as usize];
+        let mut vtot = vec![0.0_f64; bins as usize];
+        // ECE 按 **emitted_conf** 分桶:衡量「声称置信度」的真实兑现率(校准映射重算
+        // 则按 strength 分桶,见 curate::recompute_calibration_map —— 两者域不同)。
+        for (_strength, conf, h) in &samples {
+            let b = ((conf * bins as f64).floor() as i64).clamp(0, bins - 1) as usize;
+            vtot[b] += 1.0;
+            vhit[b] += *h;
+        }
+        let n_obs: f64 = vtot.iter().sum();
+        let verdict_ece = if n_obs > 0.0 {
+            (0..bins as usize)
+                .filter(|&b| vtot[b] > 0.0)
+                .map(|b| {
+                    let claimed = (b as f64 + 0.5) / bins as f64;
+                    let actual = vhit[b] / vtot[b];
+                    (vtot[b] / n_obs) * (claimed - actual).abs()
+                })
+                .sum::<f64>()
+        } else {
+            0.0
+        };
+
         Ok(json!({
             "appraisals": total,
             "monotonicity_gap": (monotonicity_gap * 1000.0).round() / 1000.0,
@@ -474,6 +507,14 @@ impl KnowledgeBase {
             "false_alarm_rate": ratio(caution_strong_false, caution_strong),
             "silence_rate": ratio(silent, total),
             "buckets": bucket_detail,
+            // 方案 B verdict_log 仪表盘
+            "verdict_log": {
+                "total": vl_total,
+                "abstained": vl_abstained,
+                "abstain_rate": ratio(vl_abstained, vl_total),
+                "observed": vl_observed,
+                "ece": (verdict_ece * 1000.0).round() / 1000.0,
+            },
         }))
     }
 

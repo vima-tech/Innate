@@ -12,7 +12,12 @@ use crate::{RecordParams, Tier, Valence};
 
 const KEYS: &str = "stage,error_class,file_type";
 
-fn add_active(kb: &crate::KnowledgeBase, content: &str, trigger: &str, anti: Option<&str>) -> String {
+fn add_active(
+    kb: &crate::KnowledgeBase,
+    content: &str,
+    trigger: &str,
+    anti: Option<&str>,
+) -> String {
     kb.add(content, "note", Some(trigger), anti, "manual", None)
         .unwrap()
 }
@@ -36,10 +41,17 @@ fn recall_context_key_zero_regression() {
             ..Default::default()
         })
         .unwrap();
-    let log = kb.storage.get_episodic_log(&result.trace_id).unwrap().unwrap();
+    let log = kb
+        .storage
+        .get_episodic_log(&result.trace_id)
+        .unwrap()
+        .unwrap();
     let stored = log.get("context_key").and_then(Value::as_str).unwrap();
     let expected = Situation::from_query(query).context_key(KEYS);
-    assert_eq!(stored, expected, "recall context_key must match legacy query hash");
+    assert_eq!(
+        stored, expected,
+        "recall context_key must match legacy query hash"
+    );
 }
 
 // ---------------------------------------------------------------------------

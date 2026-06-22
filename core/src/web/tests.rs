@@ -15,10 +15,24 @@ fn ctx_with(token: Option<&str>) -> (Ctx, NamedTempFile) {
     let f = NamedTempFile::new().unwrap();
     let kb = KnowledgeBase::open(f.path()).unwrap();
     // Seed two chunks so list/detail have something to return.
-    kb.add("alpha content", "note", Some("when alpha"), None, "manual", Some("skill_a"))
-        .unwrap();
-    kb.add("beta content", "note", Some("when beta"), None, "manual", Some("skill_b"))
-        .unwrap();
+    kb.add(
+        "alpha content",
+        "note",
+        Some("when alpha"),
+        None,
+        "manual",
+        Some("skill_a"),
+    )
+    .unwrap();
+    kb.add(
+        "beta content",
+        "note",
+        Some("when beta"),
+        None,
+        "manual",
+        Some("skill_b"),
+    )
+    .unwrap();
     let ctx = Ctx {
         kb,
         token: token.map(String::from),
@@ -50,7 +64,14 @@ fn lists_chunks() {
 #[test]
 fn list_state_filter_matches_nothing_for_bogus_state() {
     let (ctx, _f) = ctx_with(None);
-    let r = route(&ctx, &Method::Get, "/api/chunks", "state=does-not-exist", &hdr(&[]), "");
+    let r = route(
+        &ctx,
+        &Method::Get,
+        "/api/chunks",
+        "state=does-not-exist",
+        &hdr(&[]),
+        "",
+    );
     assert_eq!(r.status, 200);
     let v: Value = serde_json::from_str(&r.body).unwrap();
     assert_eq!(v["chunks"].as_array().unwrap().len(), 0);
@@ -76,7 +97,14 @@ fn governance_queue_is_open() {
 #[test]
 fn llm_traces_endpoint_returns_array() {
     let (ctx, _f) = ctx_with(None);
-    let r = route(&ctx, &Method::Get, "/api/llm-traces", "limit=5", &hdr(&[]), "");
+    let r = route(
+        &ctx,
+        &Method::Get,
+        "/api/llm-traces",
+        "limit=5",
+        &hdr(&[]),
+        "",
+    );
     assert_eq!(r.status, 200);
     let v: Value = serde_json::from_str(&r.body).unwrap();
     // Shape is stable regardless of whether any calls have been traced yet.
@@ -106,7 +134,10 @@ fn governance_rejected_cross_origin() {
     let (ctx, _f) = ctx_with(Some("secret"));
     let id = first_chunk_id(&ctx);
     let path = format!("/api/chunk/{id}/approve");
-    let h = hdr(&[("origin", "http://evil.example.com"), ("x-innate-token", "secret")]);
+    let h = hdr(&[
+        ("origin", "http://evil.example.com"),
+        ("x-innate-token", "secret"),
+    ]);
     let r = route(&ctx, &Method::Post, &path, "", &h, "{}");
     assert_eq!(r.status, 403);
 }
@@ -116,7 +147,10 @@ fn governance_approve_with_token_succeeds() {
     let (ctx, _f) = ctx_with(Some("secret"));
     let id = first_chunk_id(&ctx);
     let path = format!("/api/chunk/{id}/approve");
-    let h = hdr(&[("origin", "http://127.0.0.1:8788"), ("x-innate-token", "secret")]);
+    let h = hdr(&[
+        ("origin", "http://127.0.0.1:8788"),
+        ("x-innate-token", "secret"),
+    ]);
     let r = route(&ctx, &Method::Post, &path, "", &h, "{}");
     assert_eq!(r.status, 200, "body: {}", r.body);
     let v: Value = serde_json::from_str(&r.body).unwrap();
@@ -157,7 +191,10 @@ fn non_loopback_reads_require_token() {
     let (mut ctx, _f) = ctx_with(Some("secret"));
     ctx.bind = "0.0.0.0".into();
     let denied = route(&ctx, &Method::Get, "/api/chunks", "", &hdr(&[]), "");
-    assert_eq!(denied.status, 403, "remote read without token must be denied");
+    assert_eq!(
+        denied.status, 403,
+        "remote read without token must be denied"
+    );
 
     let h = hdr(&[("x-innate-token", "secret")]);
     let ok = route(&ctx, &Method::Get, "/api/chunks", "", &h, "");

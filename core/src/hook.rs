@@ -219,6 +219,7 @@ fn run_hook_recall(db_path: &Path, kind: HookKind) -> anyhow::Result<()> {
         allow_trim: false,
         refine_mode: "off",
         min_score: Some(min_score),
+        session_only: false,
     })?;
 
     if result.knowledge.is_empty() {

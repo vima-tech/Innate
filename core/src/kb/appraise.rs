@@ -15,9 +15,9 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::actr_activation;
 use crate::errors::Result;
 use crate::storage::EpisodicLogRow;
-use super::actr_activation;
 use crate::utils::{gen_uuid, utc_now_iso, SanitizeAction};
 
 use super::{anti_trigger_hit, validate_source, KnowledgeBase, Situation, PENDING_RECALL_PENALTY};
@@ -25,6 +25,14 @@ use super::{anti_trigger_hit, validate_source, KnowledgeBase, Situation, PENDING
 // ---------------------------------------------------------------------------
 // Public types — note the absence of any answer-bearing field (enforced by T0.2).
 // ---------------------------------------------------------------------------
+
+/// 返给 agent 的固定声明:直觉只是参考信号,不是精准答案。在 MCP / CLI 的 appraise
+/// 响应里随每个 verdict 一起返回,提醒 actor「权衡、勿盲从、勿让直觉覆盖你自己对正确
+/// 答案的判断」。这是值域护栏(PRD §2.2/§5「直觉永不产出答案」)在交付层的显式表态。
+pub const APPRAISE_ADVISORY: &str = "Reference signal only — this is intuition (footing/caution), \
+not a precise or verified answer. Weigh it as one input; do not defer to it and never let it \
+override your own analysis of the correct answer. flagged_points are things to watch for, never \
+prescribed solutions. When abstained=true the critic has no footing — that is correct, not a failure.";
 
 /// Polarity of an intuition. Derived, never stored as a column (PRD §3.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -47,6 +55,21 @@ pub enum Tier {
     Weak,
     Medium,
     Strong,
+}
+
+/// 方案 A —— 弃权原因(四道门)。弃权是一等输出,不是失败:critic 的第一能力是
+/// 「说不知道」。短路顺序求值,记录第一道触发的门。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AbstainReason {
+    /// 门1:prune 后没有任何候选越过共振地板 —— 根本没共振到东西。
+    WeakResonance,
+    /// 门2:rich 嵌入近但 signature 远 —— 疑似假共振(方案 F)。
+    FalseResonance,
+    /// 门3:命中邻居缺乏实际观测结果历史 —— 没证据就不装懂(方案 C/门3)。
+    SparseEvidence,
+    /// 门4:top-k 邻居 fused 离散度过大 —— 本情境真实模糊(方案 G)。
+    Conflicted,
 }
 
 /// A single thing to be careful about. Comes from a caution-class chunk's `trigger_desc` —
@@ -83,6 +106,17 @@ pub struct Verdict {
     pub contributors: Vec<Contributor>,
     /// Threads appraise → record so an override can flow back via `record(feedback='down')`.
     pub trace_id: String,
+    /// 方案 A:弃权是一等输出。`true` 时 valence=Neutral、flagged 为空、confidence=0,
+    /// 但 strength 仍可见(弃权率/弃权精度的健康信号)。
+    pub abstained: bool,
+    /// 弃权原因;表态则 `None`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abstain_reason: Option<AbstainReason>,
+    /// 方案 E/G:经校准映射 + 邻居离散度塑形后的置信度 ∈ [0,1]。与 strength 区分:
+    /// strength 是原始共振强度,confidence 是「直觉对自己几斤几两的诚实估计」。
+    pub confidence: f64,
+    /// 方案 G:top-k 邻居 fused 离散度(max-min)。透明化,供下游判读模糊性。
+    pub dispersion: f64,
 }
 
 /// Parameters for [`KnowledgeBase::appraise`].
@@ -175,9 +209,16 @@ impl KnowledgeBase {
             })
             .collect();
         let cand_refs: Vec<&str> = cand_ids.iter().map(String::as_str).collect();
-        let ctx_scores = self
+        let ctx_scores = self.storage.context_scores_batch(
+            &cand_refs,
+            &context_key,
+            self.intuition_prior_m,
+            self.intuition_base_rate,
+        )?;
+        // 方案 F 门2:哪些邻居在 signature 通道(coarse 情境桶)也有校准历史。
+        let sig_present = self
             .storage
-            .context_scores_batch(&cand_refs, &context_key)?;
+            .context_stat_present_batch(&cand_refs, &context_key)?;
 
         // 4. Score every candidate with the *same* fused math as recall, but keep the
         //    resonance / calibration split for explainability, and derive a valence.
@@ -252,13 +293,61 @@ impl KnowledgeBase {
                 valence,
             });
         }
-        scored.sort_by(|a, b| b.fused.partial_cmp(&a.fused).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.fused
+                .partial_cmp(&a.fused)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         // Resonance prune (Spec §3.1: min_strength is the resonance lower bound). Sub-threshold
         // contributors are noise — they must not set strength/tier/valence, otherwise an
         // unrelated situation reads as weak-caution and silence_rate becomes dishonest. The floor
         // is the single gate for strength, tier, valence, contributors *and* flagged_points.
         scored.retain(|s| s.fused >= min_strength);
         scored.truncate(top);
+
+        // strength = max fused over survivors; dispersion (方案 G) = fused 极差。
+        let strength = scored.iter().map(|s| s.fused).fold(0.0_f64, f64::max);
+        let dispersion = if scored.len() >= 2 {
+            let hi = scored.iter().map(|s| s.fused).fold(f64::MIN, f64::max);
+            let lo = scored.iter().map(|s| s.fused).fold(f64::MAX, f64::min);
+            (hi - lo).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // ---- 方案 A:四道弃权门(短路顺序,记录第一道触发的门)----
+        let mut abstain: Option<AbstainReason> = None;
+        // 门1 弱共振:prune 后无候选越过共振地板 —— 根本没共振到。
+        if scored.is_empty() {
+            abstain = Some(AbstainReason::WeakResonance);
+        }
+        // 门2 假共振(方案 F):signature 通道一致度低于地板。默认 floor=0 → 关闭。
+        if abstain.is_none() && self.appraise_signature_floor > 0.0 {
+            let agree = scored
+                .iter()
+                .filter(|s| sig_present.contains(&s.chunk_id))
+                .count() as f64
+                / scored.len() as f64;
+            if agree < self.appraise_signature_floor {
+                abstain = Some(AbstainReason::FalseResonance);
+            }
+        }
+        // 门3 证据稀疏(方案 C/门3):有实际观测历史的邻居不足。默认 min_evidence=0 → 关闭。
+        if abstain.is_none() && self.appraise_min_evidence > 0 {
+            let mut observed = 0_i64;
+            for s in &scored {
+                if self.storage.observed_outcome_count(&s.chunk_id)? >= 1 {
+                    observed += 1;
+                }
+            }
+            if observed < self.appraise_min_evidence {
+                abstain = Some(AbstainReason::SparseEvidence);
+            }
+        }
+        // 门4 真实模糊(方案 G):邻居离散度超过上界。默认 ceiling=1.0 → 关闭。
+        if abstain.is_none() && dispersion > self.appraise_conflict_ceiling {
+            abstain = Some(AbstainReason::Conflicted);
+        }
 
         // 5. Aggregate: strength = max fused over surviving contributors; valence by max-affirm
         //    vs max-caution. flagged_points = the caution survivors.
@@ -271,15 +360,14 @@ impl KnowledgeBase {
         };
         let s_affirm = max_for(Valence::Affirm);
         let s_caution = max_for(Valence::Caution);
-        let strength = scored.iter().map(|s| s.fused).fold(0.0_f64, f64::max);
 
-        let valence = match (s_affirm > 0.0, s_caution > 0.0) {
+        let directional_valence = match (s_affirm > 0.0, s_caution > 0.0) {
             (true, true) => Valence::Mixed,
             (false, true) => Valence::Caution,
             (true, false) => Valence::Affirm,
             (false, false) => Valence::Neutral,
         };
-        let tier = if strength >= self.appraise_tier_strong {
+        let directional_tier = if strength >= self.appraise_tier_strong {
             Tier::Strong
         } else if strength >= self.appraise_tier_weak {
             Tier::Medium
@@ -287,17 +375,33 @@ impl KnowledgeBase {
             Tier::Weak
         };
 
-        let flagged_points: Vec<FlaggedPoint> = scored
-            .iter()
-            .filter(|s| s.valence == Valence::Caution && s.fused >= min_strength)
-            .map(|s| FlaggedPoint {
-                chunk_id: s.chunk_id.clone(),
-                summary: s.trigger_desc.clone(),
-                resonance: s.resonance,
-                calibration: s.calibration,
-                strength: s.fused,
-            })
-            .collect();
+        // 方案 E:校准映射(分桶查表;空 map = 恒等)。方案 G:再按离散度折损。
+        let calibrated = self.calibrate_confidence(strength);
+        let shaped_conf = (calibrated * (1.0 - dispersion)).clamp(0.0, 1.0);
+
+        // 弃权时 valence=Neutral、tier=Weak、flagged 为空、confidence=0;strength 仍可见。
+        let (valence, tier, confidence) = if abstain.is_some() {
+            (Valence::Neutral, Tier::Weak, 0.0)
+        } else {
+            (directional_valence, directional_tier, shaped_conf)
+        };
+
+        let flagged_points: Vec<FlaggedPoint> = if abstain.is_some() {
+            Vec::new()
+        } else {
+            scored
+                .iter()
+                .filter(|s| s.valence == Valence::Caution && s.fused >= min_strength)
+                .map(|s| FlaggedPoint {
+                    chunk_id: s.chunk_id.clone(),
+                    summary: s.trigger_desc.clone(),
+                    resonance: s.resonance,
+                    calibration: s.calibration,
+                    strength: s.fused,
+                })
+                .collect()
+        };
+        // contributors 始终保留(可解释性;弃权样本也留痕,符合零数据丢失)。
         let contributors: Vec<Contributor> = scored
             .iter()
             .map(|s| Contributor {
@@ -314,12 +418,24 @@ impl KnowledgeBase {
             flagged_points,
             contributors,
             trace_id: trace_id.clone(),
+            abstained: abstain.is_some(),
+            abstain_reason: abstain,
+            confidence,
+            dispersion,
         };
 
         // 6. Trace — same shape/timing as recall so a later record(trace_id, …) UPDATEs the
         //    same episodic_log row and flows the override back through confidence_evidence.
         if trace {
-            self.write_appraise_trace(&trace_id, &context_key, &raw_embed, &scored, &verdict, source, &now)?;
+            self.write_appraise_trace(
+                &trace_id,
+                &context_key,
+                &raw_embed,
+                &scored,
+                &verdict,
+                source,
+                &now,
+            )?;
         }
 
         Ok(verdict)
@@ -378,6 +494,10 @@ impl KnowledgeBase {
                     "valence": verdict.valence,
                     "tier": verdict.tier,
                     "strength": verdict.strength,
+                    "confidence": verdict.confidence,
+                    "dispersion": verdict.dispersion,
+                    "abstained": verdict.abstained,
+                    "abstain_reason": verdict.abstain_reason,
                     "flagged": verdict.flagged_points.iter().map(|f| &f.chunk_id).collect::<Vec<_>>(),
                 },
                 "retrieved": contributor_ids,
@@ -398,11 +518,64 @@ impl KnowledgeBase {
                 ..Default::default()
             };
             self.storage.upsert_episodic_log(&log)?;
+            // 方案 B:写 verdict_log —— 直觉模块可证伪的唯一数据源。弃权也入表
+            // (abstain_reason 非空、valence/conf 为空),弃权率本身是健康度信号。
+            let abstain_reason = verdict.abstain_reason.as_ref().map(|r| {
+                serde_json::to_value(r)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            });
+            let tier_str = serde_json::to_value(verdict.tier)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string));
+            let valence_str = serde_json::to_value(verdict.valence)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string));
+            self.storage.insert_verdict_log(
+                &gen_uuid(),
+                trace_id,
+                context_key,
+                if verdict.abstained {
+                    None
+                } else {
+                    valence_str.as_deref()
+                },
+                if verdict.abstained {
+                    None
+                } else {
+                    Some(verdict.confidence)
+                },
+                verdict.strength,
+                if verdict.abstained {
+                    None
+                } else {
+                    tier_str.as_deref()
+                },
+                abstain_reason.as_deref(),
+                now,
+            )?;
             self.storage.commit()
         })();
         if result.is_err() {
             let _ = self.storage.rollback();
         }
         result
+    }
+
+    /// 方案 E:把原始强度经学习到的校准映射(分桶查表)转成校准置信度。
+    /// 空 map(冷启动 / 数据不足)= 恒等,不引入偏差。命中桶则返回该桶的实际命中率。
+    fn calibrate_confidence(&self, raw: f64) -> f64 {
+        let map = match self.storage.load_calibration_map() {
+            Ok(m) if !m.is_empty() => m,
+            _ => return raw.clamp(0.0, 1.0),
+        };
+        for (lo, hi, rate) in &map {
+            if raw >= *lo && raw < *hi {
+                return rate.clamp(0.0, 1.0);
+            }
+        }
+        // 落在最后一桶上界(raw==1.0)→ 用最高桶。
+        map.last().map(|(_, _, r)| r.clamp(0.0, 1.0)).unwrap_or(raw)
     }
 }

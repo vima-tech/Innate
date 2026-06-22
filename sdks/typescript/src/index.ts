@@ -77,10 +77,26 @@ export interface Contributor {
  * (`strength`/`tier`), polarity (`valence`), and things to be careful about
  * (`flagged_points`).
  */
+export type AbstainReason =
+  | "weak_resonance"
+  | "false_resonance"
+  | "sparse_evidence"
+  | "conflicted";
+
 export interface Verdict {
+  /** Fixed declaration returned with every verdict: intuition is a reference
+   *  signal only, not a precise answer. Weigh it; never let it override analysis. */
+  advisory: string;
   valence: "affirm" | "caution" | "mixed" | "neutral";
   strength: number;
   tier: "weak" | "medium" | "strong";
+  /** Scheme E/G: calibrated, dispersion-shaped confidence ∈ [0,1]. */
+  confidence: number;
+  /** Scheme G: top-k neighbour fused dispersion (max−min). */
+  dispersion: number;
+  /** Scheme A: abstaining is a first-class, correct output — not a failure. */
+  abstained: boolean;
+  abstain_reason?: AbstainReason | null;
   flagged_points: FlaggedPoint[];
   contributors: Contributor[];
   trace_id: string;
@@ -227,6 +243,7 @@ export class KnowledgeBase {
       feedbackActor?: string;
       feedbackReason?: string;
       taskState?: "recalled" | "running" | "completed" | "abandoned" | "timed_out";
+      verdictHeeded?: boolean;
       source?: string;
     } = {}
   ): void {
@@ -251,6 +268,7 @@ export class KnowledgeBase {
     if (options.feedbackActor) args.push("--feedback-actor", options.feedbackActor);
     if (options.feedbackReason) args.push("--feedback-reason", options.feedbackReason);
     if (options.taskState) args.push("--task-state", options.taskState);
+    if (options.verdictHeeded) args.push("--verdict-heeded");
     this.runRaw(...args);
   }
 
@@ -543,6 +561,7 @@ export class McpClient {
     feedback_actor?: string;
     feedback_reason?: string;
     task_state?: string;
+    verdict_heeded?: boolean;
   } = {}): Promise<void> {
     await this.toolCall("innate_record", { trace_id: traceId, ...options });
   }

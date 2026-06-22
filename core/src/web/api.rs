@@ -66,7 +66,10 @@ pub(crate) fn handle(ctx: &Ctx, mut request: Request) {
 
     // Read the body (governance endpoints carry a small JSON payload).
     let mut body = String::new();
-    let _ = request.as_reader().take(64 * 1024).read_to_string(&mut body);
+    let _ = request
+        .as_reader()
+        .take(64 * 1024)
+        .read_to_string(&mut body);
 
     let resp = route(ctx, &method, path, query, &headers, &body);
 
@@ -122,9 +125,7 @@ pub(crate) fn route(
         },
 
         // Governance endpoints (token + same-origin required).
-        (Method::Post, ["api", "chunk", id, action]) => {
-            governance(ctx, headers, id, action, body)
-        }
+        (Method::Post, ["api", "chunk", id, action]) => governance(ctx, headers, id, action, body),
 
         _ => err(404, "not found"),
     }
@@ -132,7 +133,10 @@ pub(crate) fn route(
 
 fn list_chunks(ctx: &Ctx, query: &str) -> Resp {
     let params = parse_query(query);
-    let state = params.get("state").map(String::as_str).filter(|s| !s.is_empty());
+    let state = params
+        .get("state")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty());
     let origin = params
         .get("origin")
         .map(String::as_str)
@@ -148,7 +152,10 @@ fn list_chunks(ctx: &Ctx, query: &str) -> Resp {
         .unwrap_or(0);
 
     match ctx.kb.storage.list_chunks(state, origin, limit, offset) {
-        Ok(rows) => json_resp(200, json!({ "chunks": rows, "limit": limit, "offset": offset })),
+        Ok(rows) => json_resp(
+            200,
+            json!({ "chunks": rows, "limit": limit, "offset": offset }),
+        ),
         Err(e) => err(500, &e.to_string()),
     }
 }
@@ -179,7 +186,10 @@ fn list_governance(ctx: &Ctx, query: &str) -> Resp {
 /// Optional filters: `kind` (chat|embedding), `status` (ok|http_4xx|rate_limited|…).
 fn list_llm_traces(query: &str) -> Resp {
     let params = parse_query(query);
-    let kind = params.get("kind").map(String::as_str).filter(|s| !s.is_empty());
+    let kind = params
+        .get("kind")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty());
     let status = params
         .get("status")
         .map(String::as_str)

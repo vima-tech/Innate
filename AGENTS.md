@@ -121,12 +121,12 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
 | `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |
 | `upgrade.rs` | `innate upgrade` — GitHub Releases self-update + SHA-256 verify + atomic swap |
-| `migrate.rs` | Schema migration chain 4.0 → 4.14, each step atomic |
+| `migrate.rs` | Schema migration chain 4.0 → 4.15, each step atomic |
 | `hook.rs` | `innate hook stop` — Claude Code Stop payload → session.log events |
 | `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
 | `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `sanitize()`, cosine similarity |
 | `settings.rs` | `settings.json` parsing (LLM / Embedding / Daemon / Backup) |
-| `schema.sql` | Embedded schema (v4.14); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v4.15); `include_str!` at compile time |
 
 ### Filesystem layout (`~/.innate/`)
 

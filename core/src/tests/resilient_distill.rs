@@ -41,12 +41,16 @@ fn resilient_falls_back_only_after_budget_exhausted() {
 
     // attempts(0) < budget(2): primary error propagates so the retry machinery
     // gets to give the LLM another chance — no premature fallback.
-    let fresh = json!({"id": "L1", "query": "q", "output_summary": "do X then Y", "distill_attempts": 0});
-    assert!(r.distill_with_context(&fresh, std::slice::from_ref(&fresh)).is_err());
+    let fresh =
+        json!({"id": "L1", "query": "q", "output_summary": "do X then Y", "distill_attempts": 0});
+    assert!(r
+        .distill_with_context(&fresh, std::slice::from_ref(&fresh))
+        .is_err());
 
     // attempts(2) >= budget(2): primary error triggers deterministic fallback,
     // tagged so the chunk's provenance is honest.
-    let exhausted = json!({"id": "L1", "query": "q", "output_summary": "do X then Y", "distill_attempts": 2});
+    let exhausted =
+        json!({"id": "L1", "query": "q", "output_summary": "do X then Y", "distill_attempts": 2});
     let chunks = r
         .distill_with_context(&exhausted, std::slice::from_ref(&exhausted))
         .unwrap();
@@ -194,7 +198,11 @@ impl Distiller for ClusterSizeProbe {
             })
             .collect())
     }
-    fn distill_with_context(&self, primary: &Value, related: &[Value]) -> Result<Vec<DistilledChunk>> {
+    fn distill_with_context(
+        &self,
+        primary: &Value,
+        related: &[Value],
+    ) -> Result<Vec<DistilledChunk>> {
         self.sizes.lock().unwrap().push(related.len());
         let id = primary["id"].as_str().unwrap_or("").to_string();
         Ok(vec![DistilledChunk {

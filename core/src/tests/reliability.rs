@@ -276,6 +276,7 @@ fn partial_used_declaration_does_not_penalize_omitted_chunks() {
         priority: 0,
         task_state: None,
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
 
@@ -360,6 +361,7 @@ fn repeated_feedback_from_one_actor_is_capped_for_governance() {
             priority: 0,
             task_state: None,
             source: "sdk",
+            ..Default::default()
         })
         .unwrap();
     }
@@ -407,6 +409,7 @@ fn repeated_curate_does_not_double_count_open_trace_facts() {
         priority: 0,
         task_state: Some("running"),
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
 
@@ -516,6 +519,7 @@ fn partial_used_reports_merge_until_a_complete_report_replaces_them() {
             priority: 0,
             task_state: Some("running"),
             source: "sdk",
+            ..Default::default()
         })
         .unwrap();
     }
@@ -546,6 +550,7 @@ fn partial_used_reports_merge_until_a_complete_report_replaces_them() {
         priority: 0,
         task_state: Some("running"),
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
     let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
@@ -582,6 +587,7 @@ fn partial_used_reports_preserve_per_chunk_attribution() {
         priority: 0,
         task_state: Some("completed"),
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
     kb.record(RecordParams {
@@ -602,6 +608,7 @@ fn partial_used_reports_preserve_per_chunk_attribution() {
         priority: 0,
         task_state: None,
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
 

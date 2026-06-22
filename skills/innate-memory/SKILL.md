@@ -164,6 +164,7 @@ innate_record(..., nomination="SQLite UNIQUE index on partial WHERE clause requi
 | `innate_spark` | Quick idea for later | Brief distilled form; no review needed |
 | `innate_evolve` | End of session | `trigger="manual"`; distils logs + curates knowledge base |
 | `innate_inspect` | Health check | chunk counts, debt ratio, rebuild queue |
+| `innate_appraise` | Gut-check before a risky step | **Reference signal only — intuition, NOT a precise answer. Weigh it as one input; never let it override your own analysis. `abstained=true` means no footing — that is correct, not a failure** |
 
 **Never call without explicit user request:** `innate_approve`, `innate_archive`,
 `innate_invalidate`, `innate_restore`, `innate_mature_spark`, `innate_promote_spark`,

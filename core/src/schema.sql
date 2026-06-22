@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.14 (Rust edition)
+-- Innate knowledge layer schema v4.15 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.14');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.15');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -223,13 +223,45 @@ CREATE TABLE IF NOT EXISTS confidence_evidence (
     alpha       REAL NOT NULL,
     reason      TEXT NOT NULL,
     context_key TEXT,
-    ts          TEXT NOT NULL
+    ts          TEXT NOT NULL,
+    -- 方案 C:证据来源。仅 'observed' 计入可信度/校准;'verdict_derived' 留痕不计入。
+    provenance  TEXT NOT NULL DEFAULT 'observed'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_confidence_evidence_trace
   ON confidence_evidence(trace_id, chunk_id, kind)
   WHERE trace_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_confidence_evidence_chunk
   ON confidence_evidence(chunk_id, ts, id);
+
+-- 方案 B —— verdict_log:直觉模块的仪表盘(ECE / 可靠性曲线 / 弃权精度)。
+CREATE TABLE IF NOT EXISTS verdict_log (
+    verdict_id          TEXT PRIMARY KEY,
+    trace_id            TEXT NOT NULL,
+    situation_sig       TEXT NOT NULL,
+    emitted_valence     TEXT,
+    emitted_conf        REAL,
+    emitted_strength    REAL,
+    emitted_tier        TEXT,
+    abstain_reason      TEXT,
+    emitted_at          TEXT NOT NULL,
+    observed_outcome    REAL,
+    outcome_observed_at TEXT,
+    outcome_provenance  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_verdict_sig ON verdict_log(situation_sig);
+CREATE INDEX IF NOT EXISTS idx_verdict_trace ON verdict_log(trace_id);
+CREATE INDEX IF NOT EXISTS idx_verdict_pending ON verdict_log(outcome_observed_at)
+    WHERE outcome_observed_at IS NULL;
+
+-- 方案 E —— 学习到的校准映射(分桶查表;curate 周期性重算)。
+CREATE TABLE IF NOT EXISTS calibration_map (
+    bucket          INTEGER PRIMARY KEY,
+    claimed_lo      REAL NOT NULL,
+    claimed_hi      REAL NOT NULL,
+    observed_rate   REAL NOT NULL,
+    n               INTEGER NOT NULL,
+    updated_at      TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS chunk_context_stats (
     chunk_id          TEXT NOT NULL,

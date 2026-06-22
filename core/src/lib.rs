@@ -23,8 +23,8 @@ mod tests;
 
 pub use errors::{InnateError, Result};
 pub use kb::{
-    AppraiseParams, Contributor, CurateReport, FlaggedPoint, KnowledgeBase, RecallParams,
-    RecallResult, RecordParams, Situation, Tier, Valence, Verdict,
+    AbstainReason, AppraiseParams, Contributor, CurateReport, FlaggedPoint, KnowledgeBase,
+    RecallParams, RecallResult, RecordParams, Situation, Tier, Valence, Verdict, APPRAISE_ADVISORY,
 };
 
 /// Open a KnowledgeBase at `db_path`, injecting LLM providers from `~/.innate/settings.json`

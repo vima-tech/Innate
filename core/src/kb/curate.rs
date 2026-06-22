@@ -475,6 +475,7 @@ impl KnowledgeBase {
                         &note,
                         None,
                         &now_iso,
+                        "observed",
                     )?;
                     self.recompute_chunk_confidence(id, &now_iso)?;
                     self.storage.update_chunk_last_decayed_at(id, &now_iso)?;
@@ -594,7 +595,61 @@ impl KnowledgeBase {
             prune_req_result?;
         }
 
+        // 方案 E:重算校准映射(分桶查表)。从 verdict_log 的 observed 回填中,按声称
+        // 置信度分桶,算每桶实际命中率,供 appraise emit 时把 raw_conf → calibrated。
+        // 数据不足时不写(保持恒等),避免少数样本带偏。非致命:失败不阻断 curate。
+        if let Ok(n) = self.recompute_calibration_map(&now_iso) {
+            report
+                .stats
+                .insert("calibration_samples".to_string(), json!(n));
+        }
+
+        // 方案 I(误差驱动分区衰减)—— Phase 2,刻意留桩:需要 Phase 1 的 verdict_log
+        // 校准数据按 situation_sig 分区累积后才有意义。当前仍用 90 天时间半衰期
+        // (上方 decay 步),verdict_log.situation_sig 已是其未来数据源。详见实施文档 §6/§7.6。
+
         Ok(report)
+    }
+
+    /// 方案 E:用 verdict_log 的实际命中率重写 calibration_map。
+    /// 返回参与重算的 observed 样本数。样本太少(< 2×bins)则不动 map(保持恒等)。
+    fn recompute_calibration_map(&self, now: &str) -> Result<i64> {
+        let samples = self.storage.verdict_calibration_samples()?;
+        let bins = self.calibration_bins.max(2);
+        let min_samples = 2 * bins;
+        if (samples.len() as i64) < min_samples {
+            return Ok(samples.len() as i64);
+        }
+        // 累加每桶 (命中数, 总数)。桶 = floor(strength * bins),clamp 到 [0, bins-1]。
+        // **按 strength 分桶**:emit 时 `calibrate_confidence` 用原始 strength 查表,
+        // 故映射键域必须是 strength,而非已塑形的 emitted_conf(否则键域漂移、自指偏差)。
+        let mut hit = vec![0.0_f64; bins as usize];
+        let mut tot = vec![0.0_f64; bins as usize];
+        for (strength, _conf, h) in &samples {
+            let b = ((strength * bins as f64).floor() as i64).clamp(0, bins - 1) as usize;
+            tot[b] += 1.0;
+            hit[b] += *h;
+        }
+        let mut buckets: Vec<(f64, f64, f64, i64)> = Vec::with_capacity(bins as usize);
+        for b in 0..bins as usize {
+            let lo = b as f64 / bins as f64;
+            let hi = (b as f64 + 1.0) / bins as f64;
+            // 空桶回退到桶中点(无观测则恒等,不引入偏差)。
+            let rate = if tot[b] > 0.0 {
+                hit[b] / tot[b]
+            } else {
+                (lo + hi) / 2.0
+            };
+            buckets.push((lo, hi, rate, tot[b] as i64));
+        }
+        self.storage.begin_immediate()?;
+        let r = self.storage.replace_calibration_map(&buckets, now);
+        let r = r.and_then(|_| self.storage.commit());
+        if r.is_err() {
+            let _ = self.storage.rollback();
+            r?;
+        }
+        Ok(samples.len() as i64)
     }
 
     // ------------------------------------------------------------------

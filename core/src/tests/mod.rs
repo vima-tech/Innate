@@ -12,9 +12,11 @@ mod evolve_retries;
 mod feedback;
 mod governance;
 mod intuition;
+mod intuition_optim;
 mod reliability;
 mod resilient_distill;
 mod restoration;
+mod trace_semantics;
 
 use crate::embedding::{DummyEmbeddingProvider, EmbeddingProvider};
 use crate::errors::{InnateError, Result};
@@ -92,6 +94,7 @@ fn record_down_as(kb: &KnowledgeBase, chunk_id: &str, actor: &str) {
         priority: 0,
         task_state: None,
         source: "sdk",
+        ..Default::default()
     })
     .unwrap();
 }
