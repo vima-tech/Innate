@@ -51,5 +51,12 @@ pub fn open_kb(db_path: impl AsRef<std::path::Path>) -> Result<KnowledgeBase> {
         )) as Arc<dyn refine::Distiller>
     });
 
-    KnowledgeBase::open_with(db_path, embedding, None, distiller, None, None)
+    let kb = KnowledgeBase::open_with(db_path, embedding, None, distiller, None, None)?;
+    // Opt-in offline reranker (part d): wired only when an LLM is configured. recall
+    // invokes it solely when a caller sets rerank=true, so the hook path stays no-LLM.
+    let kb = match s.llm.as_ref() {
+        Some(c) => kb.with_reranker(Arc::new(llm::LlmReranker::new(c.clone()))),
+        None => kb,
+    };
+    Ok(kb)
 }

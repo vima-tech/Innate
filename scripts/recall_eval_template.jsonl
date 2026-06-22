@@ -1,0 +1,3 @@
+{"query": "how do I build the release binary", "relevant_ids": ["PUT-A-REAL-CHUNK-ID-HERE"]}
+{"query": "E0599 no method found", "relevant_ids": ["another-chunk-id", "and-another"]}
+{"query": "why is my sqlite write failing under concurrency", "relevant_ids": ["chunk-id-3"]}

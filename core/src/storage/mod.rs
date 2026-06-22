@@ -19,7 +19,7 @@ mod meta;
 mod raw;
 mod traces;
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.15";
+const EXPECTED_SCHEMA_VERSION: &str = "4.16";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("../schema.sql");

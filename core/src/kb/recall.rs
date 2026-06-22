@@ -28,6 +28,11 @@ pub struct RecallParams<'a> {
     /// strictly mean "entered the model context", so a caller that does not
     /// inject the result must set this. Defaults to `false` (full injection).
     pub session_only: bool,
+    /// Part (d) — opt-in offline LLM rerank of the candidate shortlist. Off by
+    /// default so the hot hook path stays no-LLM; only set it in latency-tolerant
+    /// callers ("deep recall"). No-op unless a reranker was injected (LLM configured),
+    /// and non-fatal: a reranker error falls back to the fused order.
+    pub rerank: bool,
 }
 
 impl KnowledgeBase {
@@ -44,6 +49,7 @@ impl KnowledgeBase {
             refine_mode,
             min_score,
             session_only,
+            rerank,
         } = params;
         let expand_deps = if expand_deps.is_empty() {
             "false"
@@ -65,17 +71,37 @@ impl KnowledgeBase {
         let situation = Situation::from_query(query);
         let context_key = situation.context_key(&self.situation_coarse_keys);
 
+        // Part (c) — query-embedding granularity. When enabled, anchor the vector
+        // query on the normalized situation signature in addition to the raw words.
+        // The lexical channel still matches the raw query (it indexes chunk text).
+        let embed_query = if self.embed_situation_signature {
+            let sig = situation.coarse_signature(&self.situation_coarse_keys);
+            if signature_has_signal(&sig) {
+                format!("{sig}\n{query}")
+            } else {
+                query.to_string()
+            }
+        } else {
+            query.to_string()
+        };
+
         let (q_content, q_trigger) = self
             .embedding
-            .embed_both(query)
+            .embed_both(&embed_query)
             .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))?;
 
-        // ANN candidates (non-spark)
-        let mut candidates = self.ann_candidates(&q_content, &q_trigger)?;
+        // ANN candidates (non-spark) — vector channels + lexical/BM25 (hybrid).
+        let mut candidates = self.ann_candidates(&q_content, &q_trigger, query)?;
         self.apply_soft_dep_bonus(&mut candidates)?;
 
         // Score + anti-trigger penalty
         let mut scored = self.score_candidates(candidates, query, &context_key, &now)?;
+
+        // Part (d) — opt-in offline rerank of the shortlist before packing. Non-fatal:
+        // a reranker error or empty result leaves the fused order untouched.
+        if rerank {
+            self.apply_rerank(query, &mut scored);
+        }
 
         // Relevance gate — drop sub-threshold candidates before packing/trace so the
         // trace records only what was actually surfaced (keeps selected→used stats clean).
@@ -147,6 +173,7 @@ impl KnowledgeBase {
         &self,
         q_content: &[f32],
         q_trigger: &[f32],
+        query: &str,
     ) -> Result<HashMap<String, CandidateInfo>> {
         let embed_version = self
             .storage
@@ -160,13 +187,20 @@ impl KnowledgeBase {
         let trigger_res = self
             .storage
             .search_vec_trigger(q_trigger, self.top_k_candidates * 2)?;
+        // Hybrid 检索 — lexical/BM25 channel. Recovers exact-term matches (error
+        // codes, flags, symbol names) that embedding similarity blurs away. Empty
+        // when the query has no usable tokens, so vector-only behaviour is preserved.
+        let lexical_res = self
+            .storage
+            .search_lexical(query, self.top_k_candidates * 2)?;
 
-        // Collect unique ids and batch-fetch all chunks in two queries instead of N individual ones.
+        // Collect unique ids across all three channels and batch-fetch in one query.
         let all_ids: Vec<&str> = {
             let mut seen = HashSet::new();
             content_res
                 .iter()
                 .chain(trigger_res.iter())
+                .chain(lexical_res.iter())
                 .map(|(id, _)| id.as_str())
                 .filter(|id| seen.insert(*id))
                 .collect()
@@ -174,17 +208,10 @@ impl KnowledgeBase {
         let chunks = self.storage.get_chunks_by_ids(&all_ids)?;
 
         let mut candidates: HashMap<String, CandidateInfo> = HashMap::new();
-
         for (cid, sim) in &content_res {
             if let Some(chunk) = chunks.get(cid) {
                 if chunk_is_valid_for_recall(chunk, embed_version) {
-                    let e = candidates
-                        .entry(cid.clone())
-                        .or_insert_with(|| CandidateInfo {
-                            chunk: chunk.clone(),
-                            sim_content: 0.0,
-                            sim_trigger: 0.0,
-                        });
+                    let e = candidates.entry(cid.clone()).or_insert_with(|| new_candidate(chunk));
                     e.sim_content = e.sim_content.max(*sim);
                 }
             }
@@ -192,14 +219,16 @@ impl KnowledgeBase {
         for (cid, sim) in &trigger_res {
             if let Some(chunk) = chunks.get(cid) {
                 if chunk_is_valid_for_recall(chunk, embed_version) {
-                    let e = candidates
-                        .entry(cid.clone())
-                        .or_insert_with(|| CandidateInfo {
-                            chunk: chunk.clone(),
-                            sim_content: 0.0,
-                            sim_trigger: 0.0,
-                        });
+                    let e = candidates.entry(cid.clone()).or_insert_with(|| new_candidate(chunk));
                     e.sim_trigger = e.sim_trigger.max(*sim);
+                }
+            }
+        }
+        for (cid, sim) in &lexical_res {
+            if let Some(chunk) = chunks.get(cid) {
+                if chunk_is_valid_for_recall(chunk, embed_version) {
+                    let e = candidates.entry(cid.clone()).or_insert_with(|| new_candidate(chunk));
+                    e.sim_lexical = e.sim_lexical.max(*sim);
                 }
             }
         }
@@ -259,11 +288,7 @@ impl KnowledgeBase {
                 }
                 let e = candidates
                     .entry(dst.clone())
-                    .or_insert_with(|| CandidateInfo {
-                        chunk: target.clone(),
-                        sim_content: 0.0,
-                        sim_trigger: 0.0,
-                    });
+                    .or_insert_with(|| new_candidate(target));
                 e.sim_content = (e.sim_content + 0.05).min(1.0);
             }
         }
@@ -317,6 +342,7 @@ impl KnowledgeBase {
             let activation = actr_activation(used_count, last_used_at, now);
             let mut fused = self.w_content * info.sim_content as f64
                 + self.w_trigger * info.sim_trigger as f64
+                + self.w_lexical * info.sim_lexical as f64
                 + self.w_confidence * conf
                 + self.w_context * context_score
                 + self.w_activation * activation;
@@ -334,12 +360,35 @@ impl KnowledgeBase {
             let mut chunk = info.chunk;
             chunk["_context_score"] = json!(context_score);
             chunk["_activation"] = json!(activation);
+            chunk["_sim_lexical"] = json!(info.sim_lexical);
             chunk["_fused_score"] = json!(fused);
             scored.push((fused, chunk));
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(self.top_k_candidates);
         Ok(scored)
+    }
+
+    /// Part (d) — reorder the scored shortlist by the injected reranker. Stable:
+    /// reranked ids move to the front in the reranker's order; anything the reranker
+    /// omits keeps its fused-relative position. Non-fatal — a reranker error or empty
+    /// result leaves `scored` untouched, so retrieval never depends on the LLM.
+    fn apply_rerank(&self, query: &str, scored: &mut [(f64, Value)]) {
+        let chunks: Vec<Value> = scored.iter().map(|(_, c)| c.clone()).collect();
+        let order = match self.reranker.rerank(query, &chunks) {
+            Ok(order) if !order.is_empty() => order,
+            _ => return,
+        };
+        let rank: HashMap<&str, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        scored.sort_by_key(|(_, c)| {
+            rank.get(c["id"].as_str().unwrap_or(""))
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
     }
 
     fn pack(

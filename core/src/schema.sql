@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.15 (Rust edition)
+-- Innate knowledge layer schema v4.16 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.15');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.16');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -83,6 +83,29 @@ CREATE TABLE IF NOT EXISTS vec_trigger (
     chunk_id  TEXT PRIMARY KEY,
     embedding BLOB NOT NULL
 );
+
+-- Hybrid retrieval (混合检索): a lexical/BM25 channel alongside vector cosine.
+-- Embeddings blur exact tokens (error codes E0599, flags --release, symbol names);
+-- this FTS5 index recovers exact-term matches that vector search misses. Standalone
+-- (self-contained) FTS5 — `id` is stored UNINDEXED so search returns the chunk id
+-- directly; the triggers below keep it in sync with every chunk write, so all
+-- chunk writers (lifecycle/distill/curate) update the index automatically.
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    id UNINDEXED, content, trigger_desc, skill_name,
+    tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS chunks_fts_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, id, content, trigger_desc, skill_name)
+    VALUES (new.rowid, new.id, new.content, new.trigger_desc, new.skill_name);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_fts_ad AFTER DELETE ON chunks BEGIN
+    DELETE FROM chunks_fts WHERE rowid = old.rowid;
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_fts_au AFTER UPDATE ON chunks BEGIN
+    DELETE FROM chunks_fts WHERE rowid = old.rowid;
+    INSERT INTO chunks_fts(rowid, id, content, trigger_desc, skill_name)
+    VALUES (new.rowid, new.id, new.content, new.trigger_desc, new.skill_name);
+END;
 
 CREATE TABLE IF NOT EXISTS deps (
     src       TEXT NOT NULL,

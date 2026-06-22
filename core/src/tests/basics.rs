@@ -29,6 +29,7 @@ fn min_score_gate_drops_subthreshold_candidates() {
         refine_mode: "off",
         min_score: None,
         session_only: false,
+        ..Default::default()
     };
 
     // No gate: the chunk is retrievable.
@@ -78,6 +79,7 @@ fn add_and_recall() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     assert!(!result.trace_id.is_empty());
@@ -115,6 +117,7 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     assert!(first
@@ -147,6 +150,7 @@ fn warm_cache_reflects_writes_made_after_first_recall() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     assert!(
@@ -329,6 +333,7 @@ fn mcp_is_a_valid_event_source() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     kb.record(RecordParams {
@@ -374,6 +379,7 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     let before = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
@@ -412,6 +418,7 @@ fn unknown_usage_does_not_penalize_selected_chunks() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     let explicitly_unused: Vec<String> = vec![];
@@ -464,6 +471,7 @@ fn feedback_is_auditable_and_builds_contextual_governance_evidence() {
                 refine_mode: "off",
                 min_score: None,
                 session_only: false,
+                ..Default::default()
             })
             .unwrap();
         let used = vec![chunk_id.clone()];
@@ -575,6 +583,108 @@ fn invalidate_cascade() {
     assert!(kb.storage.is_hash_invalidated(h).unwrap());
 }
 
+// 混合检索:词法/BM25 通道应召回「精确 token 命中、但语义嵌入(此处用哑向量)
+// 命中不到」的 chunk —— 这正是向量检索对错误码/参数/符号名的盲区。
+#[test]
+fn lexical_channel_recovers_exact_token_match() {
+    let (kb, _f) = tmp_kb();
+    // 一堆干扰 chunk + 一个含罕见精确 token(错误码 E0599)的目标 chunk。
+    for i in 0..5 {
+        kb.add(
+            &format!("general advice number {i} about unrelated topics"),
+            "note",
+            Some("misc guidance"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    }
+    let target = kb
+        .add(
+            "Fix E0599 no-method-found by importing the relevant trait into scope",
+            "note",
+            Some("rust trait method resolution"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+
+    // 用纯精确 token 查询 —— 哑向量不会把它排上来,词法通道必须命中。
+    let r = kb
+        .recall(RecallParams {
+            query: "E0599",
+            budget: 8000,
+            trace: false,
+            source: "sdk",
+            ..Default::default()
+        })
+        .unwrap();
+    let hit = r
+        .knowledge
+        .iter()
+        .any(|c| c.get("id").and_then(|v| v.as_str()) == Some(target.as_str()));
+    assert!(hit, "词法通道应召回含精确 token E0599 的 chunk");
+}
+
+// 部分 d:opt-in 重排器应在 rerank=true 时重排候选(此处用无网络的桩重排器,把指定
+// id 顶到最前),且默认 rerank=false 时不触发(热路径保持无 LLM)。
+struct PinReranker {
+    first: String,
+}
+impl crate::refine::Reranker for PinReranker {
+    fn rerank(&self, _q: &str, candidates: &[Value]) -> crate::errors::Result<Vec<String>> {
+        let mut ids: Vec<String> = candidates
+            .iter()
+            .filter_map(|c| c["id"].as_str().map(str::to_string))
+            .collect();
+        ids.sort_by_key(|id| usize::from(*id != self.first));
+        Ok(ids)
+    }
+}
+
+#[test]
+fn opt_in_reranker_reorders_shortlist() {
+    let file = NamedTempFile::new().unwrap();
+    let kb = KnowledgeBase::open_with(file.path(), None, None, None, None, None).unwrap();
+    // Three chunks sharing a trigger word so all surface as candidates.
+    let mut ids = Vec::new();
+    for tag in ["alpha", "beta", "gamma"] {
+        ids.push(
+            kb.add(
+                &format!("workflow step {tag} for the pipeline"),
+                "note",
+                Some("pipeline workflow step"),
+                None,
+                "manual",
+                None,
+            )
+            .unwrap(),
+        );
+    }
+    let pinned = ids[2].clone();
+    let kb = kb.with_reranker(std::sync::Arc::new(PinReranker {
+        first: pinned.clone(),
+    }));
+
+    let reranked = kb
+        .recall(RecallParams {
+            query: "pipeline workflow step",
+            budget: 100_000,
+            trace: false,
+            source: "sdk",
+            rerank: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        reranked.knowledge.first().and_then(|c| c["id"].as_str()),
+        Some(pinned.as_str()),
+        "rerank=true should pin the reranker's first id to the front"
+    );
+}
+
 #[test]
 fn inspect_returns_counts() {
     let (kb, _f) = tmp_kb();
@@ -626,6 +736,7 @@ fn refine_runs_only_in_adapt_mode() {
         refine_mode: "off",
         min_score: None,
         session_only: false,
+        ..Default::default()
     })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -642,6 +753,7 @@ fn refine_runs_only_in_adapt_mode() {
         refine_mode: "adapt",
         min_score: None,
         session_only: false,
+        ..Default::default()
     })
     .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);

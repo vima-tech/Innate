@@ -58,6 +58,10 @@ pub enum Commands {
         /// not inject the recalled knowledge into a model context.
         #[arg(long)]
         session: bool,
+        /// Deep recall: rerank the shortlist with the configured LLM (offline,
+        /// latency-tolerant). No-op without an LLM; never used by hooks.
+        #[arg(long)]
+        rerank: bool,
     },
     /// Critic: judge how much footing exists for a candidate in a situation.
     /// Returns {valence, strength, tier, flagged_points} — never an answer.
@@ -224,6 +228,17 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Measure recall quality on a labeled set using the configured embedding
+    /// provider. Reads JSONL ({"query": "...", "relevant_ids": ["id", ...]}) and
+    /// reports P@1 / Recall@k / MRR / nDCG@k. The honest way to know whether
+    /// retrieval accuracy is actually a problem before tuning weights.
+    RecallEval {
+        /// Path to a JSONL labels file (one {query, relevant_ids} object per line).
+        labels: PathBuf,
+        /// Cutoff k for Recall@k / nDCG@k and the recall `top` (default 10).
+        #[arg(long, default_value = "10")]
+        k: usize,
+    },
     /// Upgrade the innate binary to the latest (or specified) release
     Upgrade {
         /// Install this specific version, e.g. 0.3.0 or v0.3.0 (default: latest)
@@ -326,6 +341,7 @@ pub fn run() -> anyhow::Result<()> {
             source,
             min_score,
             session,
+            rerank,
         } => {
             let result = kb.recall(RecallParams {
                 query: &query,
@@ -339,6 +355,7 @@ pub fn run() -> anyhow::Result<()> {
                 refine_mode: &refine_mode,
                 min_score,
                 session_only: session,
+                rerank,
             })?;
             match format.as_str() {
                 "json" => println!(
@@ -646,6 +663,67 @@ pub fn run() -> anyhow::Result<()> {
                 r.daemon_events_deleted, r.open_logs_retired, r.selected_before, r.selected_after
             );
         }
+        Commands::RecallEval { labels, k } => {
+            let text = std::fs::read_to_string(&labels)
+                .map_err(|e| anyhow::anyhow!("read labels {}: {e}", labels.display()))?;
+            let mut n = 0usize;
+            let (mut sum_p1, mut sum_recall, mut sum_mrr, mut sum_ndcg) = (0.0, 0.0, 0.0, 0.0);
+            for (lineno, line) in text.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let row: serde_json::Value = serde_json::from_str(line)
+                    .map_err(|e| anyhow::anyhow!("labels line {}: {e}", lineno + 1))?;
+                let query = row.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let relevant: std::collections::HashSet<String> = row
+                    .get("relevant_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if query.is_empty() || relevant.is_empty() {
+                    continue;
+                }
+                let result = kb.recall(RecallParams {
+                    query,
+                    budget: 100_000,
+                    trace: false,
+                    top: Some(k),
+                    source: "cli",
+                    ..Default::default()
+                })?;
+                let ranked: Vec<String> = result
+                    .knowledge
+                    .iter()
+                    .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                    .collect();
+                let (p1, recall_k, mrr, ndcg) = recall_metrics(&ranked, &relevant, k);
+                sum_p1 += p1;
+                sum_recall += recall_k;
+                sum_mrr += mrr;
+                sum_ndcg += ndcg;
+                n += 1;
+            }
+            if n == 0 {
+                return Err(anyhow::anyhow!(
+                    "no usable labeled queries (need lines with non-empty query + relevant_ids)"
+                ));
+            }
+            let nf = n as f64;
+            let out = json!({
+                "queries": n,
+                "k": k,
+                "p_at_1": (sum_p1 / nf * 1000.0).round() / 1000.0,
+                "recall_at_k": (sum_recall / nf * 1000.0).round() / 1000.0,
+                "mrr": (sum_mrr / nf * 1000.0).round() / 1000.0,
+                "ndcg_at_k": (sum_ndcg / nf * 1000.0).round() / 1000.0,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
         Commands::Web {
             bind,
             port,
@@ -677,4 +755,86 @@ pub fn run() -> anyhow::Result<()> {
         | Commands::Hook { .. } => unreachable!(),
     }
     Ok(())
+}
+
+/// Pure ranking metrics for a single query (part b — measurable recall quality).
+/// `ranked` is the recalled chunk ids in rank order; `relevant` the labeled
+/// ground-truth set. Returns `(p_at_1, recall_at_k, mrr, ndcg_at_k)`, each in
+/// `[0,1]`. Kept IO-free so it is unit-testable without a database.
+pub(crate) fn recall_metrics(
+    ranked: &[String],
+    relevant: &std::collections::HashSet<String>,
+    k: usize,
+) -> (f64, f64, f64, f64) {
+    let topk = &ranked[..ranked.len().min(k)];
+    let p_at_1 = topk
+        .first()
+        .map(|id| relevant.contains(id) as u8 as f64)
+        .unwrap_or(0.0);
+    let hits = topk.iter().filter(|id| relevant.contains(*id)).count();
+    let recall_at_k = hits as f64 / relevant.len() as f64;
+    // MRR over the full ranking: reciprocal rank of the first relevant hit.
+    let mrr = ranked
+        .iter()
+        .position(|id| relevant.contains(id))
+        .map(|pos| 1.0 / (pos as f64 + 1.0))
+        .unwrap_or(0.0);
+    // nDCG@k with binary relevance. IDCG = ideal placement of min(|rel|, k) hits.
+    let dcg: f64 = topk
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| relevant.contains(*id))
+        .map(|(i, _)| 1.0 / ((i as f64 + 2.0).log2()))
+        .sum();
+    let ideal_hits = relevant.len().min(k);
+    let idcg: f64 = (0..ideal_hits)
+        .map(|i| 1.0 / ((i as f64 + 2.0).log2()))
+        .sum();
+    let ndcg = if idcg > 0.0 { dcg / idcg } else { 0.0 };
+    (p_at_1, recall_at_k, mrr, ndcg)
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::recall_metrics;
+    use std::collections::HashSet;
+
+    fn rel(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+    fn ranked(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn perfect_ranking_scores_one() {
+        let (p1, r, mrr, ndcg) = recall_metrics(&ranked(&["a", "b", "x"]), &rel(&["a", "b"]), 5);
+        assert!((p1 - 1.0).abs() < 1e-9);
+        assert!((r - 1.0).abs() < 1e-9);
+        assert!((mrr - 1.0).abs() < 1e-9);
+        assert!((ndcg - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn missed_first_lowers_p1_and_mrr() {
+        // Relevant item is at rank 2 → P@1=0, MRR=0.5, Recall@5=1.0.
+        let (p1, r, mrr, _ndcg) = recall_metrics(&ranked(&["x", "a"]), &rel(&["a"]), 5);
+        assert_eq!(p1, 0.0);
+        assert!((mrr - 0.5).abs() < 1e-9);
+        assert!((r - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn k_cutoff_limits_recall() {
+        // Only the first id counts at k=1; the relevant one at rank 2 is excluded.
+        let (_p1, r, _mrr, ndcg) = recall_metrics(&ranked(&["x", "a"]), &rel(&["a"]), 1);
+        assert_eq!(r, 0.0);
+        assert_eq!(ndcg, 0.0);
+    }
+
+    #[test]
+    fn no_hits_is_all_zero() {
+        let (p1, r, mrr, ndcg) = recall_metrics(&ranked(&["x", "y"]), &rel(&["a"]), 5);
+        assert_eq!((p1, r, mrr, ndcg), (0.0, 0.0, 0.0, 0.0));
+    }
 }

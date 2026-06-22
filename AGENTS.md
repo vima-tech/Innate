@@ -121,12 +121,12 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
 | `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |
 | `upgrade.rs` | `innate upgrade` — GitHub Releases self-update + SHA-256 verify + atomic swap |
-| `migrate.rs` | Schema migration chain 4.0 → 4.15, each step atomic |
+| `migrate.rs` | Schema migration chain 4.0 → 4.16, each step atomic |
 | `hook.rs` | `innate hook stop` — Claude Code Stop payload → session.log events |
 | `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
 | `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `sanitize()`, cosine similarity |
 | `settings.rs` | `settings.json` parsing (LLM / Embedding / Daemon / Backup) |
-| `schema.sql` | Embedded schema (v4.15); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v4.16); `include_str!` at compile time |
 
 ### Filesystem layout (`~/.innate/`)
 
@@ -161,6 +161,16 @@ evolve()  →  distill (new→pending chunks) + builtin_curate (aggregate→arch
 ### Vector Search
 
 No sqlite-vec dependency. Embeddings stored as raw `f32` BLOBs in `vec_content` / `vec_trigger` tables. `storage/` loads all embeddings into memory and computes cosine similarity in Rust. Designed for up to ~100k chunks (HNSW deliberately rejected); swap `EmbeddingProvider` and `Storage` if scale demands it.
+
+### Hybrid retrieval (混合检索, v4.16)
+
+`recall` fuses **three** candidate channels, not just vectors: content-cosine, trigger-cosine, and a **lexical/BM25** channel (`chunks_fts`, a standalone FTS5 table kept in sync by triggers; `storage::search_lexical`). The lexical channel recovers exact-token matches (error codes, flags, symbol names) that embeddings blur. Fused score = `w_content·sim_content + w_trigger·sim_trigger + w_lexical·sim_lexical + w_confidence·conf + w_context·context_score + w_activation·activation` (+ pending/anti penalties). All weights are meta-tunable (`recall.w_*`).
+
+Two opt-in levers, both **off by default** so the no-LLM hot path is unchanged:
+- `recall.embed_situation_signature` (meta flag) — fold the coarse situation signature into the embedded query (part c, granularity).
+- `RecallParams.rerank` / CLI `--rerank` — offline LLM rerank of the shortlist via the injectable `Reranker` (default `NoopReranker`; `LlmReranker` wired by `open_kb` when an LLM is configured). **Never** used by hooks/MCP; non-fatal (falls back to fused order).
+
+Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k N]` (reports P@1 / Recall@k / MRR / nDCG@k using the configured provider). Template: `scripts/recall_eval_template.jsonl`. This is distinct from `cargo test eval`, which validates the ranking math on dummy-embedding fixtures.
 
 ## Non-Obvious Implementation Constraints
 

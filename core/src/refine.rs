@@ -56,6 +56,32 @@ impl Refiner for NullRefiner {
     }
 }
 
+/// Reranker — part (d): an OPT-IN, OFFLINE reasoning pass over the top vector/lexical
+/// candidates. Returns the candidate ids in a new (more relevant) order. This is the
+/// "PageIndex-style reasoning over relevance" benefit applied as a re-ranker on a small
+/// shortlist, **never** in the latency-critical hook path (recall stays no-LLM unless a
+/// caller explicitly sets `rerank=true`). Errors must be non-fatal at the call site:
+/// recall falls back to the fused order so a flaky LLM never breaks retrieval.
+pub trait Reranker: Send + Sync {
+    /// Given the `query` and `candidates` (each a chunk JSON with at least `id`,
+    /// `content`, `trigger_desc`), return the ids in preferred order. Implementations
+    /// may return a subset/superset; the caller intersects with the known candidates.
+    fn rerank(&self, query: &str, candidates: &[Value]) -> Result<Vec<String>>;
+}
+
+/// No-op reranker (default): preserves the incoming fused order. Used whenever no LLM
+/// is configured or the caller did not opt in.
+pub struct NoopReranker;
+
+impl Reranker for NoopReranker {
+    fn rerank(&self, _query: &str, candidates: &[Value]) -> Result<Vec<String>> {
+        Ok(candidates
+            .iter()
+            .filter_map(|c| c.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect())
+    }
+}
+
 /// Distiller — episodic logs → zero or more pending chunks per input log.
 pub trait Distiller: Send + Sync {
     fn distill(&self, log_entries: &[Value]) -> Result<Vec<DistilledChunk>>;

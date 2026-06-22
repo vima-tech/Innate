@@ -328,6 +328,51 @@ impl Storage {
             .collect())
     }
 
+    /// Lexical/BM25 retrieval channel (hybrid 检索的词法一路). Builds a safe FTS5
+    /// MATCH from the query's alphanumeric tokens and returns up to `limit`
+    /// non-archived, non-spark chunks ranked by BM25, with each score normalised
+    /// to `(0,1]` (best match → 1.0) so it can fuse alongside cosine sims.
+    /// Returns empty when the query has no usable tokens (degrades to vector-only).
+    pub fn search_lexical(&self, query: &str, limit: usize) -> Result<Vec<(String, f32)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(match_expr) = fts5_match_query(query) else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT chunks_fts.id, bm25(chunks_fts) AS score
+             FROM chunks_fts
+             JOIN chunks c ON c.id = chunks_fts.id
+             WHERE chunks_fts MATCH ?1
+               AND c.state != 'archived' AND c.origin != 'spark'
+             ORDER BY score ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![match_expr, limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        // FTS5 bm25(): more negative = more relevant. Convert to positive
+        // relevance and normalise by the best in this result set (scale-stable
+        // across queries; the top lexical hit always maps to 1.0).
+        let raw: Vec<(String, f64)> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let best_rel = raw.iter().map(|(_, s)| -s).fold(f64::MIN, f64::max);
+        let out = raw
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, score))| {
+                let sim = if best_rel > 0.0 {
+                    (-score / best_rel).clamp(0.0, 1.0) as f32
+                } else {
+                    // Degenerate (non-positive relevances): fall back to rank decay.
+                    ((limit - i) as f32) / (limit as f32)
+                };
+                (id, sim)
+            })
+            .collect();
+        Ok(out)
+    }
+
     fn refresh_vector_caches_if_changed(&self) -> Result<()> {
         let current = self
             .get_meta("vector_revision")?
@@ -492,4 +537,32 @@ impl Storage {
     }
 
     // ------------------------------------------------------------------
+}
+
+/// Build a safe FTS5 MATCH expression from free text. Splits on non-alphanumeric
+/// boundaries, lowercases, drops 1-char and a few high-frequency tokens, quotes
+/// each remaining token as a phrase (so no FTS5 operator can be injected), and
+/// OR-joins them. BM25's IDF naturally downweights common terms, so aggressive
+/// stop-word pruning is unnecessary. Returns `None` when nothing usable remains.
+pub(crate) fn fts5_match_query(query: &str) -> Option<String> {
+    // Minimal stop set — only the highest-frequency function words. Kept small on
+    // purpose: BM25 idf handles the rest, and over-pruning loses recall.
+    const STOP: &[&str] = &[
+        "the", "a", "an", "to", "of", "in", "on", "for", "and", "or", "is", "do", "i",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_lowercase())
+        .filter(|t| !STOP.contains(&t.as_str()))
+        .filter(|t| seen.insert(t.clone()))
+        .take(32)
+        .map(|t| format!("\"{t}\""))
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" OR "))
+    }
 }

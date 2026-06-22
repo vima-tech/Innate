@@ -583,7 +583,8 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             "4.11→4.12",
             "4.12→4.13",
             "4.13→4.14",
-            "4.14→4.15"
+            "4.14→4.15",
+            "4.15→4.16"
         ]
     );
 
@@ -603,7 +604,7 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "4.15");
+    assert_eq!(version, "4.16");
 }
 
 #[test]
@@ -902,6 +903,7 @@ fn recall_refreshes_vector_cache_after_external_write() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
 
@@ -930,6 +932,7 @@ fn recall_refreshes_vector_cache_after_external_write() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     assert!(result

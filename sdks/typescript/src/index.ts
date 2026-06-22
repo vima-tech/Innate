@@ -178,6 +178,7 @@ export class KnowledgeBase {
       expandDeps?: string;
       allowTrim?: boolean;
       refineMode?: string;
+      rerank?: boolean;
     } = {}
   ): RecallResult {
     const args = [
@@ -197,6 +198,7 @@ export class KnowledgeBase {
     if (options.top != null) args.push("--top", String(options.top));
     if (options.includeSparks) args.push("--include-sparks");
     if (options.allowTrim) args.push("--allow-trim");
+    if (options.rerank) args.push("--rerank");
     return this.run<RecallResult>(...args);
   }
 

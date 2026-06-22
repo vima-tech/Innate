@@ -321,6 +321,7 @@ fn ranked_ids(kb: &KnowledgeBase, query: &str, top: usize) -> Vec<String> {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     res.knowledge

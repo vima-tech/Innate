@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::embedding::EmbeddingProvider;
 use crate::errors::{InnateError, Result};
-use crate::refine::{DistillProvenance, DistilledChunk, Distiller};
+use crate::refine::{DistillProvenance, DistilledChunk, Distiller, Reranker};
 use crate::settings::{EmbeddingConfig, LlmConfig};
 
 // ---------------------------------------------------------------------------
@@ -220,7 +220,9 @@ impl HttpDistiller {
         Self { config }
     }
 
-    fn call(&self, prompt: &str) -> Result<String> {
+    /// One-shot completion. Public so other LLM-backed features (e.g. the opt-in
+    /// recall reranker) can reuse the same retrying transport and provider switch.
+    pub fn call(&self, prompt: &str) -> Result<String> {
         if self.config.provider == "anthropic" {
             self.call_anthropic(prompt)
         } else {
@@ -424,6 +426,74 @@ fn extract_json(text: &str) -> &str {
 
 pub fn build_distiller(config: &LlmConfig) -> std::sync::Arc<dyn Distiller + Send + Sync> {
     std::sync::Arc::new(HttpDistiller::new(config.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in LLM reranker (part d) — reasoning relevance over a small shortlist.
+// Reuses HttpDistiller's retrying transport. Errors propagate so recall can fall
+// back to the fused order (a flaky LLM must never break retrieval).
+// ---------------------------------------------------------------------------
+
+pub struct LlmReranker {
+    inner: HttpDistiller,
+}
+
+impl LlmReranker {
+    pub fn new(config: LlmConfig) -> Self {
+        Self {
+            inner: HttpDistiller::new(config),
+        }
+    }
+}
+
+impl Reranker for LlmReranker {
+    fn rerank(&self, query: &str, candidates: &[Value]) -> Result<Vec<String>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut list = String::new();
+        for c in candidates {
+            let id = c.get("id").and_then(Value::as_str).unwrap_or("");
+            let trig = c.get("trigger_desc").and_then(Value::as_str).unwrap_or("");
+            let content: String = c
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(280)
+                .collect();
+            list.push_str(&format!("- id={id} | when={trig} | {content}\n"));
+        }
+        let prompt = format!(
+            "You are reranking knowledge snippets by how directly each one helps with the QUERY. \
+             Consider the snippet's `when` (trigger) and content. Return ONLY a JSON array of the \
+             ids, most relevant first, no prose, no ids that are not listed.\n\n\
+             QUERY: {query}\n\nCANDIDATES:\n{list}"
+        );
+        let resp = self.inner.call(&prompt)?;
+        parse_id_array(&resp)
+            .ok_or_else(|| InnateError::Other("reranker: no id array in LLM response".into()))
+    }
+}
+
+/// Extract a JSON array of string ids from a (possibly chatty) LLM response.
+fn parse_id_array(resp: &str) -> Option<Vec<String>> {
+    let start = resp.find('[')?;
+    let end = resp.rfind(']')?;
+    if end <= start {
+        return None;
+    }
+    let arr: Value = serde_json::from_str(&resp[start..=end]).ok()?;
+    let ids: Vec<String> = arr
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids)
+    }
 }
 
 // ---------------------------------------------------------------------------

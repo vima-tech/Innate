@@ -102,6 +102,7 @@ class KnowledgeBase:
         expand_deps: str = "false",
         allow_trim: bool = False,
         refine_mode: str = "off",
+        rerank: bool = False,
     ) -> RecallResult:
         args = self._args() + [
             "recall", query,
@@ -117,6 +118,8 @@ class KnowledgeBase:
             args.append("--include-sparks")
         if allow_trim:
             args.append("--allow-trim")
+        if rerank:
+            args.append("--rerank")
         data = _run(*args)
         return RecallResult(
             knowledge=data.get("knowledge", []),

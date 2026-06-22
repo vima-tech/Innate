@@ -26,6 +26,7 @@ fn pending_chunks_receive_a_recall_penalty() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     let active_score = active
@@ -53,6 +54,7 @@ fn pending_chunks_receive_a_recall_penalty() {
             refine_mode: "off",
             min_score: None,
             session_only: false,
+            ..Default::default()
         })
         .unwrap();
     let pending_score = pending

@@ -246,6 +246,8 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 refine_mode: &refine_mode,
                 min_score,
                 session_only: false,
+                // MCP recall stays no-LLM by default; deep rerank is CLI-only ("deep recall").
+                rerank: false,
             })?;
             Ok(json!({
                 "trace_id": result.trace_id,

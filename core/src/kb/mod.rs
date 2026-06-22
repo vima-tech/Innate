@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use crate::embedding::{DummyEmbeddingProvider, EmbeddingProvider};
 use crate::errors::{InnateError, Result};
 use crate::refine::{
-    DefaultSanitizer, DistilledChunk, Distiller, HeuristicDistiller, NullRefiner, Refiner,
-    Sanitizer,
+    DefaultSanitizer, DistilledChunk, Distiller, HeuristicDistiller, NoopReranker, NullRefiner,
+    Refiner, Reranker, Sanitizer,
 };
 use crate::storage::{ChunkRow, EpisodicLogRow, Storage};
 use crate::utils::{
@@ -56,6 +56,9 @@ const W_TRIGGER: f64 = 0.25;
 const W_CONFIDENCE: f64 = 0.10;
 const W_CONTEXT: f64 = 0.15;
 const W_ACTIVATION: f64 = 0.08;
+// Hybrid 检索:lexical/BM25 channel weight. Modest by default so exact-term
+// matches lift the right chunk without overpowering semantic similarity.
+const W_LEXICAL: f64 = 0.25;
 const TOP_K_CANDIDATES: usize = 20;
 const ANTI_TRIGGER_PENALTY: f64 = 0.6;
 const DENSITY_REFILL: bool = true;
@@ -102,6 +105,12 @@ const RECALL_BASE_RATE: f64 = 0.5;
 // 方案 E 校准映射桶数。
 const CALIBRATION_BINS: i64 = 10;
 const SITUATION_COARSE_KEYS: &str = "stage,error_class,file_type";
+// Part (c) — query-embedding granularity. When true, recall folds the normalized
+// situation signature (stage/error_class/file_type) into the embedded query text so
+// the embedding anchors on the situation, not just raw words. Default OFF: opt-in
+// and reversible (chunks are embedded from content/trigger, so enabling it shifts
+// only the query side — measure with `innate recall-eval` before turning on).
+const EMBED_SITUATION_SIGNATURE: bool = false;
 const GOVERNANCE_ARCHIVE_THRESHOLD: i64 = 3;
 const NEGATIVE_FEEDBACK_ARCHIVE_THRESHOLD: i64 = 5;
 const GOVERNANCE_EVOLVE_THRESHOLD: i64 = 3;
@@ -179,6 +188,9 @@ pub struct KnowledgeBase {
     distiller: Arc<dyn Distiller>,
     curator: Arc<dyn Curator>,
     sanitizer: Arc<dyn Sanitizer>,
+    /// Opt-in offline reranker (part d). Defaults to `NoopReranker` (fused order
+    /// preserved); set via `with_reranker` when an LLM is configured.
+    reranker: Arc<dyn Reranker>,
 
     // Tuning params (loaded from meta at init)
     w_content: f64,
@@ -186,6 +198,7 @@ pub struct KnowledgeBase {
     w_confidence: f64,
     w_context: f64,
     w_activation: f64,
+    w_lexical: f64,
     top_k_candidates: usize,
     anti_trigger_penalty: f64,
     density_refill: bool,
@@ -226,6 +239,7 @@ pub struct KnowledgeBase {
     intuition_base_rate: f64,
     calibration_bins: i64,
     situation_coarse_keys: String,
+    embed_situation_signature: bool,
 }
 
 impl KnowledgeBase {
@@ -277,6 +291,7 @@ impl KnowledgeBase {
         let distiller = distiller.unwrap_or_else(|| Arc::new(HeuristicDistiller));
         let curator = curator.unwrap_or_else(|| Arc::new(BuiltinCurator));
         let sanitizer = sanitizer.unwrap_or_else(|| Arc::new(DefaultSanitizer));
+        let reranker: Arc<dyn Reranker> = Arc::new(NoopReranker);
 
         let storage = Storage::open(db_path, embedding.content_dim(), embedding.trigger_dim())?;
 
@@ -287,6 +302,9 @@ impl KnowledgeBase {
             distiller,
             curator,
             sanitizer,
+            reranker,
+            w_lexical: W_LEXICAL,
+            embed_situation_signature: EMBED_SITUATION_SIGNATURE,
             w_content: W_CONTENT,
             w_trigger: W_TRIGGER,
             w_confidence: W_CONFIDENCE,
@@ -335,6 +353,14 @@ impl KnowledgeBase {
         Ok(kb)
     }
 
+    /// Install an opt-in offline reranker (part d). Used by `open_kb` when an LLM is
+    /// configured; recall only invokes it when a caller passes `rerank=true`, so the
+    /// default hook path stays no-LLM regardless.
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = reranker;
+        self
+    }
+
     fn init_meta(&self) -> Result<()> {
         let lib_id = gen_uuid();
         let content_dim = self.embedding.content_dim().to_string();
@@ -372,6 +398,8 @@ impl KnowledgeBase {
             ("recall.w_confidence", "0.10"),
             ("recall.w_context", "0.15"),
             ("recall.w_activation", "0.08"),
+            ("recall.w_lexical", "0.25"),
+            ("recall.embed_situation_signature", "false"),
             ("recall.top_k_candidates", "20"),
             ("recall.anti_trigger_penalty", "0.6"),
             ("recall.density_refill", "true"),
@@ -456,6 +484,9 @@ impl KnowledgeBase {
         self.w_trigger = f("recall.w_trigger", W_TRIGGER);
         self.w_confidence = f("recall.w_confidence", W_CONFIDENCE);
         self.w_context = f("recall.w_context", W_CONTEXT);
+        self.w_lexical = f("recall.w_lexical", W_LEXICAL);
+        self.embed_situation_signature =
+            b("recall.embed_situation_signature", EMBED_SITUATION_SIGNATURE);
         self.w_activation = f("recall.w_activation", W_ACTIVATION);
         self.top_k_candidates =
             i("recall.top_k_candidates", TOP_K_CANDIDATES as i64).max(1) as usize;
@@ -540,6 +571,31 @@ struct CandidateInfo {
     chunk: Value,
     sim_content: f32,
     sim_trigger: f32,
+    /// Lexical/BM25 channel score ∈ [0,1] (hybrid 检索). Zero when the chunk was
+    /// found only by vector search; positive when an exact-term match recovered it.
+    sim_lexical: f32,
+}
+
+/// True when a coarse signature carries at least one real value (not empty /
+/// `none` / `unknown`) — used to decide whether folding it into the embed query
+/// adds signal or just noise.
+fn signature_has_signal(sig: &str) -> bool {
+    sig.split('|').any(|p| {
+        p.split_once('=')
+            .map(|(_, v)| !v.is_empty() && v != "none" && v != "unknown")
+            .unwrap_or(false)
+    })
+}
+
+/// Fresh candidate from a chunk with all channel sims zeroed (callers set the
+/// channel(s) that surfaced it). Centralised so adding a channel touches one place.
+fn new_candidate(chunk: &Value) -> CandidateInfo {
+    CandidateInfo {
+        chunk: chunk.clone(),
+        sim_content: 0.0,
+        sim_trigger: 0.0,
+        sim_lexical: 0.0,
+    }
 }
 
 fn chunk_is_valid_for_recall(chunk: &Value, embed_version: i64) -> bool {

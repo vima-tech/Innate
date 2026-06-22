@@ -32,9 +32,10 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("4.12", "4.13", include_str!("migrations/4.12_to_4.13.sql")),
     ("4.13", "4.14", include_str!("migrations/4.13_to_4.14.sql")),
     ("4.14", "4.15", include_str!("migrations/4.14_to_4.15.sql")),
+    ("4.15", "4.16", include_str!("migrations/4.15_to_4.16.sql")),
 ];
 
-const TARGET: &str = "4.15";
+const TARGET: &str = "4.16";
 
 /// Run all pending migrations on `db_path`. Idempotent if already at target.
 /// Returns the list of migration steps executed.
@@ -68,11 +69,26 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
         // 方案 C:provenance 列在 4.14→4.15 条件添加(ALTER ADD COLUMN 无 IF NOT EXISTS)。
         let add_provenance =
             *to == "4.15" && !column_exists(&conn, "confidence_evidence", "provenance")?;
+        // 混合检索:FTS5 词法通道。仅当 chunks 拥有索引列时建/灌(部分 schema
+        // 测试夹具缺这些列 → 跳过,不致命;真实库恒满足)。DDL 自带 IF NOT EXISTS,
+        // 回填 DELETE+INSERT,可重复执行。
+        let add_fts = *to == "4.16"
+            && column_exists(&conn, "chunks", "content")?
+            && column_exists(&conn, "chunks", "trigger_desc")?
+            && column_exists(&conn, "chunks", "skill_name")?;
         // Run the step atomically.
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = conn.execute_batch(sql);
         match r {
             Ok(()) => {
+                if add_fts {
+                    if let Err(error) =
+                        conn.execute_batch(include_str!("migrations/4.16_fts.sql"))
+                    {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(error.into());
+                    }
+                }
                 if add_provenance {
                     if let Err(error) = conn.execute_batch(
                         "ALTER TABLE confidence_evidence

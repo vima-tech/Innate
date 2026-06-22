@@ -194,7 +194,7 @@ impl KnowledgeBase {
             .embedding
             .embed_both(&embed_text)
             .map_err(|e| crate::errors::InnateError::EmbeddingUnavailable(e.to_string()))?;
-        let mut candidates = self.ann_candidates(&q_content, &q_trigger)?;
+        let mut candidates = self.ann_candidates(&q_content, &q_trigger, &embed_text)?;
         self.apply_soft_dep_bonus(&mut candidates)?;
 
         // 3. Calibration path: one context_key for read + the pre-written episodic_log (Spec §5).
@@ -232,8 +232,9 @@ impl KnowledgeBase {
                 .unwrap_or(0.5);
             let context_score = ctx_scores.get(chunk_id).copied().unwrap_or(0.0);
 
-            let resonance =
-                self.w_content * info.sim_content as f64 + self.w_trigger * info.sim_trigger as f64;
+            let resonance = self.w_content * info.sim_content as f64
+                + self.w_trigger * info.sim_trigger as f64
+                + self.w_lexical * info.sim_lexical as f64;
             // ACT-R activation (recency × frequency) — same usage-history signal recall fuses;
             // grouped with calibration since it reflects accumulated use, not query resonance.
             let used_count = chunk.get("used_count").and_then(Value::as_i64).unwrap_or(0);
