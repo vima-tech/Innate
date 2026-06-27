@@ -1,10 +1,23 @@
 use super::{
-    events::{event_id_for_line, parse_log_event},
+    events::{event_id_for_line, find_on_path, parse_log_event},
     state::init_state_db,
     watch::process_log_file,
     DAEMON_SCHEMA,
 };
 use tempfile::NamedTempFile;
+
+#[test]
+fn find_on_path_locates_binary_and_skips_missing_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("innate"), b"#!/bin/true\n").unwrap();
+    // PATH with an empty segment, a non-existent dir, then the real one.
+    let path_var = format!(":/no/such/dir:{}", dir.path().display());
+    let found = find_on_path("innate", Some(&path_var)).expect("should find innate");
+    assert_eq!(found, dir.path().join("innate"));
+    // Absent binary / no PATH → None (caller falls back to current_exe()).
+    assert!(find_on_path("definitely-not-here-xyz", Some(&path_var)).is_none());
+    assert!(find_on_path("innate", None).is_none());
+}
 
 #[test]
 fn classifies_session_end_events() {

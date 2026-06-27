@@ -16,10 +16,11 @@ use crate::utils::{dot_product, l2_normalize, unpack_embedding};
 mod chunks;
 mod evolution;
 mod meta;
+pub mod metrics;
 mod raw;
 mod traces;
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.18";
+const EXPECTED_SCHEMA_VERSION: &str = "4.21";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("../schema.sql");

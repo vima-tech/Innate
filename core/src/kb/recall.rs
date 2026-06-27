@@ -37,6 +37,18 @@ pub struct RecallParams<'a> {
 
 impl KnowledgeBase {
     pub fn recall(&self, params: RecallParams<'_>) -> Result<RecallResult> {
+        // Distinguish the always-on hook recall channel from explicit recalls so the
+        // hook-silence metric (§5.5) can be read from operation_runs(op='hook_recall').
+        let op = if params.source == "hook" {
+            "hook_recall"
+        } else {
+            "recall"
+        };
+        let src = params.source.to_string();
+        self.measure(op, Some(&src), None, || self.recall_inner(params))
+    }
+
+    fn recall_inner(&self, params: RecallParams<'_>) -> Result<RecallResult> {
         let RecallParams {
             query,
             budget,
@@ -85,10 +97,14 @@ impl KnowledgeBase {
             query.to_string()
         };
 
-        let (q_content, q_trigger) = self
-            .embedding
-            .embed_both(&embed_query)
-            .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))?;
+        // `embed` op (§5.3 first batch): time the query embedding at the call site so
+        // embedding health (latency / arrearage) is aggregatable, without wrapping the
+        // provider. Nested inside the recall/hook_recall measure — both rows are written.
+        let (q_content, q_trigger) = self.measure("embed", Some(source), None, || {
+            self.embedding
+                .embed_both(&embed_query)
+                .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))
+        })?;
 
         // ANN candidates (non-spark) — vector channels + lexical/BM25 (hybrid).
         let mut candidates = self.ann_candidates(&q_content, &q_trigger, query)?;
@@ -98,6 +114,16 @@ impl KnowledgeBase {
         // is unchanged. When enabled, it may pull in NEW candidates reachable only
         // via a shared entity (multi-hop), which then flow through normal scoring.
         self.expand_by_spreading(&mut candidates, query)?;
+
+        // recall_snapshot schema 2 (design doc §5.2): per-channel candidate provenance.
+        // Counted from CandidateInfo.sim_* before scoring consumes the map — lets inspect
+        // attribute "lexical down vs vector down vs spread noise". Cheap (one pass).
+        let channels = json!({
+            "content": candidates.values().filter(|c| c.sim_content > 0.0).count(),
+            "trigger": candidates.values().filter(|c| c.sim_trigger > 0.0).count(),
+            "lexical": candidates.values().filter(|c| c.sim_lexical > 0.0).count(),
+            "spread": candidates.values().filter(|c| c.sim_spread > 0.0).count(),
+        });
 
         // Score + anti-trigger penalty
         let mut scored = self.score_candidates(candidates, query, &context_key, &now)?;
@@ -147,6 +173,40 @@ impl KnowledgeBase {
         };
 
         if trace {
+            // recall_snapshot schema 2: scores + packing summary (aggregate only, no
+            // per-candidate detail — keeps the snapshot small per §5.2).
+            let max_score = scored
+                .iter()
+                .map(|(f, _)| *f)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let sel_scores: Vec<f64> = visible
+                .iter()
+                .filter_map(|c| c.get("_fused_score").and_then(Value::as_f64))
+                .collect();
+            let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+            let selected_tokens: i64 = visible
+                .iter()
+                .filter_map(|c| c.get("token_count").and_then(Value::as_i64))
+                .sum();
+            let recall_meta = json!({
+                "budget": budget,
+                "top": top,
+                "expand_deps": expand_deps,
+                "rerank": rerank,
+                "channels": channels,
+                "scores": {
+                    "max": if max_score.is_finite() { r3(max_score) } else { 0.0 },
+                    "min_selected": if sel_scores.is_empty() { 0.0 }
+                        else { r3(sel_scores.iter().cloned().fold(f64::INFINITY, f64::min)) },
+                    "avg_selected": if sel_scores.is_empty() { 0.0 }
+                        else { r3(sel_scores.iter().sum::<f64>() / sel_scores.len() as f64) },
+                },
+                "packing": {
+                    "selected_tokens": selected_tokens,
+                    "skipped_by_budget": skipped.len(),
+                    "skipped_by_dep_depth": depth_skipped.len(),
+                },
+            });
             self.write_recall_trace(
                 &trace_id,
                 query,
@@ -160,6 +220,7 @@ impl KnowledgeBase {
                 source,
                 &now,
                 session_only,
+                &recall_meta,
             )?;
         }
 
@@ -815,6 +876,7 @@ impl KnowledgeBase {
         source: &str,
         now: &str,
         session_only: bool,
+        recall_meta: &Value,
     ) -> Result<()> {
         let lib_id = self.storage.lib_id()?;
         // `selected` must strictly mean "entered the model context". Record the
@@ -914,12 +976,14 @@ impl KnowledgeBase {
             // The snapshot mirrors what was surfaced: empty for known_none and
             // session-only recalls so no chunk is credited with a selection.
             let snapshot = json!({
+                "schema": 2,
                 "retrieved": if record_selection { scored.iter().map(|(_, c)| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>() } else { vec![] },
                 "selected": if record_selection { visible.iter().map(|c| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>() } else { vec![] },
                 "sparks": if record_selection { sparks.iter().map(|c| c["id"].as_str().unwrap_or("")).collect::<Vec<_>>() } else { vec![] },
                 "depth_skipped": depth_skipped,
                 "skipped_reasons": skipped_reasons,
                 "session_only": session_only,
+                "recall": recall_meta,
             });
             // Empty recall → terminal known_none/discarded (kept out of the `open`
             // pool that feeds trace-completion stats). Otherwise `open` for the

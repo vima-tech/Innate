@@ -113,6 +113,34 @@ fn llm_traces_endpoint_returns_array() {
 }
 
 #[test]
+fn metrics_trend_endpoint_returns_snapshots_array() {
+    let (ctx, _f) = ctx_with(None);
+    let r = route(
+        &ctx,
+        &Method::Get,
+        "/api/metrics/trend",
+        "limit=10",
+        &hdr(&[]),
+        "",
+    );
+    assert_eq!(r.status, 200);
+    let v: Value = serde_json::from_str(&r.body).unwrap();
+    // Stable shape even before any snapshot is written.
+    assert!(v["snapshots"].is_array());
+    assert_eq!(v["limit"], 10);
+}
+
+#[test]
+fn inspect_endpoint_carries_observability_blocks() {
+    let (ctx, _f) = ctx_with(None);
+    let r = route(&ctx, &Method::Get, "/api/inspect", "", &hdr(&[]), "");
+    assert_eq!(r.status, 200);
+    let v: Value = serde_json::from_str(&r.body).unwrap();
+    assert!(v.get("observability").is_some());
+    assert!(v["operational"].get("daemon").is_some());
+}
+
+#[test]
 fn serves_index_html() {
     let (ctx, _f) = ctx_with(None);
     let r = route(&ctx, &Method::Get, "/", "", &hdr(&[]), "");

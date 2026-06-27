@@ -56,6 +56,92 @@ export interface InspectResult {
     confidence_distribution: { low: number; medium: number; high: number };
   };
   params: Record<string, number>;
+  /** Observability blocks (schema 4.19–4.21). Optional: a sub-block is omitted until
+   *  its data exists (no operation_runs yet → operational.ops absent; no snapshot →
+   *  trends absent), so consumers must treat each as possibly-undefined. */
+  observability?: ObservabilityBlock;
+  operational?: OperationalBlock;
+  trends?: TrendsBlock;
+}
+
+/** Per-window / per-dimension derived metrics + recall-pack + lifecycle (design §5.1). */
+export interface ObservabilityBlock {
+  windows: Record<string, RecallRates>;
+  by_dimension: {
+    event_source: { agent_coverage: Record<string, unknown>; rates: Record<string, RecallRates> };
+    agent: Record<string, RecallRates>;
+    context_key: Record<string, RecallRates>;
+  };
+  recall_pack: {
+    zombie_chunks: number;
+    avg_retrieved: number;
+    avg_selected: number;
+    selected_unused_rate: number;
+    selected_unused_top: Array<{ id: string; selected_count: number }>;
+    used_rank_mrr: number;
+    hook_silence_rate: number;
+    selected_rank_distribution: Record<"1" | "2-3" | "4-10" | "11+", number>;
+    high_rank_unused: Array<{ id: string; best_rank: number }>;
+    low_rank_used: Array<{ id: string; best_rank: number }>;
+  };
+  lifecycle: {
+    pending_oldest_ts: string | null;
+    governance_backlog_oldest_ts: string | null;
+    state_transition_approx: { promotions_7d: number; evictions_7d: number; note: string };
+  };
+}
+
+export interface RecallRates {
+  recalls: number;
+  empty_recall_rate: number;
+  completed_rate: number;
+  task_success_rate: number;
+  usage_annotation_rate?: number;
+  selected_to_used_rate?: number;
+  feedback_coverage?: number;
+  timeout_rate?: number;
+}
+
+/** Daemon health (independent read-only connection) + operation_runs aggregation. */
+export interface OperationalBlock {
+  daemon: {
+    state: string;
+    running?: boolean;
+    pid?: number | null;
+    errors_24h?: number;
+    errors_7d?: number;
+    errors_by_operation?: Record<string, number>;
+    last_error?: unknown;
+    error?: string;
+  };
+  /** Present only once operation_runs has rows. */
+  ops?: {
+    by_op: Record<string, OpPerf>;
+    /** Latency/success broken down by source / agent / context (context is
+     *  trace-derived, so only covers ops carrying a trace_id). */
+    by_source: Record<string, OpPerf>;
+    by_agent: Record<string, OpPerf>;
+    by_context: Record<string, OpPerf>;
+    error_kind_top: Array<{ error_kind: string; count: number }>;
+  };
+}
+
+export interface OpPerf {
+  count: number;
+  ok: number;
+  error: number;
+  timeout: number;
+  success_rate: number;
+  p50_ms: number;
+  p95_ms: number;
+}
+
+/** Week-over-week KPI deltas from metric_snapshots. */
+export interface TrendsBlock {
+  current_ts: string;
+  current: Record<string, number>;
+  baseline_ts?: string;
+  delta_vs_7d?: Record<string, number>;
 }
 
 export interface FlaggedPoint {

@@ -55,5 +55,5 @@ mod tests;
 pub(crate) use command::run_command;
 pub use command::DaemonCommands;
 pub use process::{start, status, stop};
-pub use state::is_running;
+pub use state::{health, is_running};
 pub use watch::run_watch_loop;

@@ -1,3 +1,39 @@
+/// Resolve the `innate` binary to shell out to. `std::env::current_exe()` becomes a
+/// dangling/`(deleted)` path the moment the binary is upgraded in place (`rm` + `cp`,
+/// as the installer/`upgrade` does), which silently breaks every daemon shell-out with
+/// `No such file or directory (os error 2)` until the daemon is restarted. When the
+/// resolved exe no longer exists, fall back to looking `innate` up on PATH (which now
+/// points at the freshly-installed binary), so a long-lived daemon survives upgrades.
+pub(in crate::daemon) fn resolve_self_exe() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if exe.exists() {
+            return exe;
+        }
+    }
+    if let Some(found) = find_on_path("innate", std::env::var("PATH").ok().as_deref()) {
+        return found;
+    }
+    // Last resort: hand back current_exe() (or the bare name) and let the spawn surface
+    // the error, preserving the previous behaviour rather than panicking.
+    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("innate"))
+}
+
+/// Search a `PATH`-style string for an existing `name` entry. Split out from
+/// `resolve_self_exe` so the fallback is unit-testable without deleting our own binary.
+pub(in crate::daemon) fn find_on_path(name: &str, path_var: Option<&str>) -> Option<std::path::PathBuf> {
+    let path = path_var?;
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = std::path::Path::new(dir).join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Default)]
 pub(in crate::daemon) struct DaemonEvent {
     pub(in crate::daemon) kind: &'static str,
@@ -152,7 +188,7 @@ pub(in crate::daemon) fn call_cli_record(
     trace_id: &str,
     event: &DaemonEvent,
 ) -> anyhow::Result<()> {
-    let self_exe = std::env::current_exe()?;
+    let self_exe = resolve_self_exe();
     let run = || {
         let mut command = std::process::Command::new(&self_exe);
         command.args(["--db", db_path, "record", trace_id]);
@@ -194,7 +230,7 @@ pub(in crate::daemon) fn call_cli_record(
 }
 
 pub(in crate::daemon) fn call_cli_recall(db_path: &str, query: &str) -> anyhow::Result<String> {
-    let self_exe = std::env::current_exe()?;
+    let self_exe = resolve_self_exe();
     let output = std::process::Command::new(&self_exe)
         .args([
             "--db",
@@ -226,7 +262,7 @@ pub(in crate::daemon) fn call_cli_recall(db_path: &str, query: &str) -> anyhow::
 }
 
 pub(in crate::daemon) fn call_cli_backup(db_path: &str) -> anyhow::Result<()> {
-    let self_exe = std::env::current_exe()?;
+    let self_exe = resolve_self_exe();
     let status = std::process::Command::new(&self_exe)
         .args(["--db", db_path, "backup", "run"])
         .status()?;
@@ -238,7 +274,7 @@ pub(in crate::daemon) fn call_cli_backup(db_path: &str) -> anyhow::Result<()> {
 }
 
 pub(in crate::daemon) fn call_cli_evolve(db_path: &str, trigger: &str) -> anyhow::Result<()> {
-    let self_exe = std::env::current_exe()?;
+    let self_exe = resolve_self_exe();
     let run = || {
         std::process::Command::new(&self_exe)
             .args(["--db", db_path, "evolve", "--trigger", trigger])

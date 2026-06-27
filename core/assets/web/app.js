@@ -59,6 +59,18 @@ const I18N = {
     empty_title: "No item selected",
     theme_toggle_title: "Toggle light / dark theme",
     inspect_failed: "inspect failed",
+    obs_title: "Observability",
+    obs_errors_24h: "errors 24h",
+    obs_embed_p95: (x) => "embed p95 " + x,
+    obs_empty_recall: "empty recall 7d",
+    obs_task_success: "task success",
+    obs_mrr: "used-rank MRR",
+    obs_zombie: "zombie",
+    obs_no_anomalies: "no anomalies — healthy",
+    anom_zombie: (n) => n + " zombie chunk(s): selected but never used",
+    anom_empty: (p) => "empty recall rate " + p + " (7d)",
+    anom_daemon: (n) => n + " daemon error(s) in 24h",
+    anom_slow: (name, x) => "slow op " + name + " p95 " + x + "ms",
     gov_empty: "No chunks flagged for review.",
     flagged: (n) => `${n} flagged`, score: "score", actors: (n) => `${n} actors`,
     chunk_missing: "(chunk missing)",
@@ -100,6 +112,18 @@ const I18N = {
     empty_title: "未选择条目",
     theme_toggle_title: "切换 明亮 / 暗黑 主题",
     inspect_failed: "巡检失败",
+    obs_title: "可观测性",
+    obs_errors_24h: "24h 错误",
+    obs_embed_p95: (x) => "嵌入 p95 " + x,
+    obs_empty_recall: "空召回 7d",
+    obs_task_success: "任务成功率",
+    obs_mrr: "命中排名 MRR",
+    obs_zombie: "僵尸",
+    obs_no_anomalies: "无异常 — 健康",
+    anom_zombie: (n) => n + " 个僵尸 chunk:被召回却从不采用",
+    anom_empty: (p) => "空召回率 " + p + "(7d)",
+    anom_daemon: (n) => n + " 个 daemon 错误(24h)",
+    anom_slow: (name, x) => "慢操作 " + name + " p95 " + x + "ms",
     gov_empty: "没有待复审的知识块。",
     flagged: (n) => `${n} 项待复审`, score: "评分", actors: (n) => `${n} 个来源`,
     chunk_missing: "(知识块缺失)",
@@ -349,10 +373,58 @@ function renderOverview(h) {
       stat(t("ov_debt"), debt != null ? Number(debt).toFixed(2) : "—", t("ov_debt_sub"), debtCls) +
       stat(t("ov_rebuild"), String(rebuild), t("ov_rebuild_sub"), "") +
       stat(t("ov_distill"), costTokens ? fmtNum(costTokens) + " tok" : "—", t("ov_distill_sub", newLogs), "ok") +
-    `</div>`;
+    `</div>` +
+    renderObservability(h, stat);
   // CSP-safe: geometry/colour applied via the CSSOM (not inline style attributes).
   ov.querySelectorAll(".ov-bar-fill").forEach((e) => { e.style.width = e.dataset.w + "%"; e.style.background = e.dataset.bg; });
   ov.querySelectorAll(".ov-legend-dot").forEach((e) => { e.style.background = e.dataset.bg; });
+}
+
+// P4 observability panel: runtime / recall-quality stats from the new inspect blocks
+// plus a prioritized anomaly list. Function over chart polish (design doc §6 P4).
+function renderObservability(h, stat) {
+  const obs = h.observability || {};
+  const op = h.operational || {};
+  const daemon = op.daemon || {};
+  const ops = op.ops || {};
+  const byOp = ops.by_op || {};
+  const w7 = (obs.windows && obs.windows["7d"]) || {};
+  const rp = obs.recall_pack || {};
+
+  const pct = (x) => (x == null ? "—" : (Number(x) * 100).toFixed(0) + "%");
+  const ms = (x) => (x == null ? "—" : fmtNum(x) + " ms");
+
+  const runtime =
+    `<div class="overview-grid">` +
+      stat("daemon", daemon.state || "—",
+           `${t("obs_errors_24h")}: ${daemon.errors_24h ?? 0}`,
+           (Number(daemon.errors_24h) > 0) ? "warn" : "ok") +
+      stat("recall p95", ms(byOp.recall?.p95_ms), t("obs_embed_p95", ms(byOp.embed?.p95_ms)), "") +
+      stat(t("obs_empty_recall"), pct(w7.empty_recall_rate),
+           `${t("obs_task_success")}: ${pct(w7.task_success_rate)}`,
+           (Number(w7.empty_recall_rate) >= 0.3) ? "warn" : "ok") +
+      stat(t("obs_mrr"), (rp.used_rank_mrr ?? "—"),
+           `${t("obs_zombie")}: ${rp.zombie_chunks ?? 0}`, "") +
+    `</div>`;
+
+  // Anomaly list — prioritized, only shows what actually needs attention.
+  const a = [];
+  if (Number(rp.zombie_chunks) > 0) a.push(t("anom_zombie", rp.zombie_chunks));
+  if (Number(w7.empty_recall_rate) >= 0.3) a.push(t("anom_empty", pct(w7.empty_recall_rate)));
+  if (Number(daemon.errors_24h) > 0) a.push(t("anom_daemon", daemon.errors_24h));
+  (ops.error_kind_top || []).slice(0, 3).forEach((e) => a.push(`${e.count}× ${e.error_kind}`));
+  // slow ops (p95 > 5s)
+  Object.entries(byOp).forEach(([name, s]) => {
+    if (Number(s.p95_ms) > 5000) a.push(t("anom_slow", name, fmtNum(s.p95_ms)));
+  });
+  (h.suggestions || []).forEach((s) => { if (/INNATE_AGENT/.test(s.action || "")) a.push(s.reason); });
+
+  const anomalies = a.length
+    ? `<ul class="obs-anomalies">` + a.map((x) => `<li>⚠ ${escapeHtml(String(x))}</li>`).join("") + `</ul>`
+    : `<div class="obs-clear">✓ ${escapeHtml(t("obs_no_anomalies"))}</div>`;
+
+  return `<div class="obs-section"><div class="ov-eyebrow">${escapeHtml(t("obs_title"))}</div>` +
+         runtime + anomalies + `</div>`;
 }
 
 // ── Review queue ────────────────────────────────────────────────────────────

@@ -36,6 +36,12 @@ pub struct RecordParams<'a> {
 
 impl KnowledgeBase {
     pub fn record(&self, params: RecordParams<'_>) -> Result<()> {
+        let tid = params.trace_id.to_string();
+        let src = params.source.to_string();
+        self.measure("record", Some(&src), Some(&tid), || self.record_inner(params))
+    }
+
+    fn record_inner(&self, params: RecordParams<'_>) -> Result<()> {
         let RecordParams {
             trace_id,
             query,

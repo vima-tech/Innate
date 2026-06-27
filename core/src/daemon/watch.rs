@@ -70,9 +70,23 @@ pub fn run_watch_loop(
             last_evolve_poll = std::time::Instant::now();
         }
         if last_backup_poll.elapsed() >= BACKUP_POLL_INTERVAL {
-            if let Err(error) = call_cli_backup(db_path) {
-                let _ = writeln!(logger, "[innate-daemon] auto-backup failed: {error}");
-                record_daemon_error(&state_db, "<scheduler>", "auto_backup", &error.to_string());
+            // Only attempt a backup when R2 backup is actually configured + enabled.
+            // Otherwise `innate backup run` exits non-zero every cycle, spamming the log
+            // and inflating the daemon error counter with a non-error (settings.json is
+            // read here, never the db — preserves the daemon's no-db-open contract).
+            let backup_enabled = crate::settings::load()
+                .map(|s| s.backup.is_some_and(|b| b.enable && b.r2.is_some()))
+                .unwrap_or(false);
+            if backup_enabled {
+                if let Err(error) = call_cli_backup(db_path) {
+                    let _ = writeln!(logger, "[innate-daemon] auto-backup failed: {error}");
+                    record_daemon_error(
+                        &state_db,
+                        "<scheduler>",
+                        "auto_backup",
+                        &error.to_string(),
+                    );
+                }
             }
             last_backup_poll = std::time::Instant::now();
         }

@@ -13,6 +13,7 @@ mod feedback;
 mod governance;
 mod intuition;
 mod intuition_optim;
+mod observability;
 mod reliability;
 mod resilient_distill;
 mod restoration;

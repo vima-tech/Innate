@@ -150,6 +150,11 @@ struct ScoredCandidate {
 
 impl KnowledgeBase {
     pub fn appraise(&self, params: AppraiseParams<'_>) -> Result<Verdict> {
+        let src = params.source.to_string();
+        self.measure("appraise", Some(&src), None, || self.appraise_inner(params))
+    }
+
+    fn appraise_inner(&self, params: AppraiseParams<'_>) -> Result<Verdict> {
         let AppraiseParams {
             situation,
             candidate,

@@ -2,6 +2,10 @@ use super::*;
 
 impl KnowledgeBase {
     pub(crate) fn builtin_curate_impl(&self, scope: &CurateScope) -> Result<CurateReport> {
+        self.measure("curate", None, None, || self.builtin_curate_inner(scope))
+    }
+
+    fn builtin_curate_inner(&self, scope: &CurateScope) -> Result<CurateReport> {
         let mut report = CurateReport::default();
         let now_iso = utc_now_iso();
         if scope.dry_run {
@@ -608,7 +612,32 @@ impl KnowledgeBase {
         // 校准数据按 situation_sig 分区累积后才有意义。当前仍用 90 天时间半衰期
         // (上方 decay 步),verdict_log.situation_sig 已是其未来数据源。详见实施文档 §6/§7.6。
 
+        // 可观测性 P3b:curate 末尾写一行状态 KPI 快照,供 inspect().trends 算周环比。
+        // 节流:仅当最近快照缺失或 ≥20h 前才写,避免高频 curate 灌满 metric_snapshots。
+        // 非致命:快照失败绝不阻断 curate(主流程已完成)。
+        let _ = self.maybe_write_metric_snapshot(&now_iso);
+
+        // 运行事件 retention(P3a):清理早于 metrics.retain_days 的 operation_runs 行,
+        // 防无界增长拖慢聚合(参照 usage_trace 的 purge)。非致命。
+        let retain_cutoff = days_ago(&now_iso, self.metrics_retain_days);
+        let _ = self.storage.purge_operation_runs(&retain_cutoff);
+
         Ok(report)
+    }
+
+    /// Write a `metric_snapshots` row if the most recent one is missing or ≥20h old.
+    /// Throttled so frequent daemon-triggered curates don't flood the table.
+    fn maybe_write_metric_snapshot(&self, now: &str) -> Result<()> {
+        if let Some((last_ts, _)) = self.storage.latest_snapshot()? {
+            // 20h throttle window via the shared cutoff helper (fractional days unsupported,
+            // so compare against `now - ~0.83d` by using an hours-aware check on the ISO ts).
+            let cutoff = hours_ago(now, 20);
+            if last_ts.as_str() >= cutoff.as_str() {
+                return Ok(());
+            }
+        }
+        let kpis = self.collect_kpis(now)?;
+        self.storage.insert_metric_snapshot(now, &kpis.to_string())
     }
 
     /// 方案 E:用 verdict_log 的实际命中率重写 calibration_map。

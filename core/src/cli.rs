@@ -219,6 +219,11 @@ pub enum Commands {
     },
     /// Upgrade database schema to current version
     Migrate,
+    /// Observability: write a state-KPI snapshot now (for inspect().trends week-over-week)
+    Metrics {
+        #[command(subcommand)]
+        action: MetricsAction,
+    },
     /// Reclaim disk space: checkpoint the WAL and VACUUM the database
     Vacuum,
     /// Repair pre-fix trace pollution: drop false daemon `selected` events,
@@ -238,6 +243,10 @@ pub enum Commands {
         /// Cutoff k for Recall@k / nDCG@k and the recall `top` (default 10).
         #[arg(long, default_value = "10")]
         k: usize,
+        /// Append the run summary (metrics + params + ts) to ~/.innate/logs/eval_runs.jsonl
+        /// so offline eval can be compared against online metrics over time.
+        #[arg(long)]
+        save: bool,
     },
     /// Upgrade the innate binary to the latest (or specified) release
     Upgrade {
@@ -278,6 +287,12 @@ pub enum Commands {
     },
 }
 
+#[derive(clap::Subcommand)]
+pub enum MetricsAction {
+    /// Write a state-KPI snapshot row now (debt ratio, pending age, success rates …).
+    Snapshot,
+}
+
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Create the ~/.innate subdirectory layout and migrate any legacy flat files
@@ -300,7 +315,10 @@ pub fn run() -> anyhow::Result<()> {
     if let Commands::Migrate = &cli.command {
         let applied = crate::migrate::run_migrations(&db_path)?;
         if applied.is_empty() {
-            println!("already at 4.14 — nothing to do");
+            println!(
+                "already at {} — nothing to do",
+                crate::migrate::target_version()
+            );
         } else {
             for step in &applied {
                 println!("  applied: {step}");
@@ -640,6 +658,12 @@ pub fn run() -> anyhow::Result<()> {
             kb.drop_spark(&spark_id, &reason)?;
             println!("dropped");
         }
+        Commands::Metrics { action } => match action {
+            MetricsAction::Snapshot => {
+                let kpis = kb.write_metric_snapshot()?;
+                println!("{}", serde_json::to_string_pretty(&kpis)?);
+            }
+        },
         Commands::Vacuum => {
             let (before, after) = kb.storage.vacuum()?;
             let mb = |b: i64| b as f64 / 1_048_576.0;
@@ -663,11 +687,12 @@ pub fn run() -> anyhow::Result<()> {
                 r.daemon_events_deleted, r.open_logs_retired, r.selected_before, r.selected_after
             );
         }
-        Commands::RecallEval { labels, k } => {
+        Commands::RecallEval { labels, k, save } => {
             let text = std::fs::read_to_string(&labels)
                 .map_err(|e| anyhow::anyhow!("read labels {}: {e}", labels.display()))?;
             let mut n = 0usize;
             let (mut sum_p1, mut sum_recall, mut sum_mrr, mut sum_ndcg) = (0.0, 0.0, 0.0, 0.0);
+            let mut misses: Vec<serde_json::Value> = Vec::new();
             for (lineno, line) in text.lines().enumerate() {
                 let line = line.trim();
                 if line.is_empty() {
@@ -707,6 +732,15 @@ pub fn run() -> anyhow::Result<()> {
                 sum_mrr += mrr;
                 sum_ndcg += ndcg;
                 n += 1;
+                // Per-query miss report (P4): surface queries where no relevant chunk
+                // ranked, with the actual top-k, to debug *why* recall missed.
+                if recall_k == 0.0 {
+                    misses.push(json!({
+                        "query": query,
+                        "relevant_ids": relevant.iter().cloned().collect::<Vec<_>>(),
+                        "got_top_k": ranked,
+                    }));
+                }
             }
             if n == 0 {
                 return Err(anyhow::anyhow!(
@@ -721,7 +755,33 @@ pub fn run() -> anyhow::Result<()> {
                 "recall_at_k": (sum_recall / nf * 1000.0).round() / 1000.0,
                 "mrr": (sum_mrr / nf * 1000.0).round() / 1000.0,
                 "ndcg_at_k": (sum_ndcg / nf * 1000.0).round() / 1000.0,
+                // Params snapshot — fused-score weights in effect, so an eval run is
+                // self-describing and comparable against online metrics over time (P4).
+                "params": kb.recall_weights(),
+                "misses": misses,
             });
+            if save {
+                // Persist a compact run summary (no per-query misses) for trend comparison
+                // against online metrics. Append-only JSONL; best-effort, non-fatal.
+                let mut summary = out.clone();
+                if let Some(o) = summary.as_object_mut() {
+                    o.remove("misses");
+                    o.insert("ts".to_string(), json!(crate::utils::utc_now_iso()));
+                }
+                let path = crate::paths::logs_dir().join("eval_runs.jsonl");
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{}", serde_json::to_string(&summary)?);
+                    eprintln!("eval run summary appended to {}", path.display());
+                }
+            }
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
         Commands::Web {

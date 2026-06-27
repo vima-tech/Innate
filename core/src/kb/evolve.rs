@@ -2,6 +2,10 @@ use super::*;
 
 impl KnowledgeBase {
     pub fn evolve(&self, trigger: &str) -> Result<Value> {
+        self.measure("evolve", None, None, || self.evolve_inner(trigger))
+    }
+
+    fn evolve_inner(&self, trigger: &str) -> Result<Value> {
         if !matches!(trigger, "manual" | "scheduled" | "threshold") {
             return Err(InnateError::InvalidState(format!(
                 "invalid evolve trigger: {trigger}"
@@ -143,7 +147,7 @@ impl KnowledgeBase {
         }
 
         let result = (|| -> Result<Value> {
-            let distill = self.distill_batch()?;
+            let distill = self.measure("distill", None, None, || self.distill_batch())?;
             let curator = Arc::clone(&self.curator);
             let curate = curator.run(self, &CurateScope::default())?;
             Ok(json!({
@@ -373,7 +377,12 @@ impl KnowledgeBase {
                     updated_at: now2,
                     ..Default::default()
                 };
-                let cvec = match self.embedding.embed_content(&content) {
+                let (cvec_res, tvec_res) = self.embed_pair(
+                    &content,
+                    row.trigger_desc.as_deref().unwrap_or(&content),
+                    "distill",
+                );
+                let cvec = match cvec_res {
                     Ok(v) if v.len() == self.embedding.content_dim() => v,
                     // A failed or wrong-dimension embedding is deferred (not
                     // written): a dim mismatch would be silently dropped at
@@ -383,10 +392,7 @@ impl KnowledgeBase {
                         continue;
                     }
                 };
-                let tvec = match self
-                    .embedding
-                    .embed_trigger(row.trigger_desc.as_deref().unwrap_or(&content))
-                {
+                let tvec = match tvec_res {
                     Ok(v) if v.len() == self.embedding.trigger_dim() => v,
                     _ => {
                         embedding_failures += 1;

@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.18 (Rust edition)
+-- Innate knowledge layer schema v4.21 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.18');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.21');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -367,3 +367,34 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_evolve_pending_reason
 CREATE INDEX IF NOT EXISTS idx_evolve_last_failed
   ON evolve_requests(last_failed_at)
   WHERE last_failed_at IS NOT NULL;
+
+-- ── Observability (v4.19–4.21) ──────────────────────────────────────────────
+-- v4.19: ts indexes for windowed (1d/7d/30d) derived metrics in inspect().
+CREATE INDEX IF NOT EXISTS idx_log_ts      ON episodic_log(ts);
+CREATE INDEX IF NOT EXISTS idx_trace_ts    ON usage_trace(ts);
+CREATE INDEX IF NOT EXISTS idx_feedback_ts ON feedback_events(ts);
+
+-- v4.20: per-operation run summaries (latency/status/error_kind). Raw LLM detail
+-- stays in llm_trace.log; this table holds only aggregatable summaries.
+CREATE TABLE IF NOT EXISTS operation_runs (
+    id          TEXT PRIMARY KEY,
+    trace_id    TEXT,
+    op          TEXT NOT NULL,
+    source      TEXT,
+    agent       TEXT,
+    status      TEXT NOT NULL,
+    error_kind  TEXT,
+    started_at  TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    counts_json TEXT,
+    params_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_opruns_op  ON operation_runs(op);
+CREATE INDEX IF NOT EXISTS idx_opruns_ts  ON operation_runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_opruns_tid ON operation_runs(trace_id);
+
+-- v4.21: state-KPI daily snapshots for trend (week-over-week) deltas.
+CREATE TABLE IF NOT EXISTS metric_snapshots (
+    ts   TEXT PRIMARY KEY,
+    kpis TEXT NOT NULL
+);

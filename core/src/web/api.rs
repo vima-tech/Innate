@@ -118,6 +118,7 @@ pub(crate) fn route(
         },
         (Method::Get, ["api", "chunks"]) => list_chunks(ctx, query),
         (Method::Get, ["api", "governance"]) => list_governance(ctx, query),
+        (Method::Get, ["api", "metrics", "trend"]) => metrics_trend(ctx, query),
         (Method::Get, ["api", "llm-traces"]) => list_llm_traces(query),
         (Method::Get, ["api", "chunk", id]) => match ctx.kb.inspect_id(id) {
             Ok(v) => json_resp(200, v),
@@ -128,6 +129,20 @@ pub(crate) fn route(
         (Method::Post, ["api", "chunk", id, action]) => governance(ctx, headers, id, action, body),
 
         _ => err(404, "not found"),
+    }
+}
+
+/// P4: state-KPI snapshot series for the Web trend view (`metric_snapshots`, newest
+/// first). `?limit=N` (default 30, max 365). Read-only; empty array before any snapshot.
+fn metrics_trend(ctx: &Ctx, query: &str) -> Resp {
+    let limit = parse_query(query)
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(30)
+        .clamp(1, 365);
+    match ctx.kb.storage.recent_snapshots(limit) {
+        Ok(rows) => json_resp(200, json!({ "snapshots": rows, "limit": limit })),
+        Err(e) => err(500, &e.to_string()),
     }
 }
 

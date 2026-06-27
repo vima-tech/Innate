@@ -147,18 +147,16 @@ impl KnowledgeBase {
 
         // Embedding — fall back to embedding_pending on failure.
         let trigger_str = trigger_clean.as_deref().unwrap_or(&content);
-        let (cvec, tvec, embed_ver, final_state_reason) = match (
-            self.embedding.embed_content(&content),
-            self.embedding.embed_trigger(trigger_str),
-        ) {
-            (Ok(cv), Ok(tv)) => (cv, tv, 1i64, init_state_reason.to_string()),
-            _ => (
-                vec![],
-                vec![],
-                0i64,
-                format!("embedding_pending:target={state}"),
-            ),
-        };
+        let (cvec, tvec, embed_ver, final_state_reason) =
+            match self.embed_pair(&content, trigger_str, "add") {
+                (Ok(cv), Ok(tv)) => (cv, tv, 1i64, init_state_reason.to_string()),
+                _ => (
+                    vec![],
+                    vec![],
+                    0i64,
+                    format!("embedding_pending:target={state}"),
+                ),
+            };
 
         let tokens = estimate_tokens(&content) as i64;
         let row = ChunkRow {
@@ -297,18 +295,16 @@ impl KnowledgeBase {
         let tokens = estimate_tokens(&content) as i64;
 
         let trigger_str = trigger_clean.as_deref().unwrap_or(&content);
-        let (cvec, tvec, embed_ver, state_reason) = match (
-            self.embedding.embed_content(&content),
-            self.embedding.embed_trigger(trigger_str),
-        ) {
-            (Ok(cv), Ok(tv)) => (cv, tv, 1i64, "init:spark".to_string()),
-            _ => (
-                vec![],
-                vec![],
-                0i64,
-                "embedding_pending:target=active".to_string(),
-            ),
-        };
+        let (cvec, tvec, embed_ver, state_reason) =
+            match self.embed_pair(&content, trigger_str, "spark") {
+                (Ok(cv), Ok(tv)) => (cv, tv, 1i64, "init:spark".to_string()),
+                _ => (
+                    vec![],
+                    vec![],
+                    0i64,
+                    "embedding_pending:target=active".to_string(),
+                ),
+            };
 
         let row = ChunkRow {
             id: chunk_id.clone(),
@@ -503,8 +499,9 @@ impl KnowledgeBase {
             ..Default::default()
         };
 
-        let cvec = self.embedding.embed_content(&content)?;
-        let tvec = self.embedding.embed_trigger(trigger.unwrap_or(&content))?;
+        let (cvec_res, tvec_res) = self.embed_pair(&content, trigger.unwrap_or(&content), "install");
+        let cvec = cvec_res?;
+        let tvec = tvec_res?;
 
         self.storage.begin_immediate()?;
         let result = (|| -> Result<()> {

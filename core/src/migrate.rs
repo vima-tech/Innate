@@ -35,9 +35,18 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("4.15", "4.16", include_str!("migrations/4.15_to_4.16.sql")),
     ("4.16", "4.17", include_str!("migrations/4.16_to_4.17.sql")),
     ("4.17", "4.18", include_str!("migrations/4.17_to_4.18.sql")),
+    ("4.18", "4.19", include_str!("migrations/4.18_to_4.19.sql")),
+    ("4.19", "4.20", include_str!("migrations/4.19_to_4.20.sql")),
+    ("4.20", "4.21", include_str!("migrations/4.20_to_4.21.sql")),
 ];
 
-const TARGET: &str = "4.18";
+const TARGET: &str = "4.21";
+
+/// The schema version this binary migrates to (single source of truth for callers
+/// that want to report it, e.g. the CLI `migrate` "nothing to do" message).
+pub fn target_version() -> &'static str {
+    TARGET
+}
 
 /// Run all pending migrations on `db_path`. Idempotent if already at target.
 /// Returns the list of migration steps executed.
@@ -92,6 +101,10 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
         let backfill_entities = *to == "4.18"
             && column_exists(&conn, "chunks", "content")?
             && column_exists(&conn, "chunks", "trigger_desc")?;
+        // 可观测性 ts 索引(4.18→4.19):CREATE INDEX 依赖既有表的 ts 列。部分迁移
+        // 测试夹具只建简化 schema(缺这些表/列),故每个索引各自用 column_exists 守卫;
+        // 真实库三表恒有 ts,索引照常建立。各索引独立判断(夹具可能只缺其中之一)。
+        let add_ts_indexes = *to == "4.19";
         // Run the step atomically.
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = conn.execute_batch(sql);
@@ -134,6 +147,22 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
                     if let Err(error) = backfill_chunk_entities(&conn) {
                         let _ = conn.execute_batch("ROLLBACK");
                         return Err(error);
+                    }
+                }
+                if add_ts_indexes {
+                    for (table, col, idx) in [
+                        ("episodic_log", "ts", "idx_log_ts"),
+                        ("usage_trace", "ts", "idx_trace_ts"),
+                        ("feedback_events", "ts", "idx_feedback_ts"),
+                    ] {
+                        if column_exists(&conn, table, col).unwrap_or(false) {
+                            if let Err(error) = conn.execute_batch(&format!(
+                                "CREATE INDEX IF NOT EXISTS {idx} ON {table}({col})"
+                            )) {
+                                let _ = conn.execute_batch("ROLLBACK");
+                                return Err(error.into());
+                            }
+                        }
                     }
                 }
                 if copy_last_used {

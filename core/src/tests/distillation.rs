@@ -586,7 +586,10 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             "4.14→4.15",
             "4.15→4.16",
             "4.16→4.17",
-            "4.17→4.18"
+            "4.17→4.18",
+            "4.18→4.19",
+            "4.19→4.20",
+            "4.20→4.21"
         ]
     );
 
@@ -606,7 +609,7 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "4.18");
+    assert_eq!(version, "4.21");
 }
 
 #[test]

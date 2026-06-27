@@ -82,6 +82,7 @@ const REPEAT_SELECT_CONF_MAX: f64 = 0.5;
 const NEVER_USED_AGE_DAYS: i64 = 30;
 const OPEN_TTL_DAYS: i64 = 14;
 const SCREENING_TIMEOUT_MINUTES: i64 = 30;
+const METRICS_RETAIN_DAYS: i64 = 30;
 const PROMOTE_USED_SUCCESS_MIN: i64 = 3;
 const PROMOTE_CONFIDENCE_MIN: f64 = 0.60;
 const DECAY_FLOOR: f64 = 0.20;
@@ -225,6 +226,7 @@ pub struct KnowledgeBase {
     never_used_age_days: i64,
     open_ttl_days: i64,
     screening_timeout_minutes: i64,
+    metrics_retain_days: i64,
     promote_used_success_min: i64,
     promote_confidence_min: f64,
     decay_floor: f64,
@@ -337,6 +339,7 @@ impl KnowledgeBase {
             repeat_select_conf_max: REPEAT_SELECT_CONF_MAX,
             never_used_age_days: NEVER_USED_AGE_DAYS,
             open_ttl_days: OPEN_TTL_DAYS,
+            metrics_retain_days: METRICS_RETAIN_DAYS,
             screening_timeout_minutes: SCREENING_TIMEOUT_MINUTES,
             promote_used_success_min: PROMOTE_USED_SUCCESS_MIN,
             promote_confidence_min: PROMOTE_CONFIDENCE_MIN,
@@ -429,6 +432,7 @@ impl KnowledgeBase {
             ("curate.repeat_select_min", "10"),
             ("curate.repeat_select_conf_max", "0.5"),
             ("curate.never_used_age_days", "30"),
+            ("metrics.retain_days", "30"),
             ("curate.open_ttl_days", "14"),
             ("curate.screening_timeout_minutes", "30"),
             ("curate.promote_used_success_min", "3"),
@@ -519,6 +523,7 @@ impl KnowledgeBase {
         self.low_conf_threshold = f("curate.low_conf_threshold", LOW_CONF_THRESHOLD);
         self.low_conf_idle_days = i("curate.low_conf_idle_days", LOW_CONF_IDLE_DAYS);
         self.repeat_select_min = i("curate.repeat_select_min", REPEAT_SELECT_MIN);
+        self.metrics_retain_days = i("metrics.retain_days", METRICS_RETAIN_DAYS);
         self.repeat_select_conf_max = f("curate.repeat_select_conf_max", REPEAT_SELECT_CONF_MAX);
         self.never_used_age_days = i("curate.never_used_age_days", NEVER_USED_AGE_DAYS);
         self.open_ttl_days = i("curate.open_ttl_days", OPEN_TTL_DAYS);
@@ -802,19 +807,102 @@ fn days_ago(now_iso: &str, days: i64) -> String {
     now_iso.to_string()
 }
 
-fn minutes_ago(now_iso: &str, minutes: i64) -> String {
+fn hours_ago(now_iso: &str, hours: i64) -> String {
     use chrono::{DateTime, Duration, Utc};
     if let Ok(t) = now_iso.parse::<DateTime<Utc>>() {
-        let cutoff = t - Duration::minutes(minutes);
+        let cutoff = t - Duration::hours(hours);
         return cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     }
     now_iso.to_string()
 }
 
-fn hours_ago(now_iso: &str, hours: i64) -> String {
+impl KnowledgeBase {
+    /// Time a fallible operation, persist a one-row `operation_runs` summary (P3a,
+    /// design doc §5.3), and return its result unchanged. Instrumentation is
+    /// **non-fatal**: a failed metrics insert never affects the wrapped operation.
+    /// Raw LLM detail still lives in `llm_trace.log`; this holds only the aggregatable
+    /// summary (status / duration / error_kind). `error_kind` comes from the closed
+    /// vocabulary in `storage::metrics::classify_error` so the top-list groups cleanly.
+    pub(crate) fn measure<T>(
+        &self,
+        op: &str,
+        source: Option<&str>,
+        trace_id: Option<&str>,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let started = std::time::Instant::now();
+        let started_at = utc_now_iso();
+        let result = f();
+        let duration_ms = started.elapsed().as_millis() as i64;
+        let (status, error_kind) = match &result {
+            Ok(_) => ("ok", None),
+            Err(e) => (
+                "error",
+                Some(crate::storage::metrics::classify_error(e).to_string()),
+            ),
+        };
+        let run = crate::storage::metrics::OperationRun {
+            id: gen_uuid(),
+            trace_id: trace_id.map(|s| s.to_string()),
+            op: op.to_string(),
+            source: source.map(|s| s.to_string()),
+            agent: crate::utils::agent_source(),
+            status: status.to_string(),
+            error_kind,
+            started_at,
+            duration_ms,
+            counts_json: None,
+            params_json: None,
+        };
+        let _ = self.storage.insert_operation_run(&run);
+        result
+    }
+
+    /// Embed content+trigger as one timed `embed` operation_run (full-path coverage:
+    /// add / spark / promote / distill / rebuild_embeddings). Returns the two Results
+    /// **unchanged** so each caller keeps its own embedding-failure fallback. The op row
+    /// is best-effort/non-fatal; when called inside an open transaction it simply joins
+    /// it (same connection, no lock conflict). `error_kind` uses the closed vocabulary.
+    pub(crate) fn embed_pair(
+        &self,
+        content: &str,
+        trigger: &str,
+        source: &str,
+    ) -> (Result<Vec<f32>>, Result<Vec<f32>>) {
+        let started = std::time::Instant::now();
+        let started_at = utc_now_iso();
+        let c = self.embedding.embed_content(content);
+        let t = self.embedding.embed_trigger(trigger);
+        let duration_ms = started.elapsed().as_millis() as i64;
+        let (status, error_kind) = match c.as_ref().err().or(t.as_ref().err()) {
+            None => ("ok", None),
+            Some(e) => (
+                "error",
+                Some(crate::storage::metrics::classify_error(e).to_string()),
+            ),
+        };
+        let run = crate::storage::metrics::OperationRun {
+            id: gen_uuid(),
+            trace_id: None,
+            op: "embed".to_string(),
+            source: Some(source.to_string()),
+            agent: crate::utils::agent_source(),
+            status: status.to_string(),
+            error_kind,
+            started_at,
+            duration_ms,
+            counts_json: None,
+            params_json: None,
+        };
+        let _ = self.storage.insert_operation_run(&run);
+        (c, t)
+    }
+}
+
+fn minutes_ago(now_iso: &str, minutes: i64) -> String {
     use chrono::{DateTime, Duration, Utc};
     if let Ok(t) = now_iso.parse::<DateTime<Utc>>() {
-        let cutoff = t - Duration::hours(hours);
+        let cutoff = t - Duration::minutes(minutes);
         return cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     }
     now_iso.to_string()
