@@ -93,6 +93,11 @@ impl KnowledgeBase {
         // ANN candidates (non-spark) — vector channels + lexical/BM25 (hybrid).
         let mut candidates = self.ann_candidates(&q_content, &q_trigger, query)?;
         self.apply_soft_dep_bonus(&mut candidates)?;
+        // ACT-R spreading activation (SAG-inspired associative recall). Off by
+        // default (w_spread = 0) — the call returns immediately, so the hot path
+        // is unchanged. When enabled, it may pull in NEW candidates reachable only
+        // via a shared entity (multi-hop), which then flow through normal scoring.
+        self.expand_by_spreading(&mut candidates, query)?;
 
         // Score + anti-trigger penalty
         let mut scored = self.score_candidates(candidates, query, &context_key, &now)?;
@@ -235,6 +240,125 @@ impl KnowledgeBase {
         Ok(candidates)
     }
 
+    /// ACT-R spreading activation over the associative entity index (SAG-inspired).
+    ///
+    /// Source activation flows from (a) entities of the **query** and (b) entities
+    /// of the top-`spread_seed_n` base-relevance candidates (the 2-hop / multi-hop
+    /// path). For each source entity it spreads `a_e / fan(e)` to every chunk that
+    /// carries it — the ACT-R associative strength `S_ji = S − ln(fan_j)` taken in
+    /// its `1/fan` form — so promiscuous entities contribute little and a
+    /// discriminative one (a specific error code / symbol) drives the link.
+    /// Entities whose fan exceeds `spread_fan_cap` are dropped outright.
+    ///
+    /// Sets `sim_spread` on existing candidates and inserts new ones reachable only
+    /// through a shared entity. Normalized to [0,1] for scale parity with the other
+    /// channels. No-op (immediate return) when `w_spread <= 0`.
+    pub(super) fn expand_by_spreading(
+        &self,
+        candidates: &mut HashMap<String, CandidateInfo>,
+        query: &str,
+    ) -> Result<()> {
+        if self.w_spread <= 0.0 {
+            return Ok(());
+        }
+
+        // Source activation per entity: query entities at unit weight, plus the
+        // entities of the strongest base candidates weighted by their relevance.
+        let mut source_act: HashMap<String, f64> = HashMap::new();
+        for e in crate::entities::extract_entities(query, None) {
+            *source_act.entry(e.entity).or_insert(0.0) += 1.0;
+        }
+
+        let mut seeds: Vec<(String, f32)> = candidates
+            .iter()
+            .map(|(id, info)| {
+                let base = info
+                    .sim_content
+                    .max(info.sim_trigger)
+                    .max(info.sim_lexical);
+                (id.clone(), base)
+            })
+            .filter(|(_, base)| *base > 0.0)
+            .collect();
+        seeds.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        seeds.truncate(self.spread_seed_n);
+        if !seeds.is_empty() {
+            let seed_ids: Vec<&str> = seeds.iter().map(|(id, _)| id.as_str()).collect();
+            let seed_ents = self.storage.entities_for_chunks(&seed_ids)?;
+            for (id, weight) in &seeds {
+                if let Some(ents) = seed_ents.get(id) {
+                    for ent in ents {
+                        *source_act.entry(ent.clone()).or_insert(0.0) += *weight as f64;
+                    }
+                }
+            }
+        }
+        if source_act.is_empty() {
+            return Ok(());
+        }
+
+        // Fetch links for all source entities, then group → fan → cap → distribute.
+        let ents: Vec<&str> = source_act.keys().map(String::as_str).collect();
+        let links = self.storage.entity_links(&ents)?;
+        let mut by_entity: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (entity, chunk_id) in &links {
+            by_entity.entry(entity).or_default().push(chunk_id);
+        }
+        let mut spread_raw: HashMap<String, f64> = HashMap::new();
+        for (entity, chunk_ids) in &by_entity {
+            let fan = chunk_ids.len() as i64;
+            if fan == 0 || fan > self.spread_fan_cap {
+                continue; // ACT-R fan effect: non-discriminative entity, drop it.
+            }
+            let a_e = source_act.get(*entity).copied().unwrap_or(0.0);
+            if a_e <= 0.0 {
+                continue;
+            }
+            let contribution = a_e / fan as f64;
+            for cid in chunk_ids {
+                *spread_raw.entry((*cid).to_string()).or_insert(0.0) += contribution;
+            }
+        }
+        if spread_raw.is_empty() {
+            return Ok(());
+        }
+        let max = spread_raw.values().cloned().fold(0.0_f64, f64::max);
+        if max <= 0.0 {
+            return Ok(());
+        }
+
+        // Fetch any chunks not already candidates so spreading can introduce them.
+        let embed_version = self
+            .storage
+            .get_meta("embed_version")?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(1);
+        let new_ids: Vec<String> = spread_raw
+            .keys()
+            .filter(|id| !candidates.contains_key(*id))
+            .cloned()
+            .collect();
+        let fetched = if new_ids.is_empty() {
+            HashMap::new()
+        } else {
+            let refs: Vec<&str> = new_ids.iter().map(String::as_str).collect();
+            self.storage.get_chunks_by_ids(&refs)?
+        };
+
+        for (cid, raw) in spread_raw {
+            let norm = (raw / max) as f32;
+            if let Some(info) = candidates.get_mut(&cid) {
+                info.sim_spread = info.sim_spread.max(norm);
+            } else if let Some(chunk) = fetched.get(&cid) {
+                if chunk_is_valid_for_recall(chunk, embed_version) {
+                    let e = candidates.entry(cid).or_insert_with(|| new_candidate(chunk));
+                    e.sim_spread = e.sim_spread.max(norm);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn apply_soft_dep_bonus(
         &self,
         candidates: &mut HashMap<String, CandidateInfo>,
@@ -343,6 +467,7 @@ impl KnowledgeBase {
             let mut fused = self.w_content * info.sim_content as f64
                 + self.w_trigger * info.sim_trigger as f64
                 + self.w_lexical * info.sim_lexical as f64
+                + self.w_spread * info.sim_spread as f64
                 + self.w_confidence * conf
                 + self.w_context * context_score
                 + self.w_activation * activation;
@@ -361,6 +486,7 @@ impl KnowledgeBase {
             chunk["_context_score"] = json!(context_score);
             chunk["_activation"] = json!(activation);
             chunk["_sim_lexical"] = json!(info.sim_lexical);
+            chunk["_sim_spread"] = json!(info.sim_spread);
             chunk["_fused_score"] = json!(fused);
             scored.push((fused, chunk));
         }

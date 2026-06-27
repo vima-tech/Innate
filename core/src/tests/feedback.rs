@@ -262,7 +262,15 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
 
     assert_eq!(
         crate::migrate::run_migrations(file.path()).unwrap(),
-        vec!["4.11→4.12", "4.12→4.13", "4.13→4.14", "4.14→4.15", "4.15→4.16", "4.16→4.17"]
+        vec![
+            "4.11→4.12",
+            "4.12→4.13",
+            "4.13→4.14",
+            "4.14→4.15",
+            "4.15→4.16",
+            "4.16→4.17",
+            "4.17→4.18"
+        ]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     let values = conn
@@ -334,7 +342,13 @@ fn migration_4_14_repairs_existing_4_13_baselines_and_cost_history() {
 
     assert_eq!(
         crate::migrate::run_migrations(file.path()).unwrap(),
-        vec!["4.13→4.14", "4.14→4.15", "4.15→4.16", "4.16→4.17"]
+        vec![
+            "4.13→4.14",
+            "4.14→4.15",
+            "4.15→4.16",
+            "4.16→4.17",
+            "4.17→4.18"
+        ]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();
     let values = conn

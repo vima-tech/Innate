@@ -60,6 +60,17 @@ const W_ACTIVATION: f64 = 0.08;
 // Hybrid 检索:lexical/BM25 channel weight. Modest by default so exact-term
 // matches lift the right chunk without overpowering semantic similarity.
 const W_LEXICAL: f64 = 0.25;
+// ACT-R spreading-activation channel (SAG-inspired associative recall). Weight of
+// the spread score in the fused sum. Defaults to 0.0 — OFF — so the no-LLM hot
+// path is byte-for-byte unchanged until a multi-hop eval set justifies turning it
+// on. When 0, recall skips the entity-expansion work entirely (zero added cost).
+const W_SPREAD: f64 = 0.0;
+// Entities linking more chunks than this are treated as non-discriminative and
+// dropped from the spread (ACT-R fan effect taken to its limit). Keeps promiscuous
+// tokens (`--release`, `rust`) from flooding the candidate set.
+const SPREAD_FAN_CAP: i64 = 50;
+// Number of top base-relevance candidates whose entities seed the 2-hop spread.
+const SPREAD_SEED_N: usize = 5;
 const TOP_K_CANDIDATES: usize = 20;
 const ANTI_TRIGGER_PENALTY: f64 = 0.6;
 const DENSITY_REFILL: bool = true;
@@ -200,6 +211,9 @@ pub struct KnowledgeBase {
     w_context: f64,
     w_activation: f64,
     w_lexical: f64,
+    w_spread: f64,
+    spread_fan_cap: i64,
+    spread_seed_n: usize,
     top_k_candidates: usize,
     anti_trigger_penalty: f64,
     density_refill: bool,
@@ -305,6 +319,9 @@ impl KnowledgeBase {
             sanitizer,
             reranker,
             w_lexical: W_LEXICAL,
+            w_spread: W_SPREAD,
+            spread_fan_cap: SPREAD_FAN_CAP,
+            spread_seed_n: SPREAD_SEED_N,
             embed_situation_signature: EMBED_SITUATION_SIGNATURE,
             w_content: W_CONTENT,
             w_trigger: W_TRIGGER,
@@ -400,6 +417,9 @@ impl KnowledgeBase {
             ("recall.w_context", "0.15"),
             ("recall.w_activation", "0.08"),
             ("recall.w_lexical", "0.25"),
+            ("recall.w_spread", "0.0"),
+            ("recall.spread_fan_cap", "50"),
+            ("recall.spread_seed_n", "5"),
             ("recall.embed_situation_signature", "false"),
             ("recall.top_k_candidates", "20"),
             ("recall.anti_trigger_penalty", "0.6"),
@@ -486,6 +506,9 @@ impl KnowledgeBase {
         self.w_confidence = f("recall.w_confidence", W_CONFIDENCE);
         self.w_context = f("recall.w_context", W_CONTEXT);
         self.w_lexical = f("recall.w_lexical", W_LEXICAL);
+        self.w_spread = f("recall.w_spread", W_SPREAD);
+        self.spread_fan_cap = i("recall.spread_fan_cap", SPREAD_FAN_CAP).max(1);
+        self.spread_seed_n = i("recall.spread_seed_n", SPREAD_SEED_N as i64).max(0) as usize;
         self.embed_situation_signature =
             b("recall.embed_situation_signature", EMBED_SITUATION_SIGNATURE);
         self.w_activation = f("recall.w_activation", W_ACTIVATION);
@@ -575,6 +598,11 @@ struct CandidateInfo {
     /// Lexical/BM25 channel score ∈ [0,1] (hybrid 检索). Zero when the chunk was
     /// found only by vector search; positive when an exact-term match recovered it.
     sim_lexical: f32,
+    /// ACT-R spreading-activation score ∈ [0,1]. Positive when the chunk was
+    /// reached via a shared entity (with the query or a high-relevance seed),
+    /// even if no similarity/lexical channel surfaced it. Zero on the default
+    /// (w_spread = 0) path.
+    sim_spread: f32,
 }
 
 /// True when a coarse signature carries at least one real value (not empty /
@@ -596,6 +624,7 @@ fn new_candidate(chunk: &Value) -> CandidateInfo {
         sim_content: 0.0,
         sim_trigger: 0.0,
         sim_lexical: 0.0,
+        sim_spread: 0.0,
     }
 }
 

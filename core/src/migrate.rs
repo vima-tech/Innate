@@ -34,9 +34,10 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("4.14", "4.15", include_str!("migrations/4.14_to_4.15.sql")),
     ("4.15", "4.16", include_str!("migrations/4.15_to_4.16.sql")),
     ("4.16", "4.17", include_str!("migrations/4.16_to_4.17.sql")),
+    ("4.17", "4.18", include_str!("migrations/4.17_to_4.18.sql")),
 ];
 
-const TARGET: &str = "4.17";
+const TARGET: &str = "4.18";
 
 /// Run all pending migrations on `db_path`. Idempotent if already at target.
 /// Returns the list of migration steps executed.
@@ -85,6 +86,12 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
         let add_agent_chunk = *to == "4.17"
             && column_exists(&conn, "chunks", "content")?
             && !column_exists(&conn, "chunks", "agent")?;
+        // 关联实体索引回填(4.17→4.18):DDL 由本步 SQL 建表,存量 chunk 的实体由
+        // Rust(extract_entities)回填。仅当 chunks 拥有内容列时执行(部分 schema
+        // 测试夹具缺列 → 跳过,不致命;真实库恒满足)。可重复执行(INSERT OR IGNORE)。
+        let backfill_entities = *to == "4.18"
+            && column_exists(&conn, "chunks", "content")?
+            && column_exists(&conn, "chunks", "trigger_desc")?;
         // Run the step atomically.
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = conn.execute_batch(sql);
@@ -123,6 +130,12 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
                         return Err(error.into());
                     }
                 }
+                if backfill_entities {
+                    if let Err(error) = backfill_chunk_entities(&conn) {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(error);
+                    }
+                }
                 if copy_last_used {
                     if let Err(error) = conn.execute(
                         "UPDATE chunks
@@ -159,6 +172,33 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
     }
 
     Ok(applied)
+}
+
+/// Backfill `chunk_entities` from existing chunks using the deterministic
+/// extractor. Runs inside the migration's open transaction. Idempotent
+/// (`INSERT OR IGNORE` on the composite PK), so re-running is safe.
+fn backfill_chunk_entities(conn: &Connection) -> Result<()> {
+    let rows: Vec<(String, String, Option<String>)> = {
+        let mut stmt = conn.prepare("SELECT id, content, trigger_desc FROM chunks")?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut ins = conn.prepare(
+        "INSERT OR IGNORE INTO chunk_entities (chunk_id, entity, etype, weight)
+         VALUES (?1, ?2, ?3, 1.0)",
+    )?;
+    for (id, content, trigger) in rows {
+        for e in crate::entities::extract_entities(&content, trigger.as_deref()) {
+            ins.execute(rusqlite::params![id, e.entity, e.etype])?;
+        }
+    }
+    Ok(())
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {

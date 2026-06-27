@@ -347,6 +347,7 @@ impl KnowledgeBase {
                 "recall.w_trigger": self.w_trigger,
                 "recall.w_context": self.w_context,
                 "recall.w_activation": self.w_activation,
+                "recall.w_spread": self.w_spread,
                 "recall.top_k_candidates": self.top_k_candidates,
                 "curate.low_conf_threshold": self.low_conf_threshold,
                 "curate.low_conf_idle_days": self.low_conf_idle_days,

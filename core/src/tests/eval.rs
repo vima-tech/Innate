@@ -510,3 +510,93 @@ fn actr_activation_breaks_ties_by_recency_and_frequency() {
         "activation should rank the hot (used 30×, recent) variant above the cold one"
     );
 }
+
+#[test]
+fn spreading_activation_links_chunks_through_shared_entity() {
+    // ACT-R spreading activation (SAG-inspired associative recall). Chunk B shares
+    // NO query token (zero similarity/lexical signal) but shares a discriminative
+    // code symbol with chunk A, which the query *does* hit. With w_spread > 0, the
+    // activation spreads A→entity→B, giving B a positive spread score it cannot
+    // get on the default (w_spread = 0) path.
+    let file = NamedTempFile::new().unwrap();
+    // Seed the weight, then reopen so load_params picks it up (open_with loads once).
+    {
+        let seed = KnowledgeBase::open_with(
+            file.path(),
+            Some(Arc::new(BowEmbeddingProvider::new())),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        seed.storage.set_meta("recall.w_spread", "0.6").unwrap();
+    }
+    let kb = KnowledgeBase::open_with(
+        file.path(),
+        Some(Arc::new(BowEmbeddingProvider::new())),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    // A is hit by the query trigger and carries the discriminative symbol.
+    let _a = kb
+        .add(
+            "tune the fused score via Wug_Plover::quux knob",
+            "note",
+            Some("embedding cache invalidation strategy"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    // B shares the symbol but nothing else with the query.
+    let id_b = kb
+        .add(
+            "Wug_Plover::quux also guards the zebra xylophone edge case",
+            "note",
+            Some("unrelated marsupial topic"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    // Noise so the corpus isn't trivially two rows.
+    for i in 0..4 {
+        kb.add(
+            &format!("totally unrelated note number {i} about gardening"),
+            "note",
+            Some(&format!("gardening tip {i}")),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    }
+
+    let spread_of = |id: &str| -> f64 {
+        let res = kb
+            .recall(RecallParams {
+                query: "embedding cache invalidation strategy",
+                budget: 1_000_000,
+                source: "sdk",
+                ..Default::default()
+            })
+            .unwrap();
+        res.knowledge
+            .iter()
+            .find(|c| c["id"].as_str() == Some(id))
+            .and_then(|c| c["_sim_spread"].as_f64())
+            .unwrap_or(0.0)
+    };
+
+    let b_spread = spread_of(&id_b);
+    eprintln!("[eval] B spread score = {b_spread}");
+    assert!(
+        b_spread > 0.0,
+        "B should receive positive spreading activation via the shared Wug_Plover::quux entity"
+    );
+}

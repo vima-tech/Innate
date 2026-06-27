@@ -2,6 +2,7 @@ pub mod backup;
 pub mod cli;
 pub mod daemon;
 pub mod embedding;
+pub mod entities;
 pub mod errors;
 pub mod hook;
 pub mod install;

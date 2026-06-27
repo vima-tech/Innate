@@ -1,4 +1,4 @@
--- Innate knowledge layer schema v4.17 (Rust edition)
+-- Innate knowledge layer schema v4.18 (Rust edition)
 -- Replaces sqlite-vec virtual tables with BLOB columns + Rust cosine similarity.
 -- All timestamp conventions from the original schema apply unchanged.
 -- NOTE: PRAGMAs are set by configure_pragmas() at connection time; omitted here.
@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.17');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.18');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -118,6 +118,24 @@ CREATE TABLE IF NOT EXISTS deps (
 );
 CREATE INDEX IF NOT EXISTS idx_deps_src ON deps(src);
 CREATE INDEX IF NOT EXISTS idx_deps_dst ON deps(dst);
+
+-- Associative entity index (SAG-inspired) for ACT-R spreading activation.
+-- Each chunk contributes its high-signal tokens (error codes, flags, paths, code
+-- symbols) as entities; two chunks sharing an entity are associatively linked.
+-- `recall` spreads activation across these links so knowledge reachable only via
+-- a shared entity (not surface similarity) is still surfaced. Populated
+-- deterministically by `entities::extract_entities` on every chunk write — no
+-- heavyweight knowledge graph, no LLM. The `entity` index makes fan-out and
+-- fan-count (ACT-R `S_ji = S - ln(fan)`) cheap SQL.
+CREATE TABLE IF NOT EXISTS chunk_entities (
+    chunk_id TEXT NOT NULL,
+    entity   TEXT NOT NULL,
+    etype    TEXT,
+    weight   REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (chunk_id, entity)
+);
+CREATE INDEX IF NOT EXISTS idx_chunk_entities_entity ON chunk_entities(entity);
+CREATE INDEX IF NOT EXISTS idx_chunk_entities_chunk  ON chunk_entities(chunk_id);
 
 CREATE TABLE IF NOT EXISTS usage_trace (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

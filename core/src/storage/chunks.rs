@@ -56,7 +56,85 @@ impl Storage {
                 c.agent
             ],
         )?;
+        // Associative entity index (SAG-inspired, ACT-R spreading activation).
+        // Deterministic extraction on the same write path that feeds chunks_fts,
+        // so every chunk writer (lifecycle/distill/curate) indexes entities with
+        // no extra wiring. Sparks are excluded from recall, so skip indexing them.
+        if c.origin != "spark" {
+            self.replace_chunk_entities(
+                &c.id,
+                &crate::entities::extract_entities(&c.content, c.trigger_desc.as_deref()),
+            )?;
+        }
         Ok(())
+    }
+
+    /// Replace a chunk's associative entities (idempotent: clear then insert).
+    pub fn replace_chunk_entities(
+        &self,
+        chunk_id: &str,
+        entities: &[crate::entities::ExtractedEntity],
+    ) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM chunk_entities WHERE chunk_id=?1", params![chunk_id])?;
+        if entities.is_empty() {
+            return Ok(());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT OR IGNORE INTO chunk_entities (chunk_id, entity, etype, weight)
+             VALUES (?1, ?2, ?3, 1.0)",
+        )?;
+        for e in entities {
+            stmt.execute(params![chunk_id, e.entity, e.etype])?;
+        }
+        Ok(())
+    }
+
+    /// Entities of the given chunks (for seeding 2-hop spreading from the highest
+    /// base-relevance candidates). Returns id → its entity strings.
+    pub fn entities_for_chunks(&self, ids: &[&str]) -> Result<HashMap<String, Vec<String>>> {
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT chunk_id, entity FROM chunk_entities WHERE chunk_id IN ({placeholders})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params = rusqlite::params_from_iter(ids.iter());
+        let rows = stmt.query_map(params, |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (cid, ent) = row?;
+            out.entry(cid).or_default().push(ent);
+        }
+        Ok(out)
+    }
+
+    /// Reverse index: chunks linked to any of the given entities, restricted to
+    /// recall-valid chunks (mirrors `search_lexical`: not archived, not spark).
+    /// Returns (entity, chunk_id) pairs; the caller computes fan = group size and
+    /// the ACT-R `1/fan` normalization in pure logic (IO/logic separation).
+    pub fn entity_links(&self, entities: &[&str]) -> Result<Vec<(String, String)>> {
+        if entities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = entities.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT e.entity, e.chunk_id
+             FROM chunk_entities e
+             JOIN chunks c ON c.id = e.chunk_id
+             WHERE e.entity IN ({placeholders})
+               AND c.state != 'archived' AND c.origin != 'spark'"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params = rusqlite::params_from_iter(entities.iter());
+        let rows = stmt.query_map(params, |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn insert_vec_content(&self, chunk_id: &str, emb: &[u8]) -> Result<()> {

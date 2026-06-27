@@ -110,6 +110,7 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `kb/appraise.rs` | `appraise` — 直觉/intuition critic; synchronous no-LLM footing check, reuses recall's fused score, returns valence/strength/tier/flagged_points (never an answer) |
 | `storage/{mod,chunks,traces,evolution,meta,raw}.rs` | rusqlite backend; schema init, BLOB-vector search, SQL helpers |
 | `embedding.rs` | `EmbeddingProvider` trait + `DummyEmbeddingProvider` (hash-based, for tests) |
+| `entities.rs` | `extract_entities` — deterministic (no-LLM, no-`regex`) high-signal entity extractor (error codes, flags, paths, code symbols) feeding the `chunk_entities` associative index for ACT-R spreading activation |
 | `llm.rs` | `HttpDistiller` (OpenAI-compatible + Anthropic, one type) + `LlmEmbeddingProvider`; HTTP retry transport |
 | `llm_trace.rs` | LLM/embedding call tracing — `post_json_retry` emits JSONL to `~/.innate/logs/llm_trace.log` (request/response previews, latency, retries, errors; never the API key). Read by `innate web` `/api/llm-traces` |
 | `refine.rs` | `Sanitizer`/`Refiner`/`Distiller` traits + `DefaultSanitizer`/`NoopSanitizer`/`NullRefiner`/`HeuristicDistiller` defaults + `ResilientDistiller` (wraps LLM distiller with deterministic fallback after retry-budget exhaustion, so capture never depends on the LLM) |
@@ -121,12 +122,12 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
 | `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |
 | `upgrade.rs` | `innate upgrade` — GitHub Releases self-update + SHA-256 verify + atomic swap |
-| `migrate.rs` | Schema migration chain 4.0 → 4.17, each step atomic |
+| `migrate.rs` | Schema migration chain 4.0 → 4.18, each step atomic |
 | `hook.rs` | `innate hook stop` — Claude Code Stop payload → session.log events |
 | `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
 | `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `sanitize()`, cosine similarity |
 | `settings.rs` | `settings.json` parsing (LLM / Embedding / Daemon / Backup) |
-| `schema.sql` | Embedded schema (v4.17); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v4.18); `include_str!` at compile time |
 
 ### Filesystem layout (`~/.innate/`)
 
@@ -164,10 +165,11 @@ No sqlite-vec dependency. Embeddings stored as raw `f32` BLOBs in `vec_content` 
 
 ### Hybrid retrieval (混合检索, v4.16)
 
-`recall` fuses **three** candidate channels, not just vectors: content-cosine, trigger-cosine, and a **lexical/BM25** channel (`chunks_fts`, a standalone FTS5 table kept in sync by triggers; `storage::search_lexical`). The lexical channel recovers exact-token matches (error codes, flags, symbol names) that embeddings blur. Fused score = `w_content·sim_content + w_trigger·sim_trigger + w_lexical·sim_lexical + w_confidence·conf + w_context·context_score + w_activation·activation` (+ pending/anti penalties). All weights are meta-tunable (`recall.w_*`).
+`recall` fuses **three** candidate channels, not just vectors: content-cosine, trigger-cosine, and a **lexical/BM25** channel (`chunks_fts`, a standalone FTS5 table kept in sync by triggers; `storage::search_lexical`). The lexical channel recovers exact-token matches (error codes, flags, symbol names) that embeddings blur. Fused score = `w_content·sim_content + w_trigger·sim_trigger + w_lexical·sim_lexical + w_spread·sim_spread + w_confidence·conf + w_context·context_score + w_activation·activation` (+ pending/anti penalties). All weights are meta-tunable (`recall.w_*`).
 
-Two opt-in levers, both **off by default** so the no-LLM hot path is unchanged:
+Three opt-in levers, all **off by default** so the no-LLM hot path is unchanged:
 - `recall.embed_situation_signature` (meta flag) — fold the coarse situation signature into the embedded query (part c, granularity).
+- `recall.w_spread` (meta weight, default `0.0`) — **ACT-R spreading activation** (SAG-inspired associative recall, schema 4.18). Source activation flows from the **query's** entities and the entities of the top-`spread_seed_n` base candidates (2-hop), spreading `a_e / fan(e)` over the `chunk_entities` index (`storage::entity_links`/`entities_for_chunks`); the `1/fan` term is ACT-R's associative strength `S_ji = S − ln(fan_j)`, so promiscuous entities self-mute and entities with fan > `recall.spread_fan_cap` are dropped. Completes the activation model (base-level + associative). May pull in NEW candidates reachable only via a shared entity, which then flow through normal scoring. `expand_by_spreading` returns immediately when the weight is 0 — zero hot-path cost. Validate gains with a multi-hop `recall-eval` set before raising the weight.
 - `RecallParams.rerank` / CLI `--rerank` — offline LLM rerank of the shortlist via the injectable `Reranker` (default `NoopReranker`; `LlmReranker` wired by `open_kb` when an LLM is configured). **Never** used by hooks/MCP; non-fatal (falls back to fused order).
 
 Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k N]` (reports P@1 / Recall@k / MRR / nDCG@k using the configured provider). Template: `scripts/recall_eval_template.jsonl`. This is distinct from `cargo test eval`, which validates the ranking math on dummy-embedding fixtures.
@@ -175,6 +177,8 @@ Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k
 ## Non-Obvious Implementation Constraints
 
 **Agent-source dimension (`agent` column, schema 4.17)** — `chunks.agent` and `episodic_log.agent` record *which agent product* drove the call (`claude-code` / `codex` / `opencode` / …). This is **orthogonal** to the access channel in `usage_trace.source` / `episodic_log.event_source` (`mcp/cli/hook/daemon/...`): the channel says *which entry point*, `agent` says *which agent*. Source of truth is `utils::agent_source()`, which reads the `INNATE_AGENT` env var (injected by `innate install` into each agent's MCP config; `None`/NULL when unset — backward compatible, never enum-constrained). Distilled chunks **inherit** `agent` from their source `episodic_log` (not the process running `evolve`, which may be a daemon/cron); promoted sparks inherit from the spark. The Stop/hook capture channel is not yet env-tagged (records land with NULL agent) — follow-up.
+
+**Associative entity index (`chunk_entities`, schema 4.18)** — populated by `Storage::insert_chunk` calling `entities::extract_entities` on the **same** write path that feeds `chunks_fts`, so every chunk writer (lifecycle/distill/curate) indexes entities with no extra wiring. Extraction is **deterministic** (no LLM, no `regex` dep) so it runs on the capture hot path and in migration backfill. Sparks are **excluded** (`origin='spark'` skipped) since they are recall-exempt. `entity_links` filters to recall-valid chunks (`state != 'archived' AND origin != 'spark'`), mirroring `search_lexical`; chunks are soft-archived (never hard-deleted), so no entity cleanup is needed on archive. Extraction deliberately ignores plain lowercase words — those are already covered by the lexical channel, and entities must stay discriminative so the ACT-R fan term works.
 
 **Time functions** — `utc_now_iso()` in `utils.rs` is the **only** time source. Format: `YYYY-MM-DDTHH:MM:SS.mmmZ` (fixed 3-digit ms). Never use system time directly. All SQL cutoff comparisons rely on lexicographic ordering of this format.
 
