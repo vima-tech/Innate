@@ -198,14 +198,18 @@ pub(in crate::daemon) fn process_log_file(
             match call_cli_recall(db_path, query) {
                 Ok(tid) => {
                     let ts = crate::utils::utc_now_iso();
-                    let _ = state_db.execute(
+                    if let Err(e) = state_db.execute(
                         "INSERT OR REPLACE INTO trace_context(watch_path, trace_id, updated_at) VALUES (?,?,?)",
                         rusqlite::params![path_str.as_ref(), &tid, &ts],
-                    );
-                    let _ = state_db.execute(
+                    ) {
+                        let _ = writeln!(log, "{ts} [daemon] failed to store trace_context: {e}");
+                    }
+                    if let Err(e) = state_db.execute(
                         "INSERT OR IGNORE INTO processed_events(event_id, watch_path, trace_id, event_type, ts) VALUES (?,?,?,?,?)",
                         rusqlite::params![event_id, path_str.as_ref(), &tid, event_type, &ts],
-                    );
+                    ) {
+                        let _ = writeln!(log, "{ts} [daemon] failed to record processed start event: {e}");
+                    }
                     let _ = writeln!(log, "{ts} [daemon] start trace={tid} query={query:?}");
                 }
                 Err(e) => {
@@ -233,23 +237,35 @@ pub(in crate::daemon) fn process_log_file(
         if event_type == "end" {
             let result = call_cli_evolve(db_path, "manual");
             let ts = crate::utils::utc_now_iso();
+            // The session has ended regardless of whether evolve succeeded, so the
+            // end-of-session bookkeeping must run on BOTH branches: otherwise a
+            // failed manual evolve leaks the trace_context mapping (never deleted)
+            // and loses the end event (never recorded in processed_events, so once
+            // the read offset advances it is neither retried nor logged). A failed
+            // manual evolve is independently retried by the periodic scheduled tick,
+            // so it must not block this cleanup. Errors here are surfaced to the log
+            // instead of being silently swallowed.
+            if let Err(e) = state_db.execute(
+                "DELETE FROM trace_context WHERE watch_path=?",
+                rusqlite::params![path_str.as_ref()],
+            ) {
+                let _ = writeln!(log, "{ts} [daemon] failed to clear trace_context: {e}");
+            }
+            if let Err(e) = state_db.execute(
+                "INSERT OR IGNORE INTO processed_events
+                 (event_id, watch_path, trace_id, event_type, ts)
+                 VALUES (?,?,?,?,?)",
+                rusqlite::params![event_id, path_str.as_ref(), trace_id, event_type, ts],
+            ) {
+                let _ = writeln!(log, "{ts} [daemon] failed to record processed end event: {e}");
+            }
             match result {
                 Ok(()) => {
                     let _ = call_cli_evolve(db_path, "scheduled");
-                    let _ = state_db.execute(
-                        "DELETE FROM trace_context WHERE watch_path=?",
-                        rusqlite::params![path_str.as_ref()],
-                    );
-                    let _ = state_db.execute(
-                        "INSERT OR IGNORE INTO processed_events
-                         (event_id, watch_path, trace_id, event_type, ts)
-                         VALUES (?,?,?,?,?)",
-                        rusqlite::params![event_id, path_str.as_ref(), trace_id, event_type, ts],
-                    );
                     let _ = writeln!(log, "{ts} [daemon] end evolve ok");
                 }
                 Err(e) => {
-                    let _ = writeln!(log, "{ts} [daemon] end evolve failed: {e}");
+                    let _ = writeln!(log, "{ts} [daemon] end evolve failed (scheduled tick will retry): {e}");
                     record_daemon_error(state_db, path_str.as_ref(), "evolve", &e.to_string());
                 }
             }

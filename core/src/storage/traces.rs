@@ -186,9 +186,19 @@ impl Storage {
     // Episodic log
     // ------------------------------------------------------------------
 
+    /// Insert an episodic_log row **if its trace_id does not already exist**.
+    ///
+    /// All callers (recall, appraise, record's fresh-insert branch) pass a newly
+    /// generated trace_id, so this is an insert in practice. It is `INSERT OR
+    /// IGNORE` rather than `INSERT OR REPLACE` on purpose: REPLACE deletes and
+    /// re-inserts the whole row, which would silently wipe lifecycle state
+    /// (`distill_state`, `distill_attempts` → 0, `distill_last_failed_at` → NULL,
+    /// `outcome`, `usage_state`). An accidental re-upsert of an existing trace
+    /// must never destroy that progress — mutate existing rows through
+    /// `update_episodic_log_state` / `patch_episodic_log_content` instead.
     pub fn upsert_episodic_log(&self, log: &EpisodicLogRow) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO episodic_log
+            "INSERT OR IGNORE INTO episodic_log
              (id, trace_id, lib_id, ts, query, recall_snapshot, output,
               output_summary, outcome, event_source, task_state, completed_at,
               usage_state, used_ids, used_attribution, used_complete, context_key, nomination, priority,
@@ -233,6 +243,34 @@ impl Storage {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Recent recall→record trace timeline (newest first) for the Web "Sessions"
+    /// view. Projects a compact, UI-friendly subset of `episodic_log` rather than
+    /// `SELECT *` so the endpoint stays cheap and stable. Read-only.
+    pub fn recent_episodic_logs(&self, limit: usize) -> Result<Vec<Value>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT trace_id, ts, query, outcome, event_source, task_state,
+                    usage_state, distill_state, agent, output_summary
+             FROM episodic_log
+             ORDER BY ts DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(serde_json::json!({
+                "trace_id": r.get::<_, String>(0)?,
+                "ts": r.get::<_, String>(1)?,
+                "query": r.get::<_, Option<String>>(2)?,
+                "outcome": r.get::<_, Option<String>>(3)?,
+                "event_source": r.get::<_, Option<String>>(4)?,
+                "task_state": r.get::<_, Option<String>>(5)?,
+                "usage_state": r.get::<_, Option<String>>(6)?,
+                "distill_state": r.get::<_, Option<String>>(7)?,
+                "agent": r.get::<_, Option<String>>(8)?,
+                "output_summary": r.get::<_, Option<String>>(9)?,
+            }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn update_episodic_log_state(

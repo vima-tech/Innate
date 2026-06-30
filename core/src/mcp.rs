@@ -409,9 +409,19 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 s("trigger")
             };
             if b("rebuild_embeddings", false) {
-                let rebuilt = kb.rebuild_embeddings()?;
+                // Bound the re-embed batch so a large stale backlog never blocks
+                // the MCP request on a long string of network embedding calls;
+                // the remainder is reported and picked up by the next evolve.
+                // `rebuild_max=0` means unbounded (rebuild everything this call).
+                let cap = n("rebuild_max", 200);
+                let max = if cap <= 0 { None } else { Some(cap as usize) };
+                let (rebuilt, remaining) = kb.rebuild_embeddings_capped(max)?;
                 let evolve = kb.evolve(&trigger)?;
-                return Ok(json!({"rebuilt_embeddings": rebuilt, "evolve": evolve}));
+                return Ok(json!({
+                    "rebuilt_embeddings": rebuilt,
+                    "rebuild_remaining": remaining,
+                    "evolve": evolve,
+                }));
             }
             kb.evolve(&trigger)
         }
@@ -541,7 +551,8 @@ fn tool_schema(name: &str) -> Value {
             "type": "object",
             "properties": {
                 "trigger": {"type": "string", "enum": ["manual","scheduled","threshold"]},
-                "rebuild_embeddings": {"type": "boolean", "description": "Also rebuild the embedding index before evolving"}
+                "rebuild_embeddings": {"type": "boolean", "description": "Also rebuild the embedding index before evolving"},
+                "rebuild_max": {"type": "integer", "description": "Max stale chunks to re-embed this call (default 200; 0 = unbounded). Bounds MCP latency; remainder reported as rebuild_remaining."}
             }
         }),
         "innate_approve" | "innate_archive" | "innate_invalidate" | "innate_restore" => json!({

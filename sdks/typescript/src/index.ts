@@ -678,6 +678,46 @@ export class McpClient {
     return this.toolCall("innate_inspect", {}) as Promise<InspectResult>;
   }
 
+  // ── Governance & spark lifecycle (typed wrappers over the MCP tools) ────────
+  // Previously only reachable via the generic `toolCall` escape hatch; these
+  // typed methods mirror the CLI `KnowledgeBase` surface for parity.
+
+  async evolve(options: { trigger?: string; rebuildEmbeddings?: boolean } = {}): Promise<EvolveResult> {
+    return this.toolCall("innate_evolve", {
+      trigger: options.trigger ?? "manual",
+      ...(options.rebuildEmbeddings != null ? { rebuild_embeddings: options.rebuildEmbeddings } : {}),
+    }) as Promise<EvolveResult>;
+  }
+
+  async approve(chunkId: string): Promise<void> {
+    await this.toolCall("innate_approve", { chunk_id: chunkId });
+  }
+
+  async archive(chunkId: string, reason = "stale"): Promise<void> {
+    await this.toolCall("innate_archive", { chunk_id: chunkId, reason });
+  }
+
+  async invalidate(chunkId: string, reason = ""): Promise<void> {
+    await this.toolCall("innate_invalidate", { chunk_id: chunkId, reason });
+  }
+
+  async restore(chunkId: string): Promise<void> {
+    await this.toolCall("innate_restore", { chunk_id: chunkId });
+  }
+
+  async matureSpark(sparkId: string, to: string): Promise<void> {
+    await this.toolCall("innate_mature_spark", { spark_id: sparkId, to });
+  }
+
+  async promoteSpark(sparkId: string, to = "note"): Promise<string> {
+    const r = await this.toolCall("innate_promote_spark", { spark_id: sparkId, to }) as { chunk_id: string };
+    return r.chunk_id;
+  }
+
+  async dropSpark(sparkId: string, reason = ""): Promise<void> {
+    await this.toolCall("innate_drop_spark", { spark_id: sparkId, reason });
+  }
+
   close(): void {
     this.stdin.end();
     this.proc.kill();

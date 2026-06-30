@@ -120,6 +120,10 @@ pub(crate) fn route(
         (Method::Get, ["api", "governance"]) => list_governance(ctx, query),
         (Method::Get, ["api", "metrics", "trend"]) => metrics_trend(ctx, query),
         (Method::Get, ["api", "llm-traces"]) => list_llm_traces(query),
+        (Method::Get, ["api", "search"]) => search(ctx, query),
+        (Method::Get, ["api", "playground"]) => playground(ctx, query),
+        (Method::Get, ["api", "daemon"]) => daemon_status(),
+        (Method::Get, ["api", "sessions"]) => list_sessions(ctx, query),
         (Method::Get, ["api", "chunk", id]) => match ctx.kb.inspect_id(id) {
             Ok(v) => json_resp(200, v),
             Err(e) => err(404, &e.to_string()),
@@ -216,6 +220,123 @@ fn list_llm_traces(query: &str) -> Resp {
         .min(2000);
     match crate::llm_trace::read_recent(limit, kind, status) {
         Ok(traces) => json_resp(200, json!({ "traces": traces, "limit": limit })),
+        Err(e) => err(500, &e.to_string()),
+    }
+}
+
+/// R3 — full-text (FTS5/BM25) search over active chunks. `?q=...&limit=N`
+/// (default 20, max 100). Read-only and trace-free (never writes usage traces),
+/// so it is safe to call repeatedly from the UI search box. Returns hydrated
+/// chunk rows in lexical-relevance order with their normalised BM25 score.
+fn search(ctx: &Ctx, query: &str) -> Resp {
+    let params = parse_query(query);
+    let q = params.get("q").map(String::as_str).unwrap_or("").trim();
+    if q.is_empty() {
+        return json_resp(200, json!({ "query": "", "results": [] }));
+    }
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+
+    let hits = match ctx.kb.storage.search_lexical(q, limit) {
+        Ok(h) => h,
+        Err(e) => return err(500, &e.to_string()),
+    };
+    let ids: Vec<&str> = hits.iter().map(|(id, _)| id.as_str()).collect();
+    let chunks = match ctx.kb.storage.get_chunks_by_ids(&ids) {
+        Ok(c) => c,
+        Err(e) => return err(500, &e.to_string()),
+    };
+    // Preserve lexical-relevance order and attach each chunk's score.
+    let results: Vec<Value> = hits
+        .iter()
+        .filter_map(|(id, score)| {
+            chunks.get(id).map(|chunk| {
+                let r3 = (f64::from(*score) * 1000.0).round() / 1000.0;
+                json!({ "score": r3, "chunk": chunk })
+            })
+        })
+        .collect();
+    json_resp(200, json!({ "query": q, "results": results, "limit": limit }))
+}
+
+/// R6 — Recall Playground: run the full fused-score recall and return the packed
+/// knowledge (each item carries its `_fused_score`) plus sparks, for debugging
+/// retrieval. `trace=false` so this debug tool never pollutes usage traces /
+/// episodic logs. `?q=...&budget=N&top=K&include_sparks=bool`.
+fn playground(ctx: &Ctx, query: &str) -> Resp {
+    let params = parse_query(query);
+    let q = params.get("q").map(String::as_str).unwrap_or("").trim();
+    if q.is_empty() {
+        return json_resp(200, json!({ "query": "", "knowledge": [], "sparks": [] }));
+    }
+    let budget = params
+        .get("budget")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(6000)
+        .clamp(200, 60_000);
+    let top = params.get("top").and_then(|v| v.parse::<usize>().ok());
+    let include_sparks = params
+        .get("include_sparks")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    let result = ctx.kb.recall(crate::kb::RecallParams {
+        query: q,
+        budget,
+        trace: false,
+        include_sparks,
+        top,
+        // `web` is not a valid event source; the playground is a local debug tool
+        // and runs with trace=false (no episodic_log / usage_trace writes), so it
+        // tags the operation_run as `cli`.
+        source: "cli",
+        expand_deps: "false",
+        allow_trim: false,
+        refine_mode: "off",
+        min_score: None,
+        session_only: false,
+        rerank: false,
+    });
+    match result {
+        Ok(r) => json_resp(
+            200,
+            json!({
+                "query": q,
+                "trace_id": r.trace_id,
+                "empty": r.empty,
+                "knowledge": r.knowledge,
+                "sparks": r.sparks,
+            }),
+        ),
+        Err(e) => err(500, &e.to_string()),
+    }
+}
+
+/// R7 — daemon health/status card. Reuses `daemon::state::health`, which opens
+/// the daemon state db read-only and degrades gracefully when the daemon never
+/// ran. Independent of the knowledge db.
+fn daemon_status() -> Resp {
+    let health = crate::daemon::health(
+        &crate::paths::daemon_state_path(),
+        &crate::paths::daemon_pid_path(),
+        &crate::utils::utc_now_iso(),
+    );
+    json_resp(200, health)
+}
+
+/// R8 — recent recall→record trace timeline ("Sessions"). `?limit=N` (default 50,
+/// max 200), newest first. Read-only projection of `episodic_log`.
+fn list_sessions(ctx: &Ctx, query: &str) -> Resp {
+    let limit = parse_query(query)
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    match ctx.kb.storage.recent_episodic_logs(limit) {
+        Ok(rows) => json_resp(200, json!({ "sessions": rows, "limit": limit })),
         Err(e) => err(500, &e.to_string()),
     }
 }

@@ -259,6 +259,39 @@ impl Storage {
         Ok(out)
     }
 
+    /// R9 — export full chunk records (not previews) as portable rows for
+    /// `innate export`. Sparks are excluded (recall-exempt). Archived chunks are
+    /// skipped unless `include_archived`. Returns the fields needed to re-`add`
+    /// the chunk elsewhere plus provenance for auditing.
+    pub fn export_chunks(&self, include_archived: bool) -> Result<Vec<Value>> {
+        let sql = if include_archived {
+            "SELECT id, content, trigger_desc, anti_trigger_desc, skill_name,
+                    origin, source, state, confidence, created_at
+             FROM chunks WHERE origin != 'spark' ORDER BY created_at ASC"
+        } else {
+            "SELECT id, content, trigger_desc, anti_trigger_desc, skill_name,
+                    origin, source, state, confidence, created_at
+             FROM chunks WHERE origin != 'spark' AND state != 'archived'
+             ORDER BY created_at ASC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "content": r.get::<_, String>(1)?,
+                "trigger_desc": r.get::<_, Option<String>>(2)?,
+                "anti_trigger_desc": r.get::<_, Option<String>>(3)?,
+                "skill_name": r.get::<_, Option<String>>(4)?,
+                "origin": r.get::<_, String>(5)?,
+                "source": r.get::<_, Option<String>>(6)?,
+                "state": r.get::<_, String>(7)?,
+                "confidence": r.get::<_, Option<f64>>(8)?,
+                "created_at": r.get::<_, String>(9)?,
+            }))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn get_chunk(&self, id: &str) -> Result<Option<Value>> {
         let mut stmt = self
             .conn

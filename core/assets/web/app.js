@@ -48,6 +48,14 @@ const I18N = {
   en: {
     subtitle: "knowledge base",
     tab_knowledge: "Knowledge", tab_traces: "LLM Traces",
+    tab_search: "Search", tab_play: "Playground", tab_sessions: "Sessions", tab_daemon: "Daemon",
+    search_hint: "Type a query and press Enter.", search_empty: "No matches.",
+    play_hint: "Run a recall to inspect the fused ranking.", play_empty: "No knowledge recalled.",
+    f_budget: "budget", f_sparks: "sparks", k_fused: "fused score",
+    sessions_title: "Recent trace timeline", sessions_hint: "Select a trace to view its detail.",
+    sessions_empty: "No traces yet.", daemon_title: "Daemon status",
+    search_failed: "search failed", play_failed: "recall failed",
+    sessions_failed: "sessions failed", daemon_failed: "daemon status failed",
     health_chunks: "chunks", health_debt: "debt", health_pending: "pending",
     health_oldest: (d) => `oldest ${d}d`, health_review: "review queue",
     review_title: "Review queue", exit: "Exit",
@@ -101,7 +109,14 @@ const I18N = {
   zh: {
     subtitle: "知识库",
     tab_knowledge: "知识", tab_traces: "LLM 调用",
-    health_chunks: "知识块", health_debt: "债务", health_pending: "待审核",
+    tab_search: "搜索", tab_play: "调试台", tab_sessions: "会话", tab_daemon: "守护进程",
+    search_hint: "输入查询并回车。", search_empty: "无匹配。",
+    play_hint: "运行召回以检查融合排序。", play_empty: "未召回任何知识。",
+    f_budget: "预算", f_sparks: "火花", k_fused: "融合分",
+    sessions_title: "最近轨迹时间线", sessions_hint: "选择一条轨迹查看详情。",
+    sessions_empty: "暂无轨迹。", daemon_title: "守护进程状态",
+    search_failed: "搜索失败", play_failed: "召回失败",
+    sessions_failed: "会话加载失败", daemon_failed: "守护进程状态失败",
     health_oldest: (d) => `最久 ${d} 天`, health_review: "复审队列",
     review_title: "复审队列", exit: "退出",
     review_banner: "被反复负反馈标记的知识块。筛选已禁用 —— 点击条目进行裁决。",
@@ -705,20 +720,138 @@ function confirmDialog() {
   postGovern(id, action, reason);
 }
 
-// ── LLM trace view ──────────────────────────────────────────────────────────
+// ── View switching ───────────────────────────────────────────────────────────
+// Data-driven so adding a tab is a single map entry. Each view owns one <main>
+// element, one tab button, and an optional loader run on activation.
+const VIEWS = {
+  knowledge: { el: "kb-view", tab: "tab-knowledge", load: () => loadChunks() },
+  search: { el: "search-view", tab: "tab-search", load: null },
+  play: { el: "play-view", tab: "tab-play", load: null },
+  sessions: { el: "sessions-view", tab: "tab-sessions", load: () => loadSessions() },
+  daemon: { el: "daemon-view", tab: "tab-daemon", load: () => loadDaemon() },
+  traces: { el: "trace-view", tab: "tab-traces", load: () => loadTraces() },
+};
+
 function showView(which) {
-  const traces = which === "traces";
-  if (traces && govMode) {
+  if (which !== "knowledge" && govMode) {
     govMode = false;
     $("queue-banner").classList.add("hidden");
     $("kb-filters").classList.remove("hidden");
     updateReviewBtn();
   }
-  $("kb-view").classList.toggle("hidden", traces);
-  $("trace-view").classList.toggle("hidden", !traces);
-  $("tab-knowledge").classList.toggle("active", !traces);
-  $("tab-traces").classList.toggle("active", traces);
-  if (traces) loadTraces(); else loadChunks();
+  Object.entries(VIEWS).forEach(([key, v]) => {
+    $(v.el).classList.toggle("hidden", key !== which);
+    $(v.tab).classList.toggle("active", key === which);
+  });
+  const v = VIEWS[which];
+  if (v && v.load) v.load();
+}
+
+// ── Search view (R3) ──────────────────────────────────────────────────────────
+async function loadSearch() {
+  const q = $("search-q").value.trim();
+  if (!q) { $("search-results").innerHTML = ""; $("search-info").textContent = ""; return; }
+  try {
+    const data = await api("/api/search?" + new URLSearchParams({ q, limit: 50 }));
+    const results = data.results || [];
+    const ul = $("search-results");
+    ul.innerHTML = "";
+    $("search-info").textContent = results.length ? t("calls", results.length) : t("search_empty");
+    results.forEach((r) => {
+      const c = r.chunk || {};
+      const li = document.createElement("li");
+      li.className = "row";
+      li.dataset.id = c.id || "";
+      li.innerHTML = `<div class="row-main"><span class="row-title">${escapeHtml((c.content || "").slice(0, 90))}</span></div>` +
+        `<div class="row-meta">${badge(c.state)}<span class="muted">${t("k_fused")}: ${r.score}</span></div>`;
+      li.onclick = () => { showView("knowledge"); selectChunk(c.id); };
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    toast(t("search_failed") + ": " + e.message, "err");
+  }
+}
+
+// ── Recall Playground view (R6) ───────────────────────────────────────────────
+async function loadPlayground() {
+  const q = $("play-q").value.trim();
+  if (!q) { $("play-results").innerHTML = ""; $("play-info").textContent = ""; return; }
+  const params = new URLSearchParams({ q, budget: $("play-budget").value || 6000 });
+  if ($("play-sparks").checked) params.set("include_sparks", "true");
+  try {
+    const data = await api("/api/playground?" + params);
+    const items = (data.knowledge || []).concat(data.sparks || []);
+    const ul = $("play-results");
+    ul.innerHTML = "";
+    $("play-info").textContent = items.length ? t("calls", items.length) : t("play_empty");
+    items.forEach((c) => {
+      const li = document.createElement("li");
+      li.className = "row";
+      li.dataset.id = c.id || "";
+      const fused = c._fused_score != null ? c._fused_score.toFixed(3) : "—";
+      li.innerHTML = `<div class="row-main"><span class="row-title">${escapeHtml((c.content || "").slice(0, 90))}</span></div>` +
+        `<div class="row-meta">${badge(c.state)}<span class="muted">${t("k_fused")}: ${fused}</span></div>`;
+      li.onclick = () => renderPlayDetail(c);
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    toast(t("play_failed") + ": " + e.message, "err");
+  }
+}
+
+function renderPlayDetail(c) {
+  const el = $("play-detail");
+  el.className = "detail";
+  el.innerHTML = `<div class="detail-title"><h1>${escapeHtml(c.id || "")}</h1></div>` +
+    `<pre class="block code">${escapeHtml(JSON.stringify(c, null, 2))}</pre>`;
+}
+
+// ── Sessions view (R8) ────────────────────────────────────────────────────────
+async function loadSessions() {
+  try {
+    const data = await api("/api/sessions?limit=100");
+    const rows = data.sessions || [];
+    const ul = $("sessions-list");
+    ul.innerHTML = "";
+    $("sessions-info").textContent = rows.length ? t("calls", rows.length) : t("sessions_empty");
+    rows.forEach((s) => {
+      const li = document.createElement("li");
+      li.className = "row";
+      li.innerHTML = `<div class="row-main"><span class="row-title">${escapeHtml((s.query || "(no query)").slice(0, 80))}</span></div>` +
+        `<div class="row-meta"><span class="muted">${escapeHtml(fmtTime(s.ts))}</span>` +
+        `<span class="muted">${escapeHtml(s.event_source || "")}${s.outcome ? " · " + escapeHtml(s.outcome) : ""}</span></div>`;
+      li.onclick = () => {
+        const d = $("sessions-detail");
+        d.className = "detail";
+        d.innerHTML = `<pre class="block code">${escapeHtml(JSON.stringify(s, null, 2))}</pre>`;
+      };
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    toast(t("sessions_failed") + ": " + e.message, "err");
+  }
+}
+
+// ── Daemon status view (R7) ───────────────────────────────────────────────────
+async function loadDaemon() {
+  try {
+    const h = await api("/api/daemon");
+    const kv = (k, v) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v ?? "—"))}</div>`;
+    let html = `<div class="kv">` +
+      kv("state", h.state) + kv("running", h.running) + kv("pid", h.pid) +
+      kv("processed_events", h.processed_events) +
+      kv("errors_24h", h.errors_24h) + kv("errors_7d", h.errors_7d) +
+      `</div>`;
+    if (h.last_error) {
+      html += `<pre class="block err">${escapeHtml(JSON.stringify(h.last_error, null, 2))}</pre>`;
+    }
+    if (h.watches && h.watches.length) {
+      html += `<pre class="block code">${escapeHtml(JSON.stringify(h.watches, null, 2))}</pre>`;
+    }
+    $("daemon-card").innerHTML = html;
+  } catch (e) {
+    toast(t("daemon_failed") + ": " + e.message, "err");
+  }
 }
 
 async function loadTraces() {
@@ -832,7 +965,18 @@ function onKey(e) {
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
 $("tab-knowledge").onclick = () => showView("knowledge");
+$("tab-search").onclick = () => showView("search");
+$("tab-play").onclick = () => showView("play");
+$("tab-sessions").onclick = () => showView("sessions");
+$("tab-daemon").onclick = () => showView("daemon");
 $("tab-traces").onclick = () => showView("traces");
+
+$("search-go").onclick = loadSearch;
+$("search-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadSearch(); });
+$("play-go").onclick = loadPlayground;
+$("play-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadPlayground(); });
+$("sessions-reload").onclick = loadSessions;
+$("daemon-reload").onclick = loadDaemon;
 $("health").onclick = toggleOverview;
 $("review-btn").onclick = toggleReview;
 $("queue-exit").onclick = toggleReview;

@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -292,17 +293,38 @@ class KnowledgeBase:
         _run(*self._args(), "mature-spark", spark_id, to)
 
     def promote_spark(self, spark_id: str, to: str = "note") -> str:
-        result = subprocess.run(
-            [_binary()] + self._args() + ["promote-spark", spark_id, "--to", to],
-            capture_output=True, text=True, check=True,
-        )
-        return result.stdout.strip()
+        # Reuse _run() so we inherit its FileNotFound handling, returncode
+        # checking, OutcomeConflict mapping and JSON-fallback parsing instead
+        # of a bare subprocess.run(check=True) that raises CalledProcessError
+        # before stderr can be inspected. `promote-spark` prints the new chunk
+        # id as plain text, which _run() surfaces under the "_raw" key.
+        data = _run(*self._args(), "promote-spark", spark_id, "--to", to)
+        if isinstance(data, dict):
+            return str(data.get("_raw") or data.get("id") or data.get("chunk_id") or "")
+        return str(data)
 
     def drop_spark(self, spark_id: str, reason: str = "") -> None:
         args = self._args() + ["drop-spark", spark_id]
         if reason:
             args += ["--reason", reason]
         _run(*args)
+
+    def _safe_record(self, *args: Any, **kwargs: Any) -> None:
+        """Best-effort telemetry record used by @augmented.
+
+        Telemetry must never mask the wrapped function's exception or swallow
+        its return value, so a failing record() (binary missing, CLI error,
+        OutcomeConflict on a double-record …) is logged to stderr and dropped
+        rather than propagated.
+        """
+        try:
+            self.record(*args, **kwargs)
+        except Exception as telemetry_error:  # noqa: BLE001 — telemetry is best-effort
+            print(
+                f"innate: @augmented telemetry record failed (ignored): "
+                f"{type(telemetry_error).__name__}: {telemetry_error}",
+                file=sys.stderr,
+            )
 
     def augmented(
         self,
@@ -349,7 +371,7 @@ class KnowledgeBase:
                     allow_trim=allow_trim,
                 )
                 if auto_record:
-                    self.record(
+                    self._safe_record(
                         recall_result.trace_id,
                         task_state="running",
                         source=source,
@@ -364,7 +386,9 @@ class KnowledgeBase:
                     result = fn(*args, **kwargs)
                 except BaseException as error:
                     if auto_record:
-                        self.record(
+                        # Best-effort: a failing telemetry record must not mask
+                        # the original business exception we are about to re-raise.
+                        self._safe_record(
                             recall_result.trace_id,
                             outcome="fail",
                             output_summary=f"{type(error).__name__}: {error}",
@@ -376,7 +400,9 @@ class KnowledgeBase:
                     outcome = result.get("outcome", "ok")
                     used_ids = result.get("used") if "used" in result else None
                     summary = result.get("output_summary") or result.get("summary")
-                    self.record(
+                    # Best-effort: never lose the wrapped function's return value
+                    # just because the telemetry record() failed.
+                    self._safe_record(
                         recall_result.trace_id,
                         outcome=outcome,
                         used=used_ids,
@@ -389,7 +415,7 @@ class KnowledgeBase:
                     return result.get("result", result)
 
                 if auto_record:
-                    self.record(recall_result.trace_id, outcome="ok", source=source)
+                    self._safe_record(recall_result.trace_id, outcome="ok", source=source)
                 return result
 
             return wrapper

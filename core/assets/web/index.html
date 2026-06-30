@@ -21,6 +21,10 @@
 
     <nav class="seg tabs" aria-label="view">
       <button id="tab-knowledge" class="seg-btn active" data-i18n="tab_knowledge">Knowledge</button>
+      <button id="tab-search" class="seg-btn" data-i18n="tab_search">Search</button>
+      <button id="tab-play" class="seg-btn" data-i18n="tab_play">Playground</button>
+      <button id="tab-sessions" class="seg-btn" data-i18n="tab_sessions">Sessions</button>
+      <button id="tab-daemon" class="seg-btn" data-i18n="tab_daemon">Daemon</button>
       <button id="tab-traces" class="seg-btn" data-i18n="tab_traces">LLM Traces</button>
     </nav>
 
@@ -140,6 +144,81 @@
           <span class="empty-hint" data-i18n="trace_placeholder">Select a call to view its request &amp; response.</span>
         </div>
       </div>
+    </section>
+  </main>
+
+  <!-- ════════════ SEARCH VIEW (R3) ════════════ -->
+  <main id="search-view" class="two-pane hidden">
+    <aside class="list-pane">
+      <div class="filters">
+        <input id="search-q" class="select" style="flex:1" type="search" data-i18n-placeholder="search_ph" placeholder="Full-text search (BM25)…" />
+        <button id="search-go" class="icon-btn" title="Search">⏎</button>
+      </div>
+      <ul id="search-results" class="rows scroll"></ul>
+      <div class="pager pager-center"><span id="search-info" class="pager-info"></span></div>
+    </aside>
+    <section class="detail-pane scroll">
+      <div id="search-detail" class="detail-empty">
+        <div class="empty-text">
+          <span class="empty-title" data-i18n="empty_title">No item selected</span>
+          <span class="empty-hint" data-i18n="search_hint">Type a query and press Enter.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ════════════ RECALL PLAYGROUND VIEW (R6) ════════════ -->
+  <main id="play-view" class="two-pane hidden">
+    <aside class="list-pane">
+      <div class="filters">
+        <input id="play-q" class="select" style="flex:1" type="search" data-i18n-placeholder="play_ph" placeholder="Recall query…" />
+        <label class="field"><span class="field-label" data-i18n="f_budget">budget</span>
+          <input id="play-budget" class="select" type="number" value="6000" min="200" step="200" style="width:7em" /></label>
+        <label class="field" style="flex-direction:row;align-items:center;gap:.4em">
+          <input id="play-sparks" type="checkbox" /><span class="field-label" data-i18n="f_sparks">sparks</span></label>
+        <button id="play-go" class="icon-btn" title="Run recall">⏎</button>
+      </div>
+      <ul id="play-results" class="rows scroll"></ul>
+      <div class="pager pager-center"><span id="play-info" class="pager-info"></span></div>
+    </aside>
+    <section class="detail-pane scroll">
+      <div id="play-detail" class="detail-empty">
+        <div class="empty-text">
+          <span class="empty-title" data-i18n="empty_title">No item selected</span>
+          <span class="empty-hint" data-i18n="play_hint">Run a recall to inspect the fused ranking.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ════════════ SESSIONS VIEW (R8) ════════════ -->
+  <main id="sessions-view" class="two-pane hidden">
+    <aside class="list-pane">
+      <div class="filters">
+        <span class="field-label" data-i18n="sessions_title">Recent trace timeline</span>
+        <button id="sessions-reload" class="icon-btn" data-i18n-title="reload" title="Reload">⟳</button>
+      </div>
+      <ul id="sessions-list" class="rows scroll"></ul>
+      <div class="pager pager-center"><span id="sessions-info" class="pager-info"></span></div>
+    </aside>
+    <section class="detail-pane scroll">
+      <div id="sessions-detail" class="detail-empty">
+        <div class="empty-text">
+          <span class="empty-title" data-i18n="empty_title">No item selected</span>
+          <span class="empty-hint" data-i18n="sessions_hint">Select a trace to view its detail.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ════════════ DAEMON VIEW (R7) ════════════ -->
+  <main id="daemon-view" class="hidden">
+    <section class="detail-pane scroll" style="padding:1.2em">
+      <div class="filters">
+        <span class="field-label" data-i18n="daemon_title">Daemon status</span>
+        <button id="daemon-reload" class="icon-btn" data-i18n-title="reload" title="Reload">⟳</button>
+      </div>
+      <div id="daemon-card"></div>
     </section>
   </main>
 

@@ -21,5 +21,13 @@ Usage::
 
 from .client import KnowledgeBase, RecallResult, Verdict
 from .errors import OutcomeConflictError
+from .mcp import McpClient, McpError
 
-__all__ = ["KnowledgeBase", "OutcomeConflictError", "RecallResult", "Verdict"]
+__all__ = [
+    "KnowledgeBase",
+    "McpClient",
+    "McpError",
+    "OutcomeConflictError",
+    "RecallResult",
+    "Verdict",
+]

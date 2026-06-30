@@ -226,6 +226,26 @@ pub enum Commands {
     },
     /// Reclaim disk space: checkpoint the WAL and VACUUM the database
     Vacuum,
+    /// Export knowledge chunks as JSONL (one chunk per line) to a file or stdout.
+    Export {
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Include archived chunks (default: active + pending only).
+        #[arg(long)]
+        include_archived: bool,
+    },
+    /// Bulk-import knowledge chunks from a JSONL file (alias: ingest). Each line
+    /// is a chunk object with at least a `content` field. Idempotent: chunks whose
+    /// content hash already exists are skipped (re-importing is safe).
+    #[command(alias = "ingest")]
+    Import {
+        /// Path to a JSONL file ({"content": "...", "trigger_desc"?, "skill_name"?} per line).
+        file: PathBuf,
+        /// Source tag for imported chunks (chat|manual|doc|agent). Default: doc.
+        #[arg(long, default_value = "doc")]
+        source: String,
+    },
     /// Repair pre-fix trace pollution: drop false daemon `selected` events,
     /// recompute `selected_count`, and retire orphaned `open` episodic logs.
     RepairTraces {
@@ -672,6 +692,88 @@ pub fn run() -> anyhow::Result<()> {
                 mb(before),
                 mb(after),
                 mb(before - after)
+            );
+        }
+        Commands::Export {
+            out,
+            include_archived,
+        } => {
+            let rows = kb.storage.export_chunks(include_archived)?;
+            let mut buf = String::new();
+            for row in &rows {
+                buf.push_str(&serde_json::to_string(row)?);
+                buf.push('\n');
+            }
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &buf)
+                        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+                    eprintln!("exported {} chunk(s) → {}", rows.len(), path.display());
+                }
+                None => print!("{buf}"),
+            }
+        }
+        Commands::Import { file, source } => {
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", file.display()))?;
+            // Snapshot existing chunk ids so the report can distinguish genuinely
+            // new chunks from idempotent dedup no-ops (add() returns the existing
+            // id when the content hash already exists).
+            let mut known: std::collections::HashSet<String> = kb
+                .storage
+                .export_chunks(true)?
+                .into_iter()
+                .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect();
+            let mut imported = 0usize;
+            let mut skipped = 0usize;
+            let mut failed = 0usize;
+            for (lineno, line) in text.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let obj: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("line {}: invalid JSON ({e}), skipped", lineno + 1);
+                        failed += 1;
+                        continue;
+                    }
+                };
+                let content = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if content.trim().is_empty() {
+                    eprintln!("line {}: missing/empty content, skipped", lineno + 1);
+                    failed += 1;
+                    continue;
+                }
+                let trigger = obj.get("trigger_desc").and_then(|v| v.as_str());
+                let anti = obj.get("anti_trigger_desc").and_then(|v| v.as_str());
+                let skill_name = obj.get("skill_name").and_then(|v| v.as_str());
+                let kind = if skill_name.is_some() { "skill" } else { "note" };
+                match kb.add(content, kind, trigger, anti, &source, skill_name) {
+                    // Empty id → the sanitizer discarded the content.
+                    Ok(id) if id.is_empty() => skipped += 1,
+                    // Existing id → idempotent dedup no-op (content hash already
+                    // present); a new id → genuinely added.
+                    Ok(id) if known.contains(&id) => skipped += 1,
+                    Ok(id) => {
+                        known.insert(id);
+                        imported += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("line {}: {e}", lineno + 1);
+                        failed += 1;
+                    }
+                }
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "imported": imported,
+                    "skipped": skipped,
+                    "failed": failed,
+                }))?
             );
         }
         Commands::RepairTraces { dry_run } => {

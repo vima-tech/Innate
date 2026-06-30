@@ -188,11 +188,22 @@ impl Storage {
         Ok(())
     }
 
+    /// After a successful generic distill+curate run, bulk-complete the OTHER
+    /// pending requests queued before this run started — they are genuinely
+    /// subsumed by it (`distill_batch` drains every eligible episodic log; curate
+    /// runs globally).
+    ///
+    /// `governance` / `governance_ready` requests are deliberately **excluded**:
+    /// they carry per-request semantics and are special-cased on every other path
+    /// (claim priority, `curate_only` completion in the skip branches), so a
+    /// generic distill run must not silently mark them done across the reason
+    /// boundary. They stay pending and are serviced on their own claim turn.
     pub fn finish_covered_evolve_requests(&self, requested_before: &str, now: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE evolve_requests
              SET state='completed', completed_at=?, note='covered_by_evolve', next_retry_at=NULL
-             WHERE state='pending' AND requested_at <= ?",
+             WHERE state='pending' AND requested_at <= ?
+               AND reason NOT IN ('governance','governance_ready')",
             params![now, requested_before],
         )?;
         Ok(())

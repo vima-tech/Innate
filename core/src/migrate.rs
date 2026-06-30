@@ -55,7 +55,13 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA foreign_keys=ON;
-         PRAGMA synchronous=NORMAL;",
+         PRAGMA synchronous=NORMAL;
+         -- Migration opens its own connection; without a busy_timeout a second
+         -- process starting concurrently (e.g. the MCP server alongside a CLI
+         -- command) would hit SQLITE_BUSY the instant a step's BEGIN IMMEDIATE
+         -- collides. Match Storage's 5s wait so concurrent starts serialise
+         -- instead of failing the migration outright.
+         PRAGMA busy_timeout=5000;",
     )?;
 
     let current = schema_version(&conn)?;

@@ -85,8 +85,18 @@ fn write_json(path: &Path, value: &Value) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let txt = serde_json::to_string_pretty(value)?;
-    std::fs::write(path, txt + "\n")?;
+    let txt = serde_json::to_string_pretty(value)? + "\n";
+    // Atomic write: a plain `fs::write` truncates the target first, so a crash
+    // mid-write leaves the user's agent config (settings.json, …) corrupted or
+    // empty. Write to a sibling temp file and rename over the target — rename is
+    // atomic within the same directory/filesystem, so readers always see either
+    // the old file or the fully-written new one, never a partial.
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, txt.as_bytes())?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 

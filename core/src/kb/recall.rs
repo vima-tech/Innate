@@ -525,13 +525,18 @@ impl KnowledgeBase {
                 .unwrap_or(0);
             let last_used_at = info.chunk.get("last_used_at").and_then(Value::as_str);
             let activation = actr_activation(used_count, last_used_at, now);
-            let mut fused = self.w_content * info.sim_content as f64
-                + self.w_trigger * info.sim_trigger as f64
-                + self.w_lexical * info.sim_lexical as f64
-                + self.w_spread * info.sim_spread as f64
-                + self.w_confidence * conf
-                + self.w_context * context_score
-                + self.w_activation * activation;
+            // Per-channel weighted contributions — these sum to the (pre-penalty)
+            // fused score and double as the explainability breakdown (N4).
+            let contribs = [
+                ("content", self.w_content * info.sim_content as f64),
+                ("trigger", self.w_trigger * info.sim_trigger as f64),
+                ("lexical", self.w_lexical * info.sim_lexical as f64),
+                ("spread", self.w_spread * info.sim_spread as f64),
+                ("confidence", self.w_confidence * conf),
+                ("context", self.w_context * context_score),
+                ("activation", self.w_activation * activation),
+            ];
+            let mut fused: f64 = contribs.iter().map(|(_, c)| c).sum();
             if info.chunk.get("state").and_then(Value::as_str) == Some("pending") {
                 fused *= PENDING_RECALL_PENALTY;
             }
@@ -549,6 +554,7 @@ impl KnowledgeBase {
             chunk["_sim_lexical"] = json!(info.sim_lexical);
             chunk["_sim_spread"] = json!(info.sim_spread);
             chunk["_fused_score"] = json!(fused);
+            chunk["match_reason"] = match_reason(&contribs);
             scored.push((fused, chunk));
         }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1018,4 +1024,36 @@ impl KnowledgeBase {
         }
         result
     }
+}
+
+/// N4 — explainability: turn the per-channel weighted contributions into a
+/// compact `match_reason` for the returned chunk. Names the channels that drive
+/// the fused score (each contributing ≥15% of the positive total, plus always
+/// the single largest), and includes the rounded contribution of every channel
+/// for full transparency. Additive metadata; never affects ranking.
+pub(super) fn match_reason(contribs: &[(&str, f64)]) -> Value {
+    let total: f64 = contribs.iter().map(|(_, c)| c.max(0.0)).sum();
+    let mut ranked: Vec<(&str, f64)> = contribs
+        .iter()
+        .filter(|(_, c)| *c > 1e-9)
+        .map(|(n, c)| (*n, *c))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let threshold = total * 0.15;
+    let primary: Vec<&str> = ranked
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, c))| *i == 0 || *c >= threshold)
+        .map(|(_, (n, _))| *n)
+        .collect();
+    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
+    let contributions: serde_json::Map<String, Value> = ranked
+        .iter()
+        .map(|(n, c)| ((*n).to_string(), json!(r3(*c))))
+        .collect();
+    json!({
+        "summary": primary.join(", "),
+        "primary": primary,
+        "contributions": Value::Object(contributions),
+    })
 }

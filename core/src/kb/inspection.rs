@@ -1010,17 +1010,36 @@ impl KnowledgeBase {
     // ------------------------------------------------------------------
 
     pub fn rebuild_embeddings(&self) -> Result<usize> {
+        Ok(self.rebuild_embeddings_capped(None)?.0)
+    }
+
+    /// Bounded re-embed used by latency-sensitive callers (MCP/CLI `evolve
+    /// --rebuild-embeddings`). When `max` is `Some(n)` at most `n` stale chunks
+    /// are re-embedded this call, so a large backlog is chipped away across
+    /// successive evolves instead of blocking one request on the whole queue
+    /// (each re-embed is a network LLM round-trip). Returns
+    /// `(rebuilt_this_call, remaining_stale_after)`. `None` rebuilds everything.
+    pub fn rebuild_embeddings_capped(&self, max: Option<usize>) -> Result<(usize, usize)> {
         let meta_version = self
             .storage
             .get_meta("embed_version")?
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(1);
         // Fetch chunks with embed_version=0 (failed writes) or below current meta version.
-        let stale = self.storage.query_chunks_params(
+        let mut stale = self.storage.query_chunks_params(
             "SELECT id, content, trigger_desc, state_reason FROM chunks
              WHERE embed_version = 0 OR embed_version < ?",
             rusqlite::params![meta_version],
         )?;
+        // Bound the batch: keep the first `max`, report the rest as remaining.
+        let total_stale = stale.len();
+        let remaining = match max {
+            Some(n) if n < total_stale => {
+                stale.truncate(n);
+                total_stale - n
+            }
+            _ => 0,
+        };
         // Bulk re-embed: drop the warm cache once so the per-row in-place upserts
         // stay no-ops (cold) and the loop runs O(N) instead of O(N²). The next
         // search reloads the rebuilt vectors from disk.
@@ -1082,7 +1101,7 @@ impl KnowledgeBase {
                 count += 1;
             }
         }
-        Ok(count)
+        Ok((count, remaining))
     }
 
     // ------------------------------------------------------------------
