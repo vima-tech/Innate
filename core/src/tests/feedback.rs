@@ -55,6 +55,66 @@ fn evolve_preserves_replayable_usage_facts_and_counts() {
 }
 
 #[test]
+fn chunk_provenance_captures_outcomes_feedback_and_explanation() {
+    let (kb, _file) = tmp_kb();
+    let chunk_id = kb
+        .add("prov subject", "note", Some("prov"), None, "manual", None)
+        .unwrap();
+
+    // A successful use of the chunk.
+    let ok_trace = attributed_trace(&kb, &chunk_id);
+    kb.record(RecordParams {
+        trace_id: &ok_trace,
+        outcome: Some("ok"),
+        used: Some(std::slice::from_ref(&chunk_id)),
+        used_attribution: "explicit",
+        source: "sdk",
+        ..Default::default()
+    })
+    .unwrap();
+
+    // A failed use plus an explicit thumbs-down (negative signal).
+    let bad_trace = attributed_trace(&kb, &chunk_id);
+    kb.record(RecordParams {
+        trace_id: &bad_trace,
+        outcome: Some("fail"),
+        used: Some(std::slice::from_ref(&chunk_id)),
+        used_attribution: "explicit",
+        feedback_down: Some(std::slice::from_ref(&chunk_id)),
+        feedback_kind: "user",
+        feedback_actor: Some("alice"),
+        source: "sdk",
+        ..Default::default()
+    })
+    .unwrap();
+
+    let p = kb.storage.chunk_provenance(&chunk_id, 20).unwrap();
+    assert_eq!(p["stats"]["successes"], 1);
+    assert_eq!(p["stats"]["failures"], 1);
+    assert_eq!(p["stats"]["feedback_down"], 1);
+    assert!(p["stats"]["last_negative_at"].is_string());
+
+    // The timeline merges outcome rows and feedback events.
+    let events = p["events"].as_array().unwrap();
+    let kinds: Vec<&str> = events
+        .iter()
+        .filter_map(|e| e["event"].as_str())
+        .collect();
+    assert!(kinds.contains(&"task_ok"), "kinds={kinds:?}");
+    assert!(kinds.contains(&"task_fail"), "kinds={kinds:?}");
+    assert!(kinds.contains(&"feedback_down"), "kinds={kinds:?}");
+
+    // Natural-language explanation reflects the counts and the recent negative.
+    let explain = p["explanation"].as_str().unwrap();
+    assert!(explain.contains("1 success,"), "explain={explain}");
+    assert!(explain.contains("1 failure "), "explain={explain}");
+    assert!(explain.contains("last negative feedback"), "explain={explain}");
+
+    // Non-distilled chunk has no source episodic_log link.
+    assert!(p["source"].is_null());
+}
+
+#[test]
 fn feedback_can_be_corrected_after_successful_evolve() {
     let (kb, _file) = tmp_kb();
     let chunk_id = kb

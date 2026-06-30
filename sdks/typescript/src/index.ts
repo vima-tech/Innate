@@ -206,6 +206,13 @@ export interface TracedResult<T> {
   nomination?: string;
 }
 
+export interface BackupOptions {
+  /** run=backup now, status=show last backup state, list=list R2 backups, prune=delete old backups. Defaults to "run". */
+  action?: "run" | "status" | "list" | "prune";
+  /** For action=run: skip the interval check and backup immediately (default false). */
+  force?: boolean;
+}
+
 export interface EvolveResult {
   distilled: number;
   curate: {
@@ -716,6 +723,17 @@ export class McpClient {
 
   async dropSpark(sparkId: string, reason = ""): Promise<void> {
     await this.toolCall("innate_drop_spark", { spark_id: sparkId, reason });
+  }
+
+  /**
+   * Backup or inspect Cloudflare R2 backups via the `innate_backup` MCP tool.
+   * Mirrors the CLI `innate backup <action>` surface. The shape of the resolved
+   * value depends on `action` (run/status/list/prune), so it is returned as
+   * `unknown` — narrow it at the call site.
+   */
+  async backup(options: BackupOptions = {}): Promise<unknown> {
+    const action = options.action ?? "run";
+    return this.toolCall("innate_backup", { action, force: options.force ?? false });
   }
 
   close(): void {

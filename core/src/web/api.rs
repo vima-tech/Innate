@@ -128,6 +128,7 @@ pub(crate) fn route(
             Ok(v) => json_resp(200, v),
             Err(e) => err(404, &e.to_string()),
         },
+        (Method::Get, ["api", "chunks", id, "provenance"]) => chunk_provenance(ctx, id, query),
 
         // Governance endpoints (token + same-origin required).
         (Method::Post, ["api", "chunk", id, action]) => governance(ctx, headers, id, action, body),
@@ -329,6 +330,21 @@ fn daemon_status() -> Resp {
 
 /// R8 — recent recall→record trace timeline ("Sessions"). `?limit=N` (default 50,
 /// max 200), newest first. Read-only projection of `episodic_log`.
+/// Provenance timeline for a single chunk (usage outcomes + feedback + distill
+/// source + confidence explanation). `?limit=N` caps the event list (default 20,
+/// max 100). Read-only.
+fn chunk_provenance(ctx: &Ctx, id: &str, query: &str) -> Resp {
+    let limit = parse_query(query)
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
+    match ctx.kb.storage.chunk_provenance(id, limit) {
+        Ok(v) => json_resp(200, v),
+        Err(e) => err(500, &e.to_string()),
+    }
+}
+
 fn list_sessions(ctx: &Ctx, query: &str) -> Resp {
     let limit = parse_query(query)
         .get("limit")

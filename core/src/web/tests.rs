@@ -294,3 +294,40 @@ fn first_chunk_id(ctx: &Ctx) -> String {
     let rows = ctx.kb.storage.list_chunks(None, None, 1, 0).unwrap();
     rows[0]["id"].as_str().unwrap().to_string()
 }
+
+#[test]
+fn provenance_endpoint_shape_for_fresh_chunk() {
+    let (ctx, _f) = ctx_with(Some("secret"));
+    let id = first_chunk_id(&ctx);
+    let path = format!("/api/chunks/{id}/provenance");
+    let r = route(
+        &ctx,
+        &Method::Get,
+        &path,
+        "",
+        &hdr(&[("x-innate-token", "secret")]),
+        "",
+    );
+    assert_eq!(r.status, 200);
+    let p: Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(p["chunk_id"], id);
+    // A freshly added chunk has no usage/feedback yet → empty timeline, zero stats.
+    assert_eq!(p["events"].as_array().unwrap().len(), 0);
+    assert_eq!(p["stats"]["successes"], 0);
+    assert_eq!(p["stats"]["failures"], 0);
+    assert!(p["source"].is_null()); // not distilled
+    // Confidence explanation is always present and mentions the EMA.
+    let explain = p["explanation"].as_str().unwrap();
+    assert!(explain.contains("0 successes"));
+    assert!(explain.contains("EMA"));
+}
+
+#[test]
+fn provenance_endpoint_requires_token_off_loopback() {
+    let (mut ctx, _f) = ctx_with(Some("secret"));
+    ctx.bind = "0.0.0.0".into(); // non-loopback bind → token enforced on reads
+    let id = first_chunk_id(&ctx);
+    let path = format!("/api/chunks/{id}/provenance");
+    let r = route(&ctx, &Method::Get, &path, "", &hdr(&[]), "");
+    assert_eq!(r.status, 403);
+}

@@ -30,6 +30,10 @@ let selectedId = null;      // selected chunk id
 let selChunkState = null;   // state of the currently-displayed chunk (for the `A` shortcut)
 let lastDetail = null;      // last chunk detail payload, so the raw-JSON toggle can re-render
 let showRaw = false;        // chunk detail: raw-JSON section expanded?
+let showProv = false;       // chunk detail: provenance timeline expanded?
+let lastProv = null;        // cached provenance payload for the selected chunk
+let provForId = null;       // id the cached provenance belongs to (cache guard)
+let pendingTrace = null;    // trace_id to highlight after switching to Sessions view
 let govMode = false;        // review-queue mode (replaces the chunk list)
 let overviewOpen = false;   // expandable health dashboard open?
 let lastInspect = null;     // last /api/inspect payload (feeds health strip + overview)
@@ -88,6 +92,12 @@ const I18N = {
     k_id: "id", k_origin: "origin", k_confidence: "confidence", k_created: "created",
     k_last_used: "last used", k_used_selected: "used / selected", hit_rate: "hit rate",
     h_content: "content", show_raw: "Show raw JSON", hide_raw: "Hide raw JSON",
+    prov_toggle: "Provenance", prov_loading: "loading provenance…",
+    prov_failed: "provenance failed", prov_no_events: "No usage or feedback yet.",
+    prov_source: "distilled from", prov_source_open: "open source session →",
+    prov_view_session: "view session →",
+    ev_task_ok: "success", ev_task_fail: "failure", ev_used: "used",
+    ev_feedback_up: "👍 feedback", ev_feedback_down: "👎 feedback",
     reason_label: "Reason", cancel: "Cancel",
     confirm_archive: "Archive chunk", confirm_invalidate: "Invalidate chunk",
     archive_desc: "Move this chunk out of active retrieval. It stays restorable. A reason is required for the audit log.",
@@ -148,6 +158,12 @@ const I18N = {
     k_id: "ID", k_origin: "来源", k_confidence: "置信度", k_created: "创建于",
     k_last_used: "最近使用", k_used_selected: "使用 / 选中", hit_rate: "命中率",
     h_content: "内容", show_raw: "显示原始 JSON", hide_raw: "隐藏原始 JSON",
+    prov_toggle: "来源轨迹", prov_loading: "正在加载来源轨迹…",
+    prov_failed: "来源轨迹加载失败", prov_no_events: "暂无使用或反馈记录。",
+    prov_source: "蒸馏自", prov_source_open: "打开来源会话 →",
+    prov_view_session: "查看会话 →",
+    ev_task_ok: "成功", ev_task_fail: "失败", ev_used: "已使用",
+    ev_feedback_up: "👍 反馈", ev_feedback_down: "👎 反馈",
     reason_label: "原因", cancel: "取消",
     confirm_archive: "归档知识块", confirm_invalidate: "作废知识块",
     archive_desc: "将此知识块移出活跃检索，可随时恢复。审计日志要求填写原因。",
@@ -571,6 +587,9 @@ function markSelected(listSel, id) {
 async function selectChunk(id) {
   selectedId = id;
   showRaw = false;
+  showProv = false;
+  lastProv = null;
+  provForId = null;
   markSelected("#chunks", id);
   try {
     const d = await api("/api/chunk/" + encodeURIComponent(id));
@@ -643,6 +662,9 @@ function renderDetail(d) {
     `</div>` +
     `<div class="section"><div class="section-head"><span class="section-eyebrow">${t("h_content")}</span><span class="section-rule"></span></div>` +
       `<pre class="block">${escapeHtml(c.content || "")}</pre></div>` +
+    `<div class="section"><button class="raw-toggle" id="prov-toggle"><span class="chev">${showProv ? "▾" : "▸"}</span>${t("prov_toggle")}</button>` +
+      (showProv ? `<div class="prov" id="prov-body">${renderProvenance()}</div>` : "") +
+    `</div>` +
     `<div class="section"><button class="raw-toggle" id="raw-toggle"><span class="chev">${showRaw ? "▾" : "▸"}</span>${showRaw ? t("hide_raw") : t("show_raw")}</button>` +
       (showRaw ? `<pre class="raw-json">${escapeHtml(JSON.stringify(d, null, 2))}</pre>` : "") +
     `</div>`;
@@ -657,6 +679,80 @@ function renderDetail(d) {
   el.querySelectorAll("button[data-act]").forEach((b) => { b.onclick = () => govern(c.id, b.dataset.act); });
   const rt = $("raw-toggle");
   if (rt) rt.onclick = () => { showRaw = !showRaw; renderDetail(lastDetail); };
+  const pt = $("prov-toggle");
+  if (pt) pt.onclick = () => toggleProvenance(c.id);
+  bindTraceLinks(el);
+}
+
+// Lazy-load + toggle the provenance timeline. Fetches once per chunk, caches in
+// lastProv, then re-renders the detail so the expanded section paints.
+async function toggleProvenance(id) {
+  showProv = !showProv;
+  if (showProv && provForId !== id) {
+    lastProv = null;            // show the loading state while fetching
+    renderDetail(lastDetail);
+    try {
+      lastProv = await api("/api/chunks/" + encodeURIComponent(id) + "/provenance");
+      provForId = id;
+    } catch (e) {
+      lastProv = { error: e.message };
+      provForId = id;
+    }
+  }
+  renderDetail(lastDetail);
+}
+
+// Build the provenance timeline HTML from the cached payload (lastProv).
+function renderProvenance() {
+  if (lastProv == null) return `<div class="prov-loading muted">${t("prov_loading")}</div>`;
+  if (lastProv.error) return `<div class="prov-loading err">${t("prov_failed")}: ${escapeHtml(lastProv.error)}</div>`;
+  const p = lastProv;
+  let html = "";
+  if (p.explanation) html += `<div class="prov-explain">${escapeHtml(p.explanation)}</div>`;
+  if (p.source) {
+    const q = p.source.query || p.source.output_summary || "";
+    html += `<div class="prov-source"><span class="prov-source-label">${t("prov_source")}</span>` +
+      `<span class="prov-source-q">${escapeHtml(String(q).slice(0, 120))}</span>` +
+      `<a class="trace-link" data-trace="${escapeHtml(p.source.trace_id || "")}">${t("prov_source_open")}</a></div>`;
+  }
+  const events = p.events || [];
+  if (!events.length) {
+    html += `<div class="prov-empty muted">${t("prov_no_events")}</div>`;
+    return html;
+  }
+  html += `<ul class="prov-timeline">`;
+  events.forEach((e) => {
+    const tone = (e.event === "task_ok" || e.event === "feedback_up") ? "ok"
+      : (e.event === "task_fail" || e.event === "feedback_down") ? "danger" : "muted";
+    const label = t("ev_" + e.event) || e.event;
+    const reason = e.reason ? `<span class="prov-reason">${escapeHtml(String(e.reason))}</span>` : "";
+    const src = e.source ? `<span class="muted">${escapeHtml(e.source)}</span>` : "";
+    const trace = e.trace_id
+      ? `<a class="trace-link" data-trace="${escapeHtml(e.trace_id)}">${escapeHtml(e.trace_id.slice(0, 8))}</a>`
+      : "";
+    html += `<li class="prov-ev"><span class="prov-dot" data-tone="${tone}"></span>` +
+      `<span class="prov-ev-label" data-tone="${tone}">${escapeHtml(label)}</span>` +
+      `<span class="prov-ev-meta">${trace}${src}${reason}` +
+      `<span class="muted">${escapeHtml(fmtTime(e.ts))}</span></span></li>`;
+  });
+  html += `</ul>`;
+  return html;
+}
+
+// Wire any rendered trace_id links to jump to the Sessions view and highlight
+// the matching trace. CSP-safe: listeners bound here, no inline handlers.
+function bindTraceLinks(scope) {
+  scope.querySelectorAll(".trace-link[data-trace]").forEach((a) => {
+    a.onclick = (ev) => { ev.preventDefault(); gotoSession(a.dataset.trace); };
+  });
+}
+
+// Switch to the Sessions view and remember which trace to highlight once its
+// list finishes loading (loadSessions reads pendingTrace).
+function gotoSession(traceId) {
+  if (!traceId) return;
+  pendingTrace = traceId;
+  showView("sessions");
 }
 
 // approve / restore act immediately; archive / invalidate open the reason sheet.
@@ -814,19 +910,31 @@ async function loadSessions() {
     const ul = $("sessions-list");
     ul.innerHTML = "";
     $("sessions-info").textContent = rows.length ? t("calls", rows.length) : t("sessions_empty");
+    let matched = null;
     rows.forEach((s) => {
       const li = document.createElement("li");
       li.className = "row";
+      li.dataset.trace = s.trace_id || "";
       li.innerHTML = `<div class="row-main"><span class="row-title">${escapeHtml((s.query || "(no query)").slice(0, 80))}</span></div>` +
         `<div class="row-meta"><span class="muted">${escapeHtml(fmtTime(s.ts))}</span>` +
         `<span class="muted">${escapeHtml(s.event_source || "")}${s.outcome ? " · " + escapeHtml(s.outcome) : ""}</span></div>`;
-      li.onclick = () => {
+      const open = () => {
+        ul.querySelectorAll(".row.sel").forEach((r) => r.classList.remove("sel"));
+        li.classList.add("sel");
         const d = $("sessions-detail");
         d.className = "detail";
         d.innerHTML = `<pre class="block code">${escapeHtml(JSON.stringify(s, null, 2))}</pre>`;
       };
+      li.onclick = open;
+      if (pendingTrace && s.trace_id === pendingTrace) matched = { li, open };
       ul.appendChild(li);
     });
+    // A trace_id deep-link from the Provenance panel: open + scroll to it.
+    if (pendingTrace) {
+      if (matched) { matched.open(); matched.li.scrollIntoView({ block: "center" }); }
+      else { toast(t("prov_view_session") + " " + pendingTrace.slice(0, 8) + " (not in recent list)", "err"); }
+      pendingTrace = null;
+    }
   } catch (e) {
     toast(t("sessions_failed") + ": " + e.message, "err");
   }

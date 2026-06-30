@@ -403,3 +403,24 @@ header {
 .obs-anomalies { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .obs-anomalies li { font: 500 12.5px var(--mono); color: var(--text); padding: 7px 11px; background: var(--surface); border: 1px solid var(--warn); border-left: 3px solid var(--warn); border-radius: 8px; }
 .obs-clear { margin-top: 10px; font: 500 12.5px var(--mono); color: var(--ok); padding: 7px 11px; }
+
+/* Chunk-detail Provenance timeline (usage outcomes + feedback + distill source). */
+.prov { margin: 8px 0 0; padding: 16px 18px; background: var(--surface-3); border: 1px solid var(--border); border-radius: 14px; }
+.prov-loading, .prov-empty { font: 12.5px var(--mono); padding: 4px 0; }
+.prov-loading.err { color: var(--danger); }
+.prov-explain { font: 500 13px var(--font); color: var(--text); padding: 4px 0 12px; border-bottom: 1px solid var(--border); }
+.prov-source { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 11px 0; font: 12.5px var(--font); border-bottom: 1px solid var(--border); }
+.prov-source-label { color: var(--muted); text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.06em; }
+.prov-source-q { color: var(--text-2); flex: 1 1 200px; }
+.prov-timeline { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.prov-ev { display: flex; align-items: baseline; gap: 9px; font: 12.5px var(--font); }
+.prov-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transform: translateY(-1px); }
+.prov-dot[data-tone="ok"] { background: var(--ok); }
+.prov-dot[data-tone="danger"] { background: var(--danger); }
+.prov-ev-label { font-weight: 600; color: var(--text); flex: 0 0 auto; min-width: 84px; }
+.prov-ev-label[data-tone="ok"] { color: var(--ok); }
+.prov-ev-label[data-tone="danger"] { color: var(--danger); }
+.prov-ev-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; color: var(--text-2); margin-left: auto; }
+.prov-reason { color: var(--text-2); font-style: italic; }
+.trace-link { color: var(--accent); cursor: pointer; font-family: var(--mono); text-decoration: none; border-bottom: 1px dashed var(--accent-line); }
+.trace-link:hover { border-bottom-style: solid; }

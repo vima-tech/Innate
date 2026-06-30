@@ -273,6 +273,165 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Provenance timeline for a single chunk, powering the Web chunk-detail
+    /// Provenance panel. Read-only projection across `usage_trace`,
+    /// `feedback_events`, `chunk_success_traces`, and (for distilled chunks) the
+    /// source `episodic_log`. Returns:
+    ///   - `events`: newest-first merge of per-trace outcomes (task_ok/task_fail,
+    ///     derived from the trace's chunk-less outcome row) and feedback_up/down
+    ///     events, capped at `limit`.
+    ///   - `source`: the originating episodic_log (query + output_summary) when the
+    ///     chunk is `distilled` (`chunks.distilled_from` → `episodic_log.id`), else null.
+    ///   - `stats` + `explanation`: success/failure/feedback counts, current EMA
+    ///     confidence, and a natural-language confidence summary.
+    pub fn chunk_provenance(&self, chunk_id: &str, limit: usize) -> Result<Value> {
+        // Per-trace outcome timeline: each trace where this chunk was `used`, joined
+        // to that trace's outcome row (chunk_id IS NULL, task_ok/task_fail).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT u.trace_id, u.source, u.ts AS used_ts, o.event AS outcome, o.ts AS outcome_ts
+             FROM usage_trace u
+             LEFT JOIN usage_trace o
+               ON o.trace_id = u.trace_id AND o.chunk_id IS NULL
+                  AND o.event IN ('task_ok','task_fail')
+             WHERE u.chunk_id = ?1 AND u.event = 'used'",
+        )?;
+        let outcome_rows = stmt
+            .query_map([chunk_id], |r| {
+                let trace_id: String = r.get(0)?;
+                let source: Option<String> = r.get(1)?;
+                let used_ts: String = r.get(2)?;
+                let outcome: Option<String> = r.get(3)?;
+                let outcome_ts: Option<String> = r.get(4)?;
+                let event = outcome.clone().unwrap_or_else(|| "used".to_string());
+                let ts = outcome_ts.unwrap_or(used_ts);
+                Ok(serde_json::json!({
+                    "event": event,
+                    "ts": ts,
+                    "trace_id": trace_id,
+                    "source": source,
+                    "reason": Value::Null,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Feedback timeline: up/down signals carrying their own chunk_id.
+        let mut fstmt = self.conn.prepare_cached(
+            "SELECT signal, ts, trace_id, source, reason
+             FROM feedback_events WHERE chunk_id = ?1",
+        )?;
+        let feedback_rows = fstmt
+            .query_map([chunk_id], |r| {
+                let signal: String = r.get(0)?;
+                Ok(serde_json::json!({
+                    "event": format!("feedback_{signal}"),
+                    "ts": r.get::<_, String>(1)?,
+                    "trace_id": r.get::<_, String>(2)?,
+                    "source": r.get::<_, Option<String>>(3)?,
+                    "reason": r.get::<_, Option<String>>(4)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Merge, newest-first, cap at `limit`. `ts` is the lexicographically
+        // sortable utc_now_iso() format, so string compare == chronological.
+        let mut events: Vec<Value> = outcome_rows.into_iter().chain(feedback_rows).collect();
+        events.sort_by(|a, b| {
+            let ta = a.get("ts").and_then(Value::as_str).unwrap_or("");
+            let tb = b.get("ts").and_then(Value::as_str).unwrap_or("");
+            tb.cmp(ta)
+        });
+        events.truncate(limit);
+
+        // Aggregate stats counted live from usage_trace (independent of the curate
+        // roll-up, so the panel is accurate before chunk_success_traces is built):
+        // a success/failure is a trace where this chunk was `used` and that trace's
+        // chunk-less outcome row is task_ok / task_fail respectively.
+        let count_outcome = |outcome: &str| -> Result<i64> {
+            Ok(self.conn.query_row(
+                "SELECT COUNT(DISTINCT u.trace_id)
+                 FROM usage_trace u
+                 JOIN usage_trace o
+                   ON o.trace_id = u.trace_id AND o.chunk_id IS NULL AND o.event = ?2
+                 WHERE u.chunk_id = ?1 AND u.event = 'used'",
+                params![chunk_id, outcome],
+                |r| r.get(0),
+            )?)
+        };
+        let successes = count_outcome("task_ok")?;
+        let failures = count_outcome("task_fail")?;
+        let (feedback_up, feedback_down): (i64, i64) = self.conn.query_row(
+            "SELECT
+               COALESCE(SUM(signal = 'up'), 0),
+               COALESCE(SUM(signal = 'down'), 0)
+             FROM feedback_events WHERE chunk_id = ?1",
+            [chunk_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let (confidence, distilled_from): (Option<f64>, Option<String>) = self.conn.query_row(
+            "SELECT confidence, distilled_from FROM chunks WHERE id = ?1",
+            [chunk_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        // Most recent negative signal: feedback_down or a task_fail outcome.
+        let last_negative_at: Option<String> = self.conn.query_row(
+            "SELECT MAX(ts) FROM (
+               SELECT ts FROM feedback_events WHERE chunk_id = ?1 AND signal = 'down'
+               UNION ALL
+               SELECT o.ts FROM usage_trace u
+                 JOIN usage_trace o ON o.trace_id = u.trace_id
+                   AND o.chunk_id IS NULL AND o.event = 'task_fail'
+                 WHERE u.chunk_id = ?1 AND u.event = 'used'
+             )",
+            [chunk_id],
+            |r| r.get(0),
+        )?;
+
+        // Source episodic_log for distilled chunks (distilled_from = episodic_log.id).
+        let source = match distilled_from.as_deref() {
+            Some(log_id) if !log_id.is_empty() => self
+                .conn
+                .query_row(
+                    "SELECT id, trace_id, query, output_summary, ts
+                     FROM episodic_log WHERE id = ?1",
+                    [log_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "log_id": r.get::<_, String>(0)?,
+                            "trace_id": r.get::<_, String>(1)?,
+                            "query": r.get::<_, Option<String>>(2)?,
+                            "output_summary": r.get::<_, Option<String>>(3)?,
+                            "ts": r.get::<_, String>(4)?,
+                        }))
+                    },
+                )
+                .optional()?
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        };
+
+        let explanation = confidence_explanation(
+            successes,
+            failures,
+            confidence,
+            last_negative_at.as_deref(),
+        );
+
+        Ok(serde_json::json!({
+            "chunk_id": chunk_id,
+            "events": events,
+            "source": source,
+            "stats": {
+                "successes": successes,
+                "failures": failures,
+                "feedback_up": feedback_up,
+                "feedback_down": feedback_down,
+                "confidence": confidence,
+                "last_negative_at": last_negative_at,
+            },
+            "explanation": explanation,
+        }))
+    }
+
     pub fn update_episodic_log_state(
         &self,
         trace_id: &str,
@@ -813,4 +972,51 @@ fn context_score_from_counts(
     let posterior = (wins + alpha0) / (evidence + alpha0 + beta0);
     let evidence_weight = (evidence / 5.0).min(1.0);
     (posterior - 0.5) * 2.0 * evidence_weight
+}
+
+/// Natural-language confidence summary for the Provenance panel, e.g.
+/// `"5 successes, 2 failures → EMA 0.62; last negative feedback 3d ago"`.
+/// `last_negative_at` is an `utc_now_iso()` timestamp; the relative suffix is
+/// omitted when there has never been a negative signal.
+fn confidence_explanation(
+    successes: i64,
+    failures: i64,
+    confidence: Option<f64>,
+    last_negative_at: Option<&str>,
+) -> String {
+    let s_word = if successes == 1 { "success" } else { "successes" };
+    let f_word = if failures == 1 { "failure" } else { "failures" };
+    let ema = confidence
+        .map(|c| format!("{c:.2}"))
+        .unwrap_or_else(|| "n/a".to_string());
+    let mut out = format!("{successes} {s_word}, {failures} {f_word} → EMA {ema}");
+    if let Some(ts) = last_negative_at {
+        if let Some(ago) = relative_ago(ts) {
+            out.push_str(&format!("; last negative feedback {ago}"));
+        }
+    }
+    out
+}
+
+/// Humanize an `utc_now_iso()` timestamp relative to now, e.g. `"3d ago"`,
+/// `"5h ago"`, `"2m ago"`, `"just now"`. Returns `None` if the timestamp can't
+/// be parsed, so callers can drop the clause rather than render garbage.
+fn relative_ago(ts: &str) -> Option<String> {
+    let then = chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let secs = (chrono::Utc::now() - then).num_seconds();
+    if secs < 0 {
+        return Some("just now".to_string());
+    }
+    let out = if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    };
+    Some(out)
 }
