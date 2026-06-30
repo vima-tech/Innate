@@ -2,7 +2,7 @@
 
 ## Rust 核心
 
-核心使用 Rust edition 2021 编写，包名 innate，当前版本 0.1.17；release profile 启用 LTO、codegen-units=1、strip=true 以优化二进制体积。
+核心使用 Rust edition 2021 编写，包名 innate，当前版本 0.1.20；release profile 启用 LTO、codegen-units=1、strip=true 以优化二进制体积。
 
 ---
 
