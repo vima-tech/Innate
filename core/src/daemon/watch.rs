@@ -235,6 +235,18 @@ pub(in crate::daemon) fn process_log_file(
         let trace_id = event.trace_id.clone().or(context_trace_id);
 
         if event_type == "end" {
+            if let Some(tid) = &trace_id {
+                if let Err(e) = call_cli_record(db_path, tid, &event) {
+                    let ts = crate::utils::utc_now_iso();
+                    let _ = writeln!(log, "{ts} [daemon] end trace retirement failed: {e}");
+                    record_daemon_error(
+                        state_db,
+                        path_str.as_ref(),
+                        "record_session_end",
+                        &e.to_string(),
+                    );
+                }
+            }
             let result = call_cli_evolve(db_path, "manual");
             let ts = crate::utils::utc_now_iso();
             // The session has ended regardless of whether evolve succeeded, so the

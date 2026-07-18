@@ -481,7 +481,7 @@ fn tool_schema(name: &str) -> Value {
                 "include_sparks": {"type": "boolean"},
                 "expand_deps": {"type": "string", "enum": ["false","direct","closure"], "description": "Dependency expansion: false (default) | direct | closure"},
                 "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]},
-                "min_score": {"type": "number", "description": "Relevance gate: drop candidates whose fused score is below this value (omit to disable)"}
+                "min_score": {"type": "number", "description": "Relevance gate applied before the pending lifecycle penalty; final ranking remains penalized (omit to disable)"}
             },
             "required": ["query"]
         }),

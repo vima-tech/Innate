@@ -114,6 +114,36 @@ fn session_only_recall_opens_trace_without_selection() {
 }
 
 #[test]
+fn abandoned_session_only_trace_is_retired_immediately() {
+    let (kb, _f) = tmp_kb();
+    seed_chunk(&kb);
+    let res = kb
+        .recall(RecallParams {
+            query: "alpha beta gamma",
+            budget: 4000,
+            trace: true,
+            source: "daemon",
+            session_only: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    kb.record(RecordParams {
+        trace_id: &res.trace_id,
+        task_state: Some("abandoned"),
+        source: "daemon",
+        ..Default::default()
+    })
+    .unwrap();
+
+    let log = kb.storage.get_episodic_log(&res.trace_id).unwrap().unwrap();
+    assert_eq!(log["task_state"].as_str(), Some("abandoned"));
+    assert_eq!(log["distill_state"].as_str(), Some("discarded"));
+    assert_eq!(log["distill_note"].as_str(), Some("abandoned"));
+    assert_eq!(event_count(&kb, &res.trace_id, "selected"), 0);
+}
+
+#[test]
 fn empty_recall_is_parked_as_known_none_not_open() {
     let (kb, _f) = tmp_kb();
     seed_chunk(&kb);

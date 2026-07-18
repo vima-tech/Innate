@@ -29,6 +29,12 @@ fn classifies_session_end_events() {
         parse_log_event(r#"{"event_type":"session_end"}"#).map(|event| event.kind),
         Some("end")
     );
+    assert_eq!(
+        parse_log_event(r#"{"event_type":"session_end"}"#)
+            .and_then(|event| event.task_state)
+            .as_deref(),
+        Some("abandoned")
+    );
 }
 
 #[test]

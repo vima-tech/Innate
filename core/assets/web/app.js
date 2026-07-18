@@ -60,6 +60,9 @@ const I18N = {
     sessions_empty: "No traces yet.", daemon_title: "Daemon status",
     search_failed: "search failed", play_failed: "recall failed",
     sessions_failed: "sessions failed", daemon_failed: "daemon status failed",
+    daemon_restart: "Restart", daemon_restarting: "Restarting…",
+    daemon_restarted: (pid) => `Daemon restarted (pid ${pid})`,
+    daemon_restart_failed: "daemon restart failed",
     health_chunks: "chunks", health_debt: "debt", health_pending: "pending",
     health_oldest: (d) => `oldest ${d}d`, health_review: "review queue",
     review_title: "Review queue", exit: "Exit",
@@ -127,6 +130,9 @@ const I18N = {
     sessions_empty: "暂无轨迹。", daemon_title: "守护进程状态",
     search_failed: "搜索失败", play_failed: "召回失败",
     sessions_failed: "会话加载失败", daemon_failed: "守护进程状态失败",
+    daemon_restart: "重启", daemon_restarting: "重启中…",
+    daemon_restarted: (pid) => `守护进程已重启 (pid ${pid})`,
+    daemon_restart_failed: "守护进程重启失败",
     health_oldest: (d) => `最久 ${d} 天`, health_review: "复审队列",
     review_title: "复审队列", exit: "退出",
     review_banner: "被反复负反馈标记的知识块。筛选已禁用 —— 点击条目进行裁决。",
@@ -962,6 +968,25 @@ async function loadDaemon() {
   }
 }
 
+// Restart (or start) the daemon. The endpoint stops a live daemon, respawns it
+// with the configured watch dirs, and returns the fresh health snapshot.
+async function restartDaemon() {
+  const btn = $("daemon-restart");
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = t("daemon_restarting");
+  try {
+    const h = await api("/api/daemon/restart", { method: "POST" });
+    toast(t("daemon_restarted", h.pid), "ok");
+  } catch (e) {
+    toast(t("daemon_restart_failed") + ": " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+    loadDaemon();
+  }
+}
+
 async function loadTraces() {
   const kind = $("t-kind").value;
   const status = $("t-status").value;
@@ -1085,6 +1110,7 @@ $("play-go").onclick = loadPlayground;
 $("play-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadPlayground(); });
 $("sessions-reload").onclick = loadSessions;
 $("daemon-reload").onclick = loadDaemon;
+$("daemon-restart").onclick = restartDaemon;
 $("health").onclick = toggleOverview;
 $("review-btn").onclick = toggleReview;
 $("queue-exit").onclick = toggleReview;

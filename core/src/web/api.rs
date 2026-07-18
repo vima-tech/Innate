@@ -132,6 +132,7 @@ pub(crate) fn route(
 
         // Governance endpoints (token + same-origin required).
         (Method::Post, ["api", "chunk", id, action]) => governance(ctx, headers, id, action, body),
+        (Method::Post, ["api", "daemon", "restart"]) => daemon_restart(ctx, headers),
 
         _ => err(404, "not found"),
     }
@@ -326,6 +327,58 @@ fn daemon_status() -> Resp {
         &crate::utils::utc_now_iso(),
     );
     json_resp(200, health)
+}
+
+/// R7b — restart (or start) the daemon from the UI. Gated exactly like the
+/// governance endpoints (same-origin + token) because it mutates system state.
+/// Stop is only attempted when the pid is alive — a stale pid file just means
+/// the goal state ("running") is reached by starting. Watch dirs come from
+/// settings, falling back to the canonical sessions dir so the button works
+/// before any daemon config exists. Returns the fresh health snapshot.
+fn daemon_restart(ctx: &Ctx, headers: &HashMap<String, String>) -> Resp {
+    if !origin_ok(ctx, headers) {
+        return err(403, "cross-origin request rejected");
+    }
+    if !token_ok(ctx, headers) {
+        return err(403, "missing or invalid token");
+    }
+    if !cfg!(target_os = "linux") {
+        return err(400, "the daemon is only supported on Linux");
+    }
+
+    let pid_file = crate::paths::daemon_pid_path();
+    if crate::daemon::is_running(&pid_file) {
+        if let Err(e) = crate::daemon::stop(&pid_file) {
+            return err(500, &format!("failed to stop daemon: {e}"));
+        }
+    }
+
+    let settings = crate::settings::load().unwrap_or_default();
+    let mut watch_dirs: Vec<std::path::PathBuf> = crate::settings::resolved_watch_dirs(&settings)
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    if watch_dirs.is_empty() {
+        watch_dirs.push(crate::paths::sessions_dir());
+    }
+
+    if let Err(e) = crate::daemon::start(
+        &watch_dirs,
+        &ctx.kb.storage.db_path,
+        &pid_file,
+        &crate::paths::daemon_state_path(),
+        &crate::paths::daemon_log_path(),
+    ) {
+        return err(500, &format!("failed to start daemon: {e}"));
+    }
+    json_resp(
+        200,
+        crate::daemon::health(
+            &crate::paths::daemon_state_path(),
+            &pid_file,
+            &crate::utils::utc_now_iso(),
+        ),
+    )
 }
 
 /// R8 — recent recall→record trace timeline ("Sessions"). `?limit=N` (default 50,

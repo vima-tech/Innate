@@ -113,6 +113,33 @@ fn llm_traces_endpoint_returns_array() {
 }
 
 #[test]
+fn playground_runs_recall_and_returns_scored_knowledge() {
+    let (ctx, _f) = ctx_with(None);
+    let r = route(
+        &ctx,
+        &Method::Get,
+        "/api/playground",
+        "q=alpha&budget=6000",
+        &hdr(&[]),
+        "",
+    );
+    assert_eq!(r.status, 200);
+    let v: Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(v["query"], "alpha");
+    assert!(v["knowledge"].is_array());
+    assert!(v["sparks"].is_array());
+}
+
+#[test]
+fn playground_empty_query_returns_empty_shape() {
+    let (ctx, _f) = ctx_with(None);
+    let r = route(&ctx, &Method::Get, "/api/playground", "", &hdr(&[]), "");
+    assert_eq!(r.status, 200);
+    let v: Value = serde_json::from_str(&r.body).unwrap();
+    assert_eq!(v["knowledge"].as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn metrics_trend_endpoint_returns_snapshots_array() {
     let (ctx, _f) = ctx_with(None);
     let r = route(
@@ -330,4 +357,32 @@ fn provenance_endpoint_requires_token_off_loopback() {
     let path = format!("/api/chunks/{id}/provenance");
     let r = route(&ctx, &Method::Get, &path, "", &hdr(&[]), "");
     assert_eq!(r.status, 403);
+}
+
+// ── Daemon restart (R7b) — auth gating only. The happy path spawns a real
+// process, so tests stop at the 403 gates (mirrors the governance tests). ──
+
+#[test]
+fn daemon_restart_rejected_without_token() {
+    let (ctx, _f) = ctx_with(Some("secret"));
+    let r = route(&ctx, &Method::Post, "/api/daemon/restart", "", &hdr(&[]), "");
+    assert_eq!(r.status, 403);
+}
+
+#[test]
+fn daemon_restart_rejected_cross_origin() {
+    let (ctx, _f) = ctx_with(Some("secret"));
+    let h = hdr(&[
+        ("origin", "http://evil.example.com"),
+        ("x-innate-token", "secret"),
+    ]);
+    let r = route(&ctx, &Method::Post, "/api/daemon/restart", "", &h, "");
+    assert_eq!(r.status, 403);
+}
+
+#[test]
+fn daemon_restart_get_is_not_routed() {
+    let (ctx, _f) = ctx_with(Some("secret"));
+    let r = route(&ctx, &Method::Get, "/api/daemon/restart", "", &hdr(&[]), "");
+    assert_eq!(r.status, 404);
 }

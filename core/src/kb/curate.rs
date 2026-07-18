@@ -226,12 +226,12 @@ impl KnowledgeBase {
                 }
             }
 
-            // ── 3c. Archive: never_used — never entered context at all ──
+            // ── 3c. Archive: never_used — no successful use before the age limit ──
             let never_used_cutoff = days_ago(&now_iso, self.never_used_age_days);
             let never_used = self.storage.query_chunks_params(
                 "SELECT id FROM chunks
                  WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
-                   AND used_count = 0 AND selected_count = 0
+                   AND used_count = 0
                    AND COALESCE(evidence_cutoff_at, created_at) < ?
                    AND (? IS NULL OR origin=?)
                    AND (? IS NULL OR skill_name=?)",

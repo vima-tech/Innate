@@ -52,6 +52,65 @@ fn min_score_gate_drops_subthreshold_candidates() {
 }
 
 #[test]
+fn pending_relevance_gate_uses_score_before_lifecycle_penalty() {
+    let (kb, _f) = tmp_kb();
+    let id = kb
+        .add(
+            "Prefer composition over inheritance",
+            "note",
+            Some("design principle"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    kb.storage
+        .conn_execute(
+            "UPDATE chunks SET state='pending' WHERE id=?",
+            rusqlite::params![id],
+        )
+        .unwrap();
+
+    let base = RecallParams {
+        query: "design principle",
+        budget: 6000,
+        trace: false,
+        include_sparks: false,
+        top: None,
+        source: "hook",
+        expand_deps: "false",
+        allow_trim: false,
+        refine_mode: "off",
+        min_score: None,
+        session_only: false,
+        ..Default::default()
+    };
+    let ungated = kb.recall(base.clone()).unwrap();
+    let penalized_score = ungated
+        .knowledge
+        .iter()
+        .find(|chunk| chunk["id"].as_str() == Some(id.as_str()))
+        .and_then(|chunk| chunk["_fused_score"].as_f64())
+        .expect("pending chunk should be retrievable without a gate");
+    let pre_penalty_score = penalized_score / 0.60;
+    let gate = (penalized_score + pre_penalty_score) / 2.0;
+
+    let gated = kb
+        .recall(RecallParams {
+            min_score: Some(gate),
+            ..base
+        })
+        .unwrap();
+    assert!(
+        gated
+            .knowledge
+            .iter()
+            .any(|chunk| chunk["id"].as_str() == Some(id.as_str())),
+        "a relevant pending chunk must pass the gate before its ranking penalty is applied"
+    );
+}
+
+#[test]
 fn agent_source_dimension_is_captured_and_orthogonal_to_channel() {
     // The agent product identity (INNATE_AGENT) lands on both the chunk and the
     // recall episodic_log, independently of the access channel (event_source).

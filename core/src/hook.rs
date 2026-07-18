@@ -160,9 +160,10 @@ enum HookKind {
     SessionStart,
 }
 
-/// Default relevance gate for always-on recall hooks. Fused scores roughly span [0, ~1.05]
+/// Default relevance gate for always-on recall hooks. Relevance scores roughly span [0, ~1.05]
 /// (weights: content .55 + trigger .25 + confidence .10 + context .15). 0.40 keeps strong
-/// semantic matches and drops weak ones. Override with `INNATE_HOOK_MIN_SCORE`.
+/// semantic matches and drops weak ones. The gate runs before the pending lifecycle penalty;
+/// final ranking still applies that penalty. Override with `INNATE_HOOK_MIN_SCORE`.
 const DEFAULT_HOOK_MIN_SCORE: f64 = 0.40;
 
 /// UserPromptSubmit / SessionStart hook: recall relevant knowledge and print it to stdout so

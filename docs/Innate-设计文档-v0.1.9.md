@@ -231,6 +231,7 @@ score = 0.55*content_sim + 0.25*trigger_sim + 0.10*confidence + 0.15*context_sco
 - 命中 `anti_trigger_desc` 时融合分乘以 `0.6`。
 - 候选数默认最多 `20`。Soft dependency 对候选内容相似度 +`0.05`；hard dependency 在装包阶段按 direct 或 closure 展开。
 - `pending` 候选最终融合分乘以 `0.60`。
+- `min_score` 相关性门槛在 pending 生命周期降权前判断（但保留 anti-trigger 惩罚）；候选最终排序仍使用降权后分数，避免未验证知识与 active 等权，同时保留 pending 的冷启动曝光机会。
 - `appraise`（直觉层 critic）复用同一融合公式，activation 计入其 calibration 分量。
 
 #### 5.2.1 召回质量评测套件（调参安全网）
@@ -429,7 +430,7 @@ Curate ：归档知识并接受 proposal
 
 - `daemon start --watch <dir>` / `status` / `stop`：`process.rs` 基于 fork + `/proc` 管理；非 Linux 返回明确错误。
 - **监听循环**（`watch.rs`）：tail 续读（按 inode + offset 恢复），逐行解析。
-- **事件解析**（`events.rs`）：优先解析 JSON 事件 `session_start` / `tool_success` / `tool_error` / `session_end` / `user_feedback` → `start` / `ok` / `fail` / `end` / `feedback`；JSON 失败时回退文本模式分类（Build successful / Error: / Session ended 等模式）。
+- **事件解析**（`events.rs`）：优先解析 JSON 事件 `session_start` / `tool_success` / `tool_error` / `session_end` / `user_feedback` → `start` / `ok` / `fail` / `end` / `feedback`；JSON 失败时回退文本模式分类（Build successful / Error: / Session ended 等模式）。`session_end` 会先将无结果的 session-only trace 标记为 `abandoned`/`discarded`，再运行 Evolve；已有 ok/fail 结果的 trace 保持 `completed`。
 - 事件按 `event_id` 幂等去重，会话内维护 `trace_id` 上下文，映射为 recall/record CLI 调用。
 
 ## 12. 备份（Cloudflare R2）

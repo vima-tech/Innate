@@ -104,3 +104,33 @@ fn stale_pending_chunk_without_usage_is_archived() {
     assert_eq!(row["state"].as_str(), Some("archived"));
     assert_eq!(row["state_reason"].as_str(), Some("never_used"));
 }
+
+#[test]
+fn stale_pending_chunk_selected_but_never_used_is_archived() {
+    let (kb, _file) = tmp_kb();
+    let chunk_id = kb
+        .add(
+            "stale selected pending",
+            "note",
+            Some("stale selected"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    kb.storage
+        .conn_execute(
+            "UPDATE chunks
+             SET state='pending', created_at='2020-01-01T00:00:00.000Z',
+                 selected_count=1, selected_count_base=1
+             WHERE id=?",
+            rusqlite::params![chunk_id],
+        )
+        .unwrap();
+
+    kb.builtin_curate_impl(&CurateScope::default()).unwrap();
+
+    let row = kb.storage.get_chunk(&chunk_id).unwrap().unwrap();
+    assert_eq!(row["state"].as_str(), Some("archived"));
+    assert_eq!(row["state_reason"].as_str(), Some("never_used"));
+}

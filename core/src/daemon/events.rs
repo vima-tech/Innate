@@ -45,18 +45,19 @@ pub(in crate::daemon) struct DaemonEvent {
     pub(in crate::daemon) used: Option<Vec<String>>,
     pub(in crate::daemon) feedback: Option<String>,
     pub(in crate::daemon) nomination: Option<String>,
+    pub(in crate::daemon) task_state: Option<String>,
     pub(in crate::daemon) priority: i64,
 }
 
 pub(in crate::daemon) fn parse_log_event(line: &str) -> Option<DaemonEvent> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
         let event_type = value.get("event_type").and_then(ValueExt::string)?;
-        let (kind, default_outcome) = match event_type {
-            "session_start" => ("start", None),
-            "tool_success" => ("ok", Some("ok")),
-            "tool_error" => ("fail", Some("fail")),
-            "session_end" => ("end", None),
-            "user_feedback" => ("feedback", None),
+        let (kind, default_outcome, default_task_state) = match event_type {
+            "session_start" => ("start", None, None),
+            "tool_success" => ("ok", Some("ok"), None),
+            "tool_error" => ("fail", Some("fail"), None),
+            "session_end" => ("end", None, Some("abandoned")),
+            "user_feedback" => ("feedback", None, None),
             _ => return None,
         };
         return Some(DaemonEvent {
@@ -79,6 +80,10 @@ pub(in crate::daemon) fn parse_log_event(line: &str) -> Option<DaemonEvent> {
                 }),
             feedback: value.get("feedback").and_then(ValueExt::owned_string),
             nomination: value.get("nomination").and_then(ValueExt::owned_string),
+            task_state: value
+                .get("task_state")
+                .and_then(ValueExt::owned_string)
+                .or_else(|| default_task_state.map(str::to_string)),
             priority: value.get("priority").and_then(|v| v.as_i64()).unwrap_or(0),
         });
     }
@@ -92,6 +97,7 @@ pub(in crate::daemon) fn parse_log_event(line: &str) -> Option<DaemonEvent> {
             "fail" => Some("fail".to_string()),
             _ => None,
         },
+        task_state: (kind == "end").then(|| "abandoned".to_string()),
         ..DaemonEvent::default()
     })
 }
@@ -197,6 +203,9 @@ pub(in crate::daemon) fn call_cli_record(
         }
         if let Some(outcome) = &event.outcome {
             command.args(["--outcome", outcome]);
+        }
+        if let Some(task_state) = &event.task_state {
+            command.args(["--task-state", task_state]);
         }
         if let Some(used) = &event.used {
             command.args(["--used", &used.join(",")]);

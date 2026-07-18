@@ -137,7 +137,13 @@ impl KnowledgeBase {
         // Relevance gate — drop sub-threshold candidates before packing/trace so the
         // trace records only what was actually surfaced (keeps selected→used stats clean).
         if let Some(min) = min_score {
-            scored.retain(|(fused, _)| *fused >= min);
+            scored.retain(|(fused, chunk)| {
+                chunk
+                    .get("_gate_score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(*fused)
+                    >= min
+            });
         }
 
         // First-fit pack with dep expansion
@@ -537,6 +543,7 @@ impl KnowledgeBase {
                 ("activation", self.w_activation * activation),
             ];
             let mut fused: f64 = contribs.iter().map(|(_, c)| c).sum();
+            let mut gate_score = fused;
             if info.chunk.get("state").and_then(Value::as_str) == Some("pending") {
                 fused *= PENDING_RECALL_PENALTY;
             }
@@ -547,12 +554,14 @@ impl KnowledgeBase {
                 .unwrap_or("");
             if !anti.is_empty() && anti_trigger_hit(query, anti) {
                 fused *= self.anti_trigger_penalty;
+                gate_score *= self.anti_trigger_penalty;
             }
             let mut chunk = info.chunk;
             chunk["_context_score"] = json!(context_score);
             chunk["_activation"] = json!(activation);
             chunk["_sim_lexical"] = json!(info.sim_lexical);
             chunk["_sim_spread"] = json!(info.sim_spread);
+            chunk["_gate_score"] = json!(gate_score);
             chunk["_fused_score"] = json!(fused);
             chunk["match_reason"] = match_reason(&contribs);
             scored.push((fused, chunk));

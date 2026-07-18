@@ -170,13 +170,17 @@
   <!-- ════════════ RECALL PLAYGROUND VIEW (R6) ════════════ -->
   <main id="play-view" class="two-pane hidden">
     <aside class="list-pane">
-      <div class="filters">
-        <input id="play-q" class="select" style="flex:1" type="search" data-i18n-placeholder="play_ph" placeholder="Recall query…" />
-        <label class="field"><span class="field-label" data-i18n="f_budget">budget</span>
-          <input id="play-budget" class="select" type="number" value="6000" min="200" step="200" style="width:7em" /></label>
-        <label class="field" style="flex-direction:row;align-items:center;gap:.4em">
-          <input id="play-sparks" type="checkbox" /><span class="field-label" data-i18n="f_sparks">sparks</span></label>
-        <button id="play-go" class="icon-btn" title="Run recall">⏎</button>
+      <div class="filters filters-stack">
+        <div class="filters-row">
+          <input id="play-q" class="select" style="flex:1" type="search" data-i18n-placeholder="play_ph" placeholder="Recall query…" />
+          <button id="play-go" class="icon-btn" title="Run recall">⏎</button>
+        </div>
+        <div class="filters-row">
+          <label class="field"><span class="field-label" data-i18n="f_budget">budget</span>
+            <input id="play-budget" class="select" type="number" value="6000" min="200" step="200" /></label>
+          <label class="field field-check">
+            <input id="play-sparks" type="checkbox" /><span class="field-label" data-i18n="f_sparks">sparks</span></label>
+        </div>
       </div>
       <ul id="play-results" class="rows scroll"></ul>
       <div class="pager pager-center"><span id="play-info" class="pager-info"></span></div>
@@ -217,6 +221,7 @@
       <div class="filters">
         <span class="field-label" data-i18n="daemon_title">Daemon status</span>
         <button id="daemon-reload" class="icon-btn" data-i18n-title="reload" title="Reload">⟳</button>
+        <button id="daemon-restart" class="btn-ghost-sm" data-i18n="daemon_restart">Restart</button>
       </div>
       <div id="daemon-card"></div>
     </section>

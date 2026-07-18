@@ -8,7 +8,7 @@ MCP 暴露 15 个工具：innate_recall、innate_record、innate_appraise、inna
 
 ## REST API 端点
 
-Web API 路径前缀 /api/：GET inspect、GET chunks（支持 state/origin/limit/offset 查询）、GET governance、GET llm-traces、GET chunk/:id、POST chunk/:id/{approve|restore|archive|invalidate}。
+Web API 路径前缀 /api/：GET inspect、GET chunks（支持 state/origin/limit/offset 查询）、GET governance、GET llm-traces、GET chunk/:id、POST chunk/:id/{approve|restore|archive|invalidate}、POST daemon/restart（重启/拉起守护进程，返回最新 health）。
 
 ---
 

@@ -49,8 +49,9 @@ pub enum Commands {
         /// Event source written to usage_trace (mcp | sdk | cli | hook | daemon | augmented)
         #[arg(long, default_value = "cli")]
         source: String,
-        /// Relevance gate: drop candidates whose fused score is below this value.
-        /// Keeps always-on hooks high-frequency without injecting noise.
+        /// Relevance gate: drop candidates whose relevance score is below this value.
+        /// Evaluated before the pending lifecycle penalty so unvalidated knowledge can
+        /// still cold-start; final ranking retains the penalty.
         #[arg(long)]
         min_score: Option<f64>,
         /// Session trace: open a trace for later record-correlation but record no

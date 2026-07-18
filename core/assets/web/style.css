@@ -240,8 +240,11 @@ header {
 
 /* Filters */
 .filters { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
-.field { display: flex; flex-direction: column; gap: 4px; flex: 1; }
-.field-label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; padding-left: 2px; }
+.filters-stack { flex-direction: column; align-items: stretch; }
+.filters-row { display: flex; align-items: flex-end; gap: 8px; }
+.field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.field-check { flex: 0 0 auto; flex-direction: row; align-items: center; gap: 6px; padding-bottom: 8px; }
+.field-label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; padding-left: 2px; white-space: nowrap; }
 .select {
   appearance: none; -webkit-appearance: none; width: 100%;
   padding: 7px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
