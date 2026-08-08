@@ -353,8 +353,7 @@ fn distill_entry_with(
             .get("skill_name")
             .and_then(Value::as_str)
             .map(|s| {
-                s.trim()
-                    .split_whitespace()
+                s.split_whitespace()
                     .take(3)
                     .collect::<Vec<_>>()
                     .join(" ")

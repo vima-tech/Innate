@@ -210,7 +210,7 @@ pub fn aggregate_ops(rows: &[OpRunRow]) -> serde_json::Value {
         }
     }
     let mut top: Vec<(&str, i64)> = err_kind.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     let error_kind_top: Vec<serde_json::Value> = top
         .into_iter()
         .take(10)
@@ -269,7 +269,7 @@ fn percentile(sorted: &[i64], p: usize) -> i64 {
     if sorted.is_empty() {
         return 0;
     }
-    let rank = (p * sorted.len() + 99) / 100; // ceil(p% * n), nearest-rank
+    let rank = (p * sorted.len()).div_ceil(100); // ceil(p% * n), nearest-rank
     let idx = rank.saturating_sub(1).min(sorted.len() - 1);
     sorted[idx]
 }
