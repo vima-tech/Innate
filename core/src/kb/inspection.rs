@@ -159,7 +159,7 @@ impl KnowledgeBase {
             "SELECT MIN(created_at) AS oldest FROM chunks WHERE state='pending' AND origin!='spark'",
         )?.into_iter().next()
             .and_then(|r| r.get("oldest").cloned())
-            .and_then(|v| if v.is_null() { None } else { Some(v) });
+            .filter(|v| !v.is_null());
 
         // Health signal 1: knowledge debt ratio.
         // Zombie = active chunks with middling confidence (stuck, neither good nor bad)
