@@ -8,7 +8,7 @@ const path   = require('path');
 const crypto = require('crypto');
 const os     = require('os');
 
-const { getTarget, getBinaryName, getExt } = require('./platform');
+const { getTarget, getBinaryName, getExt, isNativeBinary } = require('./platform');
 const { version } = require('../package.json');
 
 const REPO    = 'vima-tech/Innate';
@@ -73,13 +73,10 @@ async function verifyChecksum(filePath, sumUrl) {
 }
 
 async function main() {
-  // Skip if binary already exists and is executable (e.g. re-install same version).
-  if (fs.existsSync(BIN_PATH)) {
-    try {
-      fs.accessSync(BIN_PATH, fs.constants.X_OK);
-      return; // already installed
-    } catch {}
-  }
+  // Skip if the native binary is already in place (e.g. re-install same version).
+  // Testing for existence is not enough: BIN_PATH is where this package's own JS
+  // shim ships, and the download overwrites it.
+  if (isNativeBinary(BIN_PATH)) return;
 
   const target = getTarget();
   const ext    = getExt();
@@ -88,7 +85,9 @@ async function main() {
   const sumUrl = `${base}/innate-${target}${ext}.sha256`;
 
   fs.mkdirSync(BIN_DIR, { recursive: true });
-  const tmp = path.join(os.tmpdir(), `innate-${Date.now()}${ext}`);
+  // Stage inside BIN_DIR, not os.tmpdir(): the final step is a rename, which
+  // fails with EXDEV when /tmp is a different filesystem from node_modules.
+  const tmp = path.join(BIN_DIR, `.innate-download-${process.pid}${ext}`);
 
   console.log(`\n@vima-tech/innate: installing innate v${version} (${target})`);
   try {
