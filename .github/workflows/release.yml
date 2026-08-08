@@ -155,10 +155,44 @@ jobs:
           INNATE_SKIP_DOWNLOAD: "1"
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          if npm view "@vima_tech/innate@$VERSION" version >/dev/null 2>&1; then
-            echo "@vima_tech/innate $VERSION is already published"
+          if npm view "@vima-tech/innate@$VERSION" version >/dev/null 2>&1; then
+            echo "@vima-tech/innate $VERSION is already published"
           else
             npm publish --access public
+          fi
+
+  publish-sdk-github:
+    name: Publish TypeScript SDK to GitHub Packages
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@vima-tech"
+      - name: Install deps
+        working-directory: sdks/typescript
+        run: npm ci
+      - name: Sync version from tag
+        working-directory: sdks/typescript
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+      - name: Publish
+        working-directory: sdks/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@vima-tech/sdk@$VERSION" version >/dev/null 2>&1; then
+            echo "@vima-tech/sdk $VERSION is already published"
+          else
+            npm publish
           fi
 
   publish-pypi:

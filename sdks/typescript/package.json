@@ -1,5 +1,5 @@
 {
-  "name": "@innate/sdk",
+  "name": "@vima-tech/sdk",
   "version": "0.1.10",
   "description": "Innate — self-growing knowledge layer (TypeScript SDK)",
   "main": "dist/index.js",
@@ -13,8 +13,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vima-tech/Innate"
+    "url": "git+https://github.com/vima-tech/Innate.git",
+    "directory": "sdks/typescript"
   },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "files": ["dist", "src", "README.md"],
   "devDependencies": {
     "@types/node": "^18.0.0",
     "typescript": "^5.0.0"

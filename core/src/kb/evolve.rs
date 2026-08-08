@@ -201,6 +201,7 @@ impl KnowledgeBase {
     fn format_curate_report(&self, curate: &CurateReport) -> Value {
         json!({
             "archived": curate.archived.len(),
+            "promoted": curate.promoted.len(),
             "deduped": curate.deduped.len(),
             "decayed": curate.decayed.len(),
             "recovered": curate.recovered.len(),

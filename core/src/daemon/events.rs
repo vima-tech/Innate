@@ -238,38 +238,6 @@ pub(in crate::daemon) fn call_cli_record(
     }
 }
 
-pub(in crate::daemon) fn call_cli_recall(db_path: &str, query: &str) -> anyhow::Result<String> {
-    let self_exe = resolve_self_exe();
-    let output = std::process::Command::new(&self_exe)
-        .args([
-            "--db",
-            db_path,
-            "recall",
-            query,
-            "--format",
-            "json",
-            "--source",
-            "daemon",
-            // Session trace only: the daemon discards the recalled knowledge and
-            // keeps just the trace_id, so it must not claim any `selected` chunks.
-            "--session",
-        ])
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "recall exited non-zero: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| anyhow::anyhow!("recall json parse error: {e}"))?;
-    parsed
-        .get("trace_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("no trace_id in recall output"))
-}
-
 pub(in crate::daemon) fn call_cli_backup(db_path: &str) -> anyhow::Result<()> {
     let self_exe = resolve_self_exe();
     let status = std::process::Command::new(&self_exe)

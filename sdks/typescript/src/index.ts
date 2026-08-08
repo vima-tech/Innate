@@ -217,6 +217,7 @@ export interface EvolveResult {
   distilled: number;
   curate: {
     archived: number;
+    promoted: number;
     deduped: number;
     decayed: number;
     recovered: number;

@@ -192,47 +192,24 @@ pub(in crate::daemon) fn process_log_file(
             continue;
         }
 
-        // Handle "start": recall to open a trace and store it.
-        if event_type == "start" {
-            let query = event.query.as_deref().unwrap_or(line);
-            match call_cli_recall(db_path, query) {
-                Ok(tid) => {
-                    let ts = crate::utils::utc_now_iso();
-                    if let Err(e) = state_db.execute(
-                        "INSERT OR REPLACE INTO trace_context(watch_path, trace_id, updated_at) VALUES (?,?,?)",
-                        rusqlite::params![path_str.as_ref(), &tid, &ts],
-                    ) {
-                        let _ = writeln!(log, "{ts} [daemon] failed to store trace_context: {e}");
-                    }
-                    if let Err(e) = state_db.execute(
-                        "INSERT OR IGNORE INTO processed_events(event_id, watch_path, trace_id, event_type, ts) VALUES (?,?,?,?,?)",
-                        rusqlite::params![event_id, path_str.as_ref(), &tid, event_type, &ts],
-                    ) {
-                        let _ = writeln!(log, "{ts} [daemon] failed to record processed start event: {e}");
-                    }
-                    let _ = writeln!(log, "{ts} [daemon] start trace={tid} query={query:?}");
-                }
-                Err(e) => {
-                    let _ = writeln!(
-                        log,
-                        "{} [daemon] start recall failed: {e}",
-                        crate::utils::utc_now_iso()
-                    );
-                    record_daemon_error(state_db, path_str.as_ref(), "recall", &e.to_string());
-                }
-            }
+        // The session-tracking chain (start → recall, ok/fail/feedback → record)
+        // is structurally incapable of producing knowledge, so it is not run:
+        //   - the hook emits outcome="unknown", which record() filters out, so
+        //     every such trace retires as abandoned → discarded;
+        //   - the daemon recalls with --session, which suppresses `selected`
+        //     events, so attribution validation rejects any `used` id anyway.
+        // It still cost one remote embedding call plus a full vector scan per
+        // session start, and the recalled knowledge was discarded on the spot.
+        // Reinstating it requires distillation eligibility to stop depending on
+        // a confidence-bearing outcome — until then this chain only burns quota.
+        // `end` is still handled below: its evolve trigger is the useful part.
+        if matches!(event_type, "start" | "ok" | "fail" | "feedback") {
             continue;
         }
 
-        // Look up trace for this watch path (ok/fail/end events).
-        let context_trace_id: Option<String> = state_db
-            .query_row(
-                "SELECT trace_id FROM trace_context WHERE watch_path=?",
-                rusqlite::params![path_str.as_ref()],
-                |r| r.get(0),
-            )
-            .ok();
-        let trace_id = event.trace_id.clone().or(context_trace_id);
+        // Only logs that carry their own trace_id can be retired; the daemon no
+        // longer opens traces of its own.
+        let trace_id = event.trace_id.clone();
 
         if event_type == "end" {
             if let Some(tid) = &trace_id {
@@ -251,18 +228,11 @@ pub(in crate::daemon) fn process_log_file(
             let ts = crate::utils::utc_now_iso();
             // The session has ended regardless of whether evolve succeeded, so the
             // end-of-session bookkeeping must run on BOTH branches: otherwise a
-            // failed manual evolve leaks the trace_context mapping (never deleted)
-            // and loses the end event (never recorded in processed_events, so once
-            // the read offset advances it is neither retried nor logged). A failed
-            // manual evolve is independently retried by the periodic scheduled tick,
-            // so it must not block this cleanup. Errors here are surfaced to the log
-            // instead of being silently swallowed.
-            if let Err(e) = state_db.execute(
-                "DELETE FROM trace_context WHERE watch_path=?",
-                rusqlite::params![path_str.as_ref()],
-            ) {
-                let _ = writeln!(log, "{ts} [daemon] failed to clear trace_context: {e}");
-            }
+            // failed manual evolve loses the end event (never recorded in
+            // processed_events, so once the read offset advances it is neither
+            // retried nor logged). A failed manual evolve is independently retried
+            // by the periodic scheduled tick, so it must not block this cleanup.
+            // Errors here are surfaced to the log instead of being silently swallowed.
             if let Err(e) = state_db.execute(
                 "INSERT OR IGNORE INTO processed_events
                  (event_id, watch_path, trace_id, event_type, ts)
@@ -284,37 +254,6 @@ pub(in crate::daemon) fn process_log_file(
             continue;
         }
 
-        if matches!(event_type, "ok" | "fail" | "feedback") {
-            let Some(tid) = &trace_id else {
-                record_daemon_error(
-                    state_db,
-                    path_str.as_ref(),
-                    "record",
-                    "event has no trace_id and no active trace context",
-                );
-                continue;
-            };
-            let result = call_cli_record(db_path, tid, &event);
-            let ts = crate::utils::utc_now_iso();
-            match result {
-                Ok(()) => {
-                    let _ = state_db.execute(
-                        "INSERT OR IGNORE INTO processed_events
-                         (event_id, watch_path, trace_id, event_type, ts)
-                         VALUES (?,?,?,?,?)",
-                        rusqlite::params![event_id, path_str.as_ref(), tid, event_type, ts],
-                    );
-                    let _ = writeln!(log, "{ts} [daemon] {event_type} record trace={tid} ok");
-                }
-                Err(e) => {
-                    let _ = writeln!(
-                        log,
-                        "{ts} [daemon] {event_type} record trace={tid} failed: {e}"
-                    );
-                    record_daemon_error(state_db, path_str.as_ref(), "record", &e.to_string());
-                }
-            }
-        }
     }
 
     // Update watch_state.

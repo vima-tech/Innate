@@ -83,7 +83,7 @@ const NEVER_USED_AGE_DAYS: i64 = 30;
 const OPEN_TTL_DAYS: i64 = 14;
 const SCREENING_TIMEOUT_MINUTES: i64 = 30;
 const METRICS_RETAIN_DAYS: i64 = 30;
-const PROMOTE_USED_SUCCESS_MIN: i64 = 3;
+const PROMOTE_USED_SUCCESS_MIN: i64 = 2;
 const PROMOTE_CONFIDENCE_MIN: f64 = 0.60;
 const DECAY_FLOOR: f64 = 0.20;
 const EVOLVE_THRESHOLD: i64 = 5;
@@ -149,6 +149,7 @@ pub struct RecallResult {
 #[derive(Debug, Default)]
 pub struct CurateReport {
     pub archived: Vec<String>,
+    pub promoted: Vec<String>,
     pub deduped: Vec<String>,
     pub decayed: Vec<String>,
     pub cycles: Vec<Vec<String>>,
@@ -435,7 +436,7 @@ impl KnowledgeBase {
             ("metrics.retain_days", "30"),
             ("curate.open_ttl_days", "14"),
             ("curate.screening_timeout_minutes", "30"),
-            ("curate.promote_used_success_min", "3"),
+            ("curate.promote_used_success_min", "2"),
             ("curate.promote_confidence_min", "0.60"),
             ("curate.decay_floor", "0.20"),
             ("evolve.threshold_new_count", "5"),

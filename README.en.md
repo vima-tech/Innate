@@ -60,7 +60,7 @@ cargo install innate
 pip install innate-ai
 
 # npm installer (downloads pre-built binary, no Rust required)
-npm install -g @vima_tech/innate
+npm install -g @vima-tech/innate
 
 # Build from source
 cd core && cargo build --release
@@ -101,8 +101,25 @@ pip install innate-py
 
 ### TypeScript SDK (programmatic use)
 
+The TS SDK is published to **GitHub Packages**, which requires authentication even for
+public packages. Create a [classic personal access token](https://github.com/settings/tokens)
+with the `read:packages` scope (fine-grained tokens are not supported by the npm registry
+on GitHub Packages) and add it to `~/.npmrc`:
+
+```
+//npm.pkg.github.com/:_authToken=YOUR_TOKEN
+```
+
+Then map the `@vima-tech` scope to GitHub Packages in your project's `.npmrc` (commit this file):
+
+```
+@vima-tech:registry=https://npm.pkg.github.com
+```
+
+Then install:
+
 ```bash
-npm install @innate/sdk
+npm install @vima-tech/sdk
 ```
 
 ### MCP server (Claude Code / Claude Desktop)
@@ -250,7 +267,7 @@ report = kb.inspect()
 ## TypeScript SDK
 
 ```typescript
-import { KnowledgeBase, McpClient } from "@innate/sdk";
+import { KnowledgeBase, McpClient } from "@vima-tech/sdk";
 
 // CLI subprocess mode (synchronous, suitable for scripts)
 const kb = new KnowledgeBase({ dbPath: "personal.db" });
@@ -340,7 +357,7 @@ Daemon (innate daemon start)  ──> CLI ────────────�
 | **MCP** | Direct Core call | JSON-RPC 2.0 over stdio; 15 tools; for Claude Code / Claude Desktop |
 | **CLI** | Direct Core call | clap thin wrapper; full public API as CLI commands |
 | **Python SDK** | subprocess → CLI | `innate-py`, zero extra dependencies |
-| **TypeScript SDK** | subprocess → CLI + async MCP client | `@innate/sdk`, Node.js 18+ |
+| **TypeScript SDK** | subprocess → CLI + async MCP client | `@vima-tech/sdk`, Node.js 18+ |
 | **Daemon** | subprocess → CLI | Background log/JSON hook watcher; idempotent events; session trace; error stats; tail resumption (Linux only) |
 
 ```
@@ -357,7 +374,7 @@ Innate System
 │
 ├── SDKs
 │   ├── sdks/python/            innate-py  — subprocess → CLI, zero extra dependencies
-│   └── sdks/typescript/        @innate/sdk — CLI subprocess + async MCP client
+│   └── sdks/typescript/        @vima-tech/sdk — CLI subprocess + async MCP client
 │
 └── skills/innate-memory/       SKILL.md (MCP tools primary, CLI fallback)
 ```

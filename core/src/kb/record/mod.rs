@@ -507,11 +507,19 @@ impl KnowledgeBase {
                     log.get("distill_note").and_then(Value::as_str),
                     Some("insufficient_material" | "abandoned" | "timed_out")
                 );
-            let new_state = if current_state == "open"
-                && matches!(lifecycle_state, "abandoned" | "timed_out")
+            // Distillation eligibility depends on the session having FINISHED and
+            // left material behind — not on it having produced a confidence signal.
+            // A capture channel that cannot judge success (the Stop hook emits
+            // outcome="unknown" by design) still yields a usable summary, and that
+            // summary is worth distilling. Keeping the two coupled meant such a
+            // session was discarded outright. Confidence is untouched by this: it
+            // still moves only under `effective_outcome` ∈ {ok, fail} above, so an
+            // unknown outcome feeds the distiller without ever inflating a score.
+            let lifecycle_finished =
+                lifecycle_completed || matches!(lifecycle_state, "abandoned" | "timed_out");
+            let new_state = if lifecycle_finished
+                && (current_state == "open" || retryable_discard)
             {
-                Some("discarded")
-            } else if lifecycle_completed && (current_state == "open" || retryable_discard) {
                 if has_material {
                     Some("new")
                 } else {

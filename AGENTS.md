@@ -219,7 +219,7 @@ Both SDKs wrap the CLI binary via subprocess — they are not native Rust FFI bi
 | Path | Description |
 |---|---|
 | `sdks/python/` | Python SDK (`innate-py`) — subprocess wrapper, zero deps, API-compatible with core |
-| `sdks/typescript/` | TypeScript SDK (`@innate/sdk`) — CLI subprocess + async MCP client |
+| `sdks/typescript/` | TypeScript SDK (`@vima-tech/sdk`) — CLI subprocess + async MCP client |
 
 ## MCP Tool Reference (`innate mcp`)
 

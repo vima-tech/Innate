@@ -28,12 +28,6 @@ CREATE TABLE IF NOT EXISTS processed_events (
     ts         TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS trace_context (
-    watch_path TEXT PRIMARY KEY,
-    trace_id   TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS daemon_errors (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     watch_path TEXT,

@@ -60,7 +60,7 @@ cargo install innate
 pip install innate-ai
 
 # npm 安装器——自动下载预编译二进制，无需 Rust
-npm install -g @vima_tech/innate
+npm install -g @vima-tech/innate
 
 # 从源码编译
 cd core && cargo build --release
@@ -102,8 +102,24 @@ pip install innate-py
 
 ### TypeScript SDK（程序化调用）
 
+TS SDK 发布在 **GitHub Packages**，即使是公开包也需要认证。先创建一个带 `read:packages`
+权限的 [classic personal access token](https://github.com/settings/tokens)（GitHub Packages
+的 npm registry 不支持 fine-grained token），写入 `~/.npmrc`：
+
+```
+//npm.pkg.github.com/:_authToken=YOUR_TOKEN
+```
+
+再在项目的 `.npmrc` 里把 `@vima-tech` scope 指向 GitHub Packages（该文件应提交进仓库）：
+
+```
+@vima-tech:registry=https://npm.pkg.github.com
+```
+
+然后安装：
+
 ```bash
-npm install @innate/sdk
+npm install @vima-tech/sdk
 ```
 
 ### MCP 服务 (Claude Code / Claude Desktop)
@@ -250,7 +266,7 @@ report = kb.inspect()
 ## TypeScript SDK
 
 ```typescript
-import { KnowledgeBase, McpClient } from "@innate/sdk";
+import { KnowledgeBase, McpClient } from "@vima-tech/sdk";
 
 // CLI subprocess 模式 (同步, 适合脚本)
 const kb = new KnowledgeBase({ dbPath: "personal.db" });
@@ -340,7 +356,7 @@ Daemon (innate daemon start)   ──> CLI ────────────�
 | **MCP** | 直接调用 Core lib | JSON-RPC 2.0 over stdio；15 个工具；供 Claude Code / Claude Desktop 使用 |
 | **CLI** | 直接调用 Core lib | clap 薄封装；完整 Public API 的命令行入口 |
 | **Python SDK** | subprocess 调用 CLI | `innate-py`，零额外依赖 |
-| **TypeScript SDK** | subprocess 调用 CLI + async MCP client | `@innate/sdk`，Node.js 18+ |
+| **TypeScript SDK** | subprocess 调用 CLI + async MCP client | `@vima-tech/sdk`，Node.js 18+ |
 | **Daemon** | subprocess 调用 CLI | 后台监听日志/JSON Hook；自动触发 recall/record/evolve；事件幂等、会话 trace、错误统计、断点续读（Linux only） |
 
 ```
@@ -357,7 +373,7 @@ Innate System
 │
 ├── SDKs
 │   ├── sdks/python/             innate-py  — subprocess → CLI, 零额外依赖
-│   └── sdks/typescript/         @innate/sdk — CLI subprocess + async MCP client
+│   └── sdks/typescript/         @vima-tech/sdk — CLI subprocess + async MCP client
 │
 └── skills/innate-memory/        SKILL.md (MCP 工具为主, CLI 为 fallback)
 ```

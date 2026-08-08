@@ -143,6 +143,94 @@ fn abandoned_session_only_trace_is_retired_immediately() {
     assert_eq!(event_count(&kb, &res.trace_id, "selected"), 0);
 }
 
+/// A capture channel that cannot judge success still leaves a usable summary
+/// behind. Distillation eligibility must follow the material, not the outcome.
+#[test]
+fn abandoned_session_with_material_is_distillable_without_an_outcome() {
+    let (kb, _f) = tmp_kb();
+    seed_chunk(&kb);
+    let res = kb
+        .recall(RecallParams {
+            query: "alpha beta gamma",
+            budget: 4000,
+            trace: true,
+            source: "hook",
+            ..Default::default()
+        })
+        .unwrap();
+
+    kb.record(RecordParams {
+        trace_id: &res.trace_id,
+        outcome: Some("unknown"),
+        output_summary: Some("tried the flag, hit a dimension guard, worked around it"),
+        task_state: Some("abandoned"),
+        source: "hook",
+        ..Default::default()
+    })
+    .unwrap();
+
+    let log = kb.storage.get_episodic_log(&res.trace_id).unwrap().unwrap();
+    assert_eq!(
+        log["distill_state"].as_str(),
+        Some("new"),
+        "material from a channel that cannot judge success must still reach the distiller"
+    );
+}
+
+/// The other half of the decoupling, and the invariant it must not break: an
+/// unknown outcome may unlock distillation, but it must never move a score —
+/// even when the caller also claims the chunk was used.
+#[test]
+fn unknown_outcome_unlocks_distillation_without_moving_confidence() {
+    let (kb, _f) = tmp_kb();
+    let chunk_id = kb
+        .add(
+            "alpha beta gamma",
+            "note",
+            Some("alpha beta gamma"),
+            None,
+            "manual",
+            None,
+        )
+        .unwrap();
+    let before = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
+        .as_f64()
+        .unwrap();
+
+    let res = kb
+        .recall(RecallParams {
+            query: "alpha beta gamma",
+            budget: 4000,
+            trace: true,
+            source: "hook",
+            ..Default::default()
+        })
+        .unwrap();
+
+    let used = vec![chunk_id.clone()];
+    kb.record(RecordParams {
+        trace_id: &res.trace_id,
+        outcome: Some("unknown"),
+        output_summary: Some("did some work, cannot tell whether it succeeded"),
+        used: Some(&used),
+        task_state: Some("abandoned"),
+        source: "hook",
+        ..Default::default()
+    })
+    .unwrap();
+
+    let log = kb.storage.get_episodic_log(&res.trace_id).unwrap().unwrap();
+    assert_eq!(log["distill_state"].as_str(), Some("new"));
+
+    let after = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["confidence"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "an unknown outcome must never move confidence, even when it unlocks distillation"
+    );
+}
+
 #[test]
 fn empty_recall_is_parked_as_known_none_not_open() {
     let (kb, _f) = tmp_kb();

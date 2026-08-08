@@ -492,11 +492,15 @@ impl KnowledgeBase {
                 "SELECT id FROM chunks
                  WHERE state='pending' AND origin!='spark'
                    AND used_success_count >= ?
-                   AND success_trace_ids_count >= 2
+                   AND success_trace_ids_count >= ?
                    AND confidence >= ?
                    AND (? IS NULL OR origin=?)
                    AND (? IS NULL OR skill_name=?)",
                 rusqlite::params![
+                    self.promote_used_success_min,
+                    // Both counters are derived from the same trace-deduped
+                    // aggregate, so they share one threshold; a literal here
+                    // would silently pin the gate above a lower configured min.
                     self.promote_used_success_min,
                     self.promote_confidence_min,
                     scope_origin,
@@ -513,6 +517,7 @@ impl KnowledgeBase {
                         Some("repeated_success"),
                         &now_iso,
                     )?;
+                    report.promoted.push(id.to_string());
                 }
             }
 
