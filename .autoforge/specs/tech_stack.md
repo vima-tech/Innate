@@ -2,7 +2,7 @@
 
 ## Rust 核心
 
-核心使用 Rust edition 2021 编写，包名 innate，当前版本 0.1.20；release profile 启用 LTO、codegen-units=1、strip=true 以优化二进制体积。
+核心使用 Rust edition 2021 编写，包名 innate，当前版本 0.1.21；release profile 启用 LTO、codegen-units=1、strip=true 以优化二进制体积。
 
 ---
 
@@ -14,7 +14,7 @@
 
 ## SDK 语言与版本
 
-Python SDK（innate-py）要求 Python ≥3.10，零运行时依赖，dev 依赖 pytest≥7；TypeScript SDK（@innate/sdk）要求 Node ≥18、TypeScript ≥5，零运行时依赖。
+Python SDK（innate-py）要求 Python ≥3.10，零运行时依赖，dev 依赖 pytest≥7；TypeScript SDK（@vima-tech/sdk）要求 Node ≥18、TypeScript ≥5，零运行时依赖。
 
 ---
 
