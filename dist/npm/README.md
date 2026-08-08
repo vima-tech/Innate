@@ -1,12 +1,16 @@
-# @vima_tech/innate
+# @vima-tech/innate
 
 > Self-growing procedural knowledge layer for AI agents.
 
 ## Install
 
 ```bash
-npm install -g @vima_tech/innate
+npm install -g @vima-tech/innate
 ```
+
+Published to both npmjs.org and GitHub Packages. The npmjs.org copy needs no
+authentication; the GitHub Packages copy requires a classic personal access token
+with `read:packages` (see the [install guide](https://github.com/vima-tech/Innate#installation)).
 
 After installation, run the setup wizard:
 

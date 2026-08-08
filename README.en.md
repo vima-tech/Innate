@@ -67,6 +67,10 @@ cd core && cargo build --release
 cp target/release/innate ~/.local/bin/
 ```
 
+`@vima-tech/innate` is published to both npmjs.org and GitHub Packages. The npmjs.org copy
+needs no authentication; the GitHub Packages copy requires a classic PAT with `read:packages`
+(setup shown in the TypeScript SDK section below).
+
 Verify the install:
 
 ```bash

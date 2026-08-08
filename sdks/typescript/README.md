@@ -33,7 +33,8 @@ even for public packages.
    ```
 
 The SDK shells out to the `innate` binary, so install that too —
-`npm install -g @vima-tech/innate` (published on npmjs.org) or see the
+`npm install -g @vima-tech/innate` (published to both npmjs.org and GitHub Packages,
+so it resolves with or without the scope mapping above) or see the
 [installation guide](https://github.com/vima-tech/Innate#installation).
 
 ## Usage

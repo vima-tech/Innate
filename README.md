@@ -67,6 +67,9 @@ cd core && cargo build --release
 cp target/release/innate ~/.local/bin/
 ```
 
+`@vima-tech/innate` 同时发布在 npmjs.org 和 GitHub Packages。npmjs.org 上的副本无需认证；
+GitHub Packages 上的副本需要带 `read:packages` 的 classic PAT（配置方式见下方 TypeScript SDK 一节）。
+
 验证安装：
 
 ```bash

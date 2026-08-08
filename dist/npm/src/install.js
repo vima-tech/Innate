@@ -23,7 +23,7 @@ async function download(url, dest) {
   return new Promise((resolve, reject) => {
     const follow = (u) => {
       const mod = u.startsWith('https') ? https : http;
-      mod.get(u, { headers: { 'User-Agent': `@vima_tech/innate/${version}` } }, (res) => {
+      mod.get(u, { headers: { 'User-Agent': `@vima-tech/innate/${version}` } }, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           follow(res.headers.location);
           return;
@@ -90,7 +90,7 @@ async function main() {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   const tmp = path.join(os.tmpdir(), `innate-${Date.now()}${ext}`);
 
-  console.log(`\n@vima_tech/innate: installing innate v${version} (${target})`);
+  console.log(`\n@vima-tech/innate: installing innate v${version} (${target})`);
   try {
     await download(binUrl, tmp);
     await verifyChecksum(tmp, sumUrl);
@@ -100,7 +100,7 @@ async function main() {
     console.log(`  ✓ Installed to ${BIN_PATH}\n`);
   } catch (e) {
     fs.rmSync(tmp, { force: true });
-    console.error(`\n@vima_tech/innate: installation failed — ${e.message}`);
+    console.error(`\n@vima-tech/innate: installation failed — ${e.message}`);
     console.error('  Install manually: https://github.com/vima-tech/Innate/releases\n');
     // Don't exit 1 — allow npm install to succeed; binary just won't be there.
   }
