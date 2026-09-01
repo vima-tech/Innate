@@ -33,6 +33,21 @@ pub struct RecallParams<'a> {
     /// callers ("deep recall"). No-op unless a reranker was injected (LLM configured),
     /// and non-fatal: a reranker error falls back to the fused order.
     pub rerank: bool,
+    /// Retrieve from the lexical/BM25 channel alone, skipping the query
+    /// embedding entirely.
+    ///
+    /// The remote embedding is the single most expensive thing recall does —
+    /// ~2 s at the median, and it is paid on every prompt by the always-on
+    /// hooks. Two callers do not need it:
+    ///   * `SessionStart`, whose "query" is just the project directory name. A
+    ///     bare folder name carries no semantics an embedding can exploit, and
+    ///     the lexical channel matches it exactly.
+    ///   * any hook whose embedding call failed — degrading to lexical beats
+    ///     returning nothing.
+    ///
+    /// Vector search is skipped rather than run against a zero vector, so this
+    /// also avoids loading the embedding cache.
+    pub lexical_only: bool,
 }
 
 impl KnowledgeBase {
@@ -45,7 +60,12 @@ impl KnowledgeBase {
             "recall"
         };
         let src = params.source.to_string();
-        self.measure(op, Some(&src), None, || self.recall_inner(params))
+        self.measure_with(
+            op,
+            Some(&src),
+            |r: &RecallResult| Some(r.trace_id.clone()),
+            || self.recall_inner(params),
+        )
     }
 
     fn recall_inner(&self, params: RecallParams<'_>) -> Result<RecallResult> {
@@ -62,6 +82,7 @@ impl KnowledgeBase {
             min_score,
             session_only,
             rerank,
+            lexical_only,
         } = params;
         let expand_deps = if expand_deps.is_empty() {
             "false"
@@ -100,11 +121,15 @@ impl KnowledgeBase {
         // `embed` op (§5.3 first batch): time the query embedding at the call site so
         // embedding health (latency / arrearage) is aggregatable, without wrapping the
         // provider. Nested inside the recall/hook_recall measure — both rows are written.
-        let (q_content, q_trigger) = self.measure("embed", Some(source), None, || {
-            self.embedding
-                .embed_both(&embed_query)
-                .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))
-        })?;
+        let (q_content, q_trigger) = if lexical_only {
+            (Vec::new(), Vec::new())
+        } else {
+            self.measure("embed", Some(source), None, || {
+                self.embedding
+                    .embed_both(&embed_query)
+                    .map_err(|e| InnateError::EmbeddingUnavailable(e.to_string()))
+            })?
+        };
 
         // ANN candidates (non-spark) — vector channels + lexical/BM25 (hybrid).
         let mut candidates = self.ann_candidates(&q_content, &q_trigger, query)?;
@@ -533,6 +558,25 @@ impl KnowledgeBase {
             let activation = actr_activation(used_count, last_used_at, now);
             // Per-channel weighted contributions — these sum to the (pre-penalty)
             // fused score and double as the explainability breakdown (N4).
+            // Length normalisation. A long chunk touches more of the embedding
+            // space and matches almost any query: measured on the live library,
+            // 800–2k byte chunks were selected 6× more often per chunk than
+            // 300–800 byte ones yet converted to a `used` event *less* often
+            // (2.5% vs 4.0%). Penalise only past the free allowance, and grow
+            // logarithmically so a genuinely long-but-right chunk can still win.
+            let content_len = info
+                .chunk
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::len)
+                .unwrap_or(0) as f64;
+            let length_penalty = if self.length_penalty > 0.0
+                && content_len > self.length_penalty_free_bytes
+            {
+                -self.length_penalty * (content_len / self.length_penalty_free_bytes).ln()
+            } else {
+                0.0
+            };
             let contribs = [
                 ("content", self.w_content * info.sim_content as f64),
                 ("trigger", self.w_trigger * info.sim_trigger as f64),
@@ -541,6 +585,7 @@ impl KnowledgeBase {
                 ("confidence", self.w_confidence * conf),
                 ("context", self.w_context * context_score),
                 ("activation", self.w_activation * activation),
+                ("length", length_penalty),
             ];
             let mut fused: f64 = contribs.iter().map(|(_, c)| c).sum();
             let mut gate_score = fused;
@@ -563,6 +608,10 @@ impl KnowledgeBase {
             chunk["_sim_spread"] = json!(info.sim_spread);
             chunk["_gate_score"] = json!(gate_score);
             chunk["_fused_score"] = json!(fused);
+            // Surfaced separately: `match_reason` only lists positive
+            // contributions, so without this the penalty would be invisible in
+            // the playground / provenance views.
+            chunk["_length_penalty"] = json!(length_penalty);
             chunk["match_reason"] = match_reason(&contribs);
             scored.push((fused, chunk));
         }

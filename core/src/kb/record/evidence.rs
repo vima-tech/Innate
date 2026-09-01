@@ -1,26 +1,23 @@
 use super::super::*;
+use super::{RecordReport, UnattributedRef};
 
 impl KnowledgeBase {
-    pub(super) fn validate_trace_attribution(
+    /// The set of chunk ids this trace may attribute usage/feedback to: whatever
+    /// `recall` recorded in the trace's `recall_snapshot.selected`, plus any
+    /// `selected` rows in `usage_trace`.
+    ///
+    /// `existing_log` is passed in rather than re-read so the caller can compute
+    /// the set *before* deciding whether to insert a fresh episodic log.
+    pub(super) fn attributable_chunk_ids(
         &self,
         trace_id: &str,
-        chunk_ids: Option<&[String]>,
-        field: &str,
-    ) -> Result<()> {
-        let Some(chunk_ids) = chunk_ids else {
-            return Ok(());
-        };
-        if chunk_ids.is_empty() {
-            return Ok(());
-        }
-
-        let log = self.storage.get_episodic_log(trace_id)?.ok_or_else(|| {
-            InnateError::InvalidState(format!(
-                "{field} requires a trace created by recall: {trace_id}"
-            ))
-        })?;
+        existing_log: Option<&Value>,
+    ) -> Result<HashSet<String>> {
         let mut attributable = HashSet::new();
-        if let Some(raw) = log.get("recall_snapshot").and_then(Value::as_str) {
+        if let Some(raw) = existing_log
+            .and_then(|log| log.get("recall_snapshot"))
+            .and_then(Value::as_str)
+        {
             if let Ok(snapshot) = serde_json::from_str::<Value>(raw) {
                 if let Some(ids) = snapshot.get("selected").and_then(Value::as_array) {
                     attributable.extend(ids.iter().filter_map(Value::as_str).map(str::to_string));
@@ -38,15 +35,55 @@ impl KnowledgeBase {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         }));
+        Ok(attributable)
+    }
 
+    /// Drop the ids of `chunk_ids` that this trace cannot attribute, keeping the
+    /// rest, and append what was dropped to `report`.
+    ///
+    /// This used to reject the whole call: one stale or mistyped id and an
+    /// agent's entire record — including the chunks it genuinely applied — was
+    /// thrown away with `InvalidState`. On the live library that killed 16% of
+    /// all MCP records, in a system whose scarcest resource is feedback.
+    /// Partial credit is strictly better than none, and the caller is told
+    /// exactly what did not stick.
+    ///
+    /// Returns `None` when no id survived, so a caller reporting only
+    /// unattributable ids is treated as having supplied no usage information at
+    /// all rather than an explicit empty set (which, with `used_complete`,
+    /// would erase previously recorded attribution).
+    pub(super) fn filter_attributable(
+        &self,
+        chunk_ids: Option<&[String]>,
+        attributable: &HashSet<String>,
+        field: &'static str,
+        report: &mut RecordReport,
+    ) -> Result<Option<Vec<String>>> {
+        let Some(chunk_ids) = chunk_ids else {
+            return Ok(None);
+        };
+        if chunk_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut kept = Vec::with_capacity(chunk_ids.len());
         for chunk_id in chunk_ids {
-            if self.storage.get_chunk(chunk_id)?.is_none() || !attributable.contains(chunk_id) {
-                return Err(InnateError::InvalidState(format!(
-                    "{field} chunk {chunk_id} was not attributable to trace {trace_id}"
-                )));
+            let reason = if self.storage.get_chunk(chunk_id)?.is_none() {
+                Some("unknown_chunk")
+            } else if !attributable.contains(chunk_id) {
+                Some("not_selected_by_trace")
+            } else {
+                None
+            };
+            match reason {
+                Some(reason) => report.unattributed.push(UnattributedRef {
+                    field,
+                    chunk_id: chunk_id.clone(),
+                    reason,
+                }),
+                None => kept.push(chunk_id.clone()),
             }
         }
-        Ok(())
+        Ok((!kept.is_empty()).then_some(kept))
     }
 
     pub(super) fn replace_selected_unused_evidence(

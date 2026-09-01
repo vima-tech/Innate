@@ -34,14 +34,39 @@ pub struct RecordParams<'a> {
     pub verdict_heeded: bool,
 }
 
+/// A chunk id that `record` could not attribute to the trace, and why.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnattributedRef {
+    /// Which parameter it came from: `used`, `feedback_up` or `feedback_down`.
+    pub field: &'static str,
+    pub chunk_id: String,
+    /// `unknown_chunk` (no such chunk) or `not_selected_by_trace`.
+    pub reason: &'static str,
+}
+
+/// What [`KnowledgeBase::record`] applied.
+///
+/// A record is never rejected wholesale for naming a chunk the trace cannot
+/// attribute; the offending ids land here and everything else is applied.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RecordReport {
+    pub unattributed: Vec<UnattributedRef>,
+}
+
+impl RecordReport {
+    pub fn is_clean(&self) -> bool {
+        self.unattributed.is_empty()
+    }
+}
+
 impl KnowledgeBase {
-    pub fn record(&self, params: RecordParams<'_>) -> Result<()> {
+    pub fn record(&self, params: RecordParams<'_>) -> Result<RecordReport> {
         let tid = params.trace_id.to_string();
         let src = params.source.to_string();
         self.measure("record", Some(&src), Some(&tid), || self.record_inner(params))
     }
 
-    fn record_inner(&self, params: RecordParams<'_>) -> Result<()> {
+    fn record_inner(&self, params: RecordParams<'_>) -> Result<RecordReport> {
         let RecordParams {
             trace_id,
             query,
@@ -130,10 +155,28 @@ impl KnowledgeBase {
         let lib_id = self.storage.lib_id()?;
 
         self.storage.begin_immediate()?;
+        let mut report = RecordReport::default();
         let result = (|| -> Result<()> {
-            let log = self.storage.get_episodic_log(trace_id)?;
+            let existing_log = self.storage.get_episodic_log(trace_id)?;
+            // Attribution is resolved *before* the fresh-insert branch below, so
+            // the log we may be about to write already carries the filtered ids.
+            let attributable = self.attributable_chunk_ids(trace_id, existing_log.as_ref())?;
+            let filtered_used =
+                self.filter_attributable(used, &attributable, "used", &mut report)?;
+            let filtered_up =
+                self.filter_attributable(feedback_up, &attributable, "feedback_up", &mut report)?;
+            let filtered_down = self.filter_attributable(
+                feedback_down,
+                &attributable,
+                "feedback_down",
+                &mut report,
+            )?;
+            let used = filtered_used.as_deref();
+            let feedback_up = filtered_up.as_deref();
+            let feedback_down = filtered_down.as_deref();
+
             let mut is_fresh_insert = false;
-            let log = match log {
+            let log = match existing_log {
                 Some(l) => l,
                 None => {
                     let used_ids = used.map(serde_json::to_string).transpose()?;
@@ -170,10 +213,6 @@ impl KnowledgeBase {
                     self.storage.get_episodic_log(trace_id)?.unwrap()
                 }
             };
-            self.validate_trace_attribution(trace_id, used, "used")?;
-            self.validate_trace_attribution(trace_id, feedback_up, "feedback_up")?;
-            self.validate_trace_attribution(trace_id, feedback_down, "feedback_down")?;
-
             let existing_outcome = log
                 .get("outcome")
                 .and_then(Value::as_str)
@@ -568,6 +607,6 @@ impl KnowledgeBase {
         }
         result?;
         self.enqueue_evolve_if_needed(&now)?;
-        Ok(())
+        Ok(report)
     }
 }

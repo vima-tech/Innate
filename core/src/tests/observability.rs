@@ -151,6 +151,7 @@ fn recall_snapshot_is_schema_2_with_channels_scores_packing() {
             min_score: None,
             session_only: false,
             rerank: false,
+            lexical_only: false,
         })
         .unwrap();
     let snap: String = kb

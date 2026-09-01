@@ -37,9 +37,20 @@ pub fn run_watch_loop(
 
     // Main poll loop: 500 ms tick.
     let mut last_evolve_poll = std::time::Instant::now();
-    const EVOLVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    // 5 minutes, not 60 s. Each tick spawns an `innate evolve` subprocess that
+    // opens the db and loads every embedding into memory; at 60 s that cost was
+    // paid ~43k times a month to distil a few hundred chunks. Curate is
+    // additionally throttled inside `evolve` by `curate.min_interval_minutes`,
+    // so this timer now only governs how fast a *pending distill request* is
+    // picked up — and session_end triggers one directly anyway.
+    const EVOLVE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
     let mut last_backup_poll = std::time::Instant::now();
     const BACKUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    // `processed_events` is an idempotency ledger, not history: once a log line
+    // is far enough behind the read offset that it can never be re-read, its row
+    // is dead weight. Unpruned it had grown to ~13k rows / 3.3 MB.
+    let mut last_prune = std::time::Instant::now();
+    const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
     loop {
         for dir in watch_dirs {
             let dir_path = std::path::Path::new(dir);
@@ -69,6 +80,10 @@ pub fn run_watch_loop(
             }
             last_evolve_poll = std::time::Instant::now();
         }
+        if last_prune.elapsed() >= PRUNE_INTERVAL {
+            prune_daemon_state(&state_db);
+            last_prune = std::time::Instant::now();
+        }
         if last_backup_poll.elapsed() >= BACKUP_POLL_INTERVAL {
             // Only attempt a backup when R2 backup is actually configured + enabled.
             // Otherwise `innate backup run` exits non-zero every cycle, spamming the log
@@ -92,6 +107,35 @@ pub fn run_watch_loop(
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
+}
+
+/// Retention for the daemon's own state db.
+///
+/// `processed_events` exists solely so a line already handled is not handled
+/// twice; a row older than the window can no longer be reached, because the
+/// watch offset has long since moved past it. `daemon_errors` is capped the same
+/// way so a bad week cannot grow without bound. Best-effort — a prune failure is
+/// never worth stopping the daemon for.
+fn prune_daemon_state(state_db: &rusqlite::Connection) {
+    const RETAIN_DAYS: i64 = 30;
+    let cutoff = {
+        use chrono::{DateTime, Duration, Utc};
+        let now = crate::utils::utc_now_iso();
+        match now.parse::<DateTime<Utc>>() {
+            Ok(t) => (t - Duration::days(RETAIN_DAYS))
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            Err(_) => return,
+        }
+    };
+    let _ = state_db.execute(
+        "DELETE FROM processed_events WHERE ts < ?",
+        rusqlite::params![cutoff],
+    );
+    let _ = state_db.execute(
+        "DELETE FROM daemon_errors WHERE ts < ?",
+        rusqlite::params![cutoff],
+    );
 }
 
 pub(in crate::daemon) fn process_log_file(
@@ -243,7 +287,10 @@ pub(in crate::daemon) fn process_log_file(
             }
             match result {
                 Ok(()) => {
-                    let _ = call_cli_evolve(db_path, "scheduled");
+                    // The `manual` evolve above already distilled and curated.
+                    // The extra `scheduled` call that used to follow it was a
+                    // pure duplicate — it is why every session end wrote two
+                    // "end evolve ok" lines and paid twice for one session.
                     let _ = writeln!(log, "{ts} [daemon] end evolve ok");
                 }
                 Err(e) => {

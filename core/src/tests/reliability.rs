@@ -108,19 +108,24 @@ fn inspect_includes_pending_oldest_ts() {
 }
 
 #[test]
-fn record_rejects_chunk_not_attributed_to_trace() {
+fn record_drops_chunk_not_attributed_to_trace() {
+    // A record naming a chunk this trace never selected is *not* rejected: the
+    // rest of the call still lands and the offending id is reported back. The
+    // chunk itself must gain nothing — no used_count, no confidence credit.
     let (kb, _file) = tmp_kb();
     let chunk_id = kb
         .add("unattributed", "note", Some("u"), None, "manual", None)
         .unwrap();
-    let error = kb
+    let before = kb.storage.get_chunk(&chunk_id).unwrap().unwrap();
+    let trace_id = crate::utils::gen_uuid();
+    let report = kb
         .record(RecordParams {
-            trace_id: &crate::utils::gen_uuid(),
+            trace_id: &trace_id,
             query: Some("q"),
             output: None,
             output_summary: None,
             outcome: Some("ok"),
-            used: Some(&[chunk_id]),
+            used: Some(std::slice::from_ref(&chunk_id)),
             feedback_up: None,
             feedback_down: None,
             nomination: None,
@@ -128,8 +133,21 @@ fn record_rejects_chunk_not_attributed_to_trace() {
             source: "sdk",
             ..Default::default()
         })
-        .unwrap_err();
-    assert!(matches!(error, InnateError::InvalidState(_)));
+        .unwrap();
+
+    assert_eq!(report.unattributed.len(), 1);
+    assert_eq!(report.unattributed[0].chunk_id, chunk_id);
+    assert_eq!(report.unattributed[0].field, "used");
+    assert_eq!(report.unattributed[0].reason, "not_selected_by_trace");
+
+    // The outcome was still recorded against the trace.
+    let log = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
+    assert_eq!(log["outcome"].as_str(), Some("ok"));
+
+    // …but the unattributable chunk received no credit.
+    let after = kb.storage.get_chunk(&chunk_id).unwrap().unwrap();
+    assert_eq!(after["used_count"], before["used_count"]);
+    assert_eq!(after["confidence"], before["confidence"]);
 }
 
 #[test]

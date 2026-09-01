@@ -20,7 +20,12 @@ pub mod metrics;
 mod raw;
 mod traces;
 
-const EXPECTED_SCHEMA_VERSION: &str = "4.21";
+/// Schema version this build understands.
+///
+/// Kept identical to `migrate::target_version()` — they drifted once (a bump to
+/// the migration chain without a bump here made every command print
+/// "db schema 4.22 > expected 4.21"), so the test below pins them together.
+const EXPECTED_SCHEMA_VERSION: &str = "4.22";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("../schema.sql");
@@ -320,5 +325,19 @@ impl<T> OptionalExt<T> for rusqlite::Result<T> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_version_tests {
+    /// The migrator's target and the runtime's expectation are two constants
+    /// describing one fact; bumping only one produces a spurious
+    /// "db schema X > expected Y" warning on every command.
+    #[test]
+    fn expected_version_matches_migration_target() {
+        assert_eq!(
+            super::EXPECTED_SCHEMA_VERSION,
+            crate::migrate::target_version()
+        );
     }
 }

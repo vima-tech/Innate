@@ -332,7 +332,8 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
             "4.17→4.18",
             "4.18→4.19",
             "4.19→4.20",
-            "4.20→4.21"
+            "4.20→4.21",
+            "4.21→4.22"
         ]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();
@@ -413,7 +414,8 @@ fn migration_4_14_repairs_existing_4_13_baselines_and_cost_history() {
             "4.17→4.18",
             "4.18→4.19",
             "4.19→4.20",
-            "4.20→4.21"
+            "4.20→4.21",
+            "4.21→4.22"
         ]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();

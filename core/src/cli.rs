@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use serde_json::json;
+use serde_json::{json, Value};
 
 pub use crate::backup::BackupCommands;
 pub use crate::daemon::DaemonCommands;
@@ -63,6 +63,11 @@ pub enum Commands {
         /// latency-tolerant). No-op without an LLM; never used by hooks.
         #[arg(long)]
         rerank: bool,
+        /// Skip the remote query embedding and retrieve from the lexical/BM25
+        /// channel alone. Local and instant; useful when the embedding endpoint
+        /// is slow or unavailable.
+        #[arg(long)]
+        lexical_only: bool,
     },
     /// Critic: judge how much footing exists for a candidate in a situation.
     /// Returns {valence, strength, tier, flagged_points} — never an answer.
@@ -305,6 +310,21 @@ pub enum Commands {
     Hook {
         #[command(subcommand)]
         action: HookCommands,
+        /// Which agent product this hook belongs to (`claude-code`, `codex`, …).
+        ///
+        /// The MCP channel gets its identity from the `INNATE_AGENT` env var in
+        /// the agent's MCP config, but hooks are plain commands with no env of
+        /// their own — so every hook-sourced row landed with a NULL agent, and
+        /// the by-agent observability dimension covered 0% of the busiest
+        /// channel. `innate install` writes this flag into the hook command.
+        /// A flag rather than a shell `VAR=value` prefix: it does not assume the
+        /// host runs hooks through a shell.
+        ///
+        /// `global` so it parses in the position the installed command actually
+        /// uses it — after the subcommand (`innate hook prompt --agent X`),
+        /// which a plain parent-level arg rejects.
+        #[arg(long, global = true)]
+        agent: Option<String>,
     },
 }
 
@@ -312,6 +332,18 @@ pub enum Commands {
 pub enum MetricsAction {
     /// Write a state-KPI snapshot row now (debt ratio, pending age, success rates …).
     Snapshot,
+    /// KPI baseline vs now — what actually moved since a snapshot N days ago.
+    ///
+    /// `inspect` answers "how is the library right now"; this answers "did the
+    /// last change help", which is the question a tuning pass actually asks.
+    /// Reads `metric_snapshots`, so it costs nothing and needs no extra state.
+    Delta {
+        /// How many days back to take the baseline from.
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -361,7 +393,14 @@ pub fn run() -> anyhow::Result<()> {
         return crate::upgrade::run_upgrade(version.as_deref(), &db_path, *check);
     }
 
-    if let Commands::Hook { action } = &cli.command {
+    if let Commands::Hook { action, agent } = &cli.command {
+        // `agent_source()` reads INNATE_AGENT, so the flag simply seeds it for
+        // this process before anything opens the knowledge base.
+        if let Some(agent) = agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            if std::env::var_os("INNATE_AGENT").is_none() {
+                std::env::set_var("INNATE_AGENT", agent);
+            }
+        }
         return crate::hook::run_command(action, &db_path);
     }
 
@@ -381,6 +420,7 @@ pub fn run() -> anyhow::Result<()> {
             min_score,
             session,
             rerank,
+            lexical_only,
         } => {
             let result = kb.recall(RecallParams {
                 query: &query,
@@ -395,6 +435,7 @@ pub fn run() -> anyhow::Result<()> {
                 min_score,
                 session_only: session,
                 rerank,
+                lexical_only,
             })?;
             match format.as_str() {
                 "json" => println!(
@@ -558,7 +599,7 @@ pub fn run() -> anyhow::Result<()> {
                 };
             let fb_up_ref = fb_up.as_deref();
             let fb_down_ref = fb_down.as_deref();
-            kb.record(RecordParams {
+            let report = kb.record(RecordParams {
                 trace_id: &trace_id,
                 query: query.as_deref(),
                 output: output.as_deref(),
@@ -578,7 +619,20 @@ pub fn run() -> anyhow::Result<()> {
                 source: &source,
                 verdict_heeded,
             })?;
-            println!("recorded");
+            if report.is_clean() {
+                println!("recorded");
+            } else {
+                // Not an error: the rest of the record was applied. Naming the
+                // dropped ids on stderr keeps stdout's JSON/plain contract intact
+                // while still telling the caller what did not stick.
+                println!("recorded");
+                for dropped in &report.unattributed {
+                    eprintln!(
+                        "warning: {} chunk {} dropped ({})",
+                        dropped.field, dropped.chunk_id, dropped.reason
+                    );
+                }
+            }
         }
         Commands::Add {
             content,
@@ -683,6 +737,14 @@ pub fn run() -> anyhow::Result<()> {
             MetricsAction::Snapshot => {
                 let kpis = kb.write_metric_snapshot()?;
                 println!("{}", serde_json::to_string_pretty(&kpis)?);
+            }
+            MetricsAction::Delta { days, format } => {
+                let report = kb.metrics_delta(days)?;
+                if format == "json" {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    print_metrics_table(&report);
+                }
             }
         },
         Commands::Vacuum => {
@@ -955,6 +1017,57 @@ pub(crate) fn recall_metrics(
         .sum();
     let ndcg = if idcg > 0.0 { dcg / idcg } else { 0.0 };
     (p_at_1, recall_at_k, mrr, ndcg)
+}
+
+/// Render `KnowledgeBase::metrics_delta` as a fixed-width table.
+///
+/// Deltas are shown as raw differences rather than percentages: several KPIs are
+/// themselves rates, and a "percent change of a percentage" is a reliable way to
+/// mislead the person reading it.
+fn print_metrics_table(report: &Value) {
+    let base_ts = report
+        .get("baseline_ts")
+        .and_then(Value::as_str)
+        .unwrap_or("(none)");
+    let cur_ts = report
+        .get("current_ts")
+        .and_then(Value::as_str)
+        .unwrap_or("(none)");
+    println!("baseline  {base_ts}");
+    println!("current   {cur_ts}");
+    if report.get("baseline").map(Value::is_null).unwrap_or(true) {
+        println!(
+            "\nNo snapshot old enough for a baseline yet — \
+             snapshots are written by curate, at most one per ~20h."
+        );
+    }
+    println!();
+    println!("{:<32} {:>14} {:>14} {:>14}", "metric", "baseline", "current", "delta");
+    println!("{}", "-".repeat(78));
+    let rows = report.get("metrics").and_then(Value::as_array);
+    for row in rows.into_iter().flatten() {
+        let name = row.get("metric").and_then(Value::as_str).unwrap_or("?");
+        let fmt = |key: &str| -> String {
+            match row.get(key) {
+                Some(Value::Number(n)) => {
+                    let f = n.as_f64().unwrap_or(0.0);
+                    if f.fract() == 0.0 && f.abs() < 1e15 {
+                        format!("{}", f as i64)
+                    } else {
+                        format!("{f:.3}")
+                    }
+                }
+                _ => "—".to_string(),
+            }
+        };
+        println!(
+            "{:<32} {:>14} {:>14} {:>14}",
+            name,
+            fmt("baseline"),
+            fmt("current"),
+            fmt("delta")
+        );
+    }
 }
 
 #[cfg(test)]

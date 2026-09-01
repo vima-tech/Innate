@@ -392,13 +392,13 @@ pub(super) fn remove_opencode_config() -> ConfigStatus {
 /// Append a Stop hook entry to the Claude Code settings at `config_path`.
 /// Uses the provided `binary` path so no Python interpreter is required.
 pub(super) fn configure_claude_stop_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "Stop", "hook stop")
+    configure_claude_hook(config_path, binary, "Stop", "hook stop --agent claude-code")
 }
 
 /// Append a UserPromptSubmit hook that recalls relevant knowledge for every prompt.
 /// This is the high-frequency, relevance-gated recall trigger (see `innate hook prompt`).
 pub(super) fn configure_claude_prompt_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "UserPromptSubmit", "hook prompt")
+    configure_claude_hook(config_path, binary, "UserPromptSubmit", "hook prompt --agent claude-code")
 }
 
 /// Append a SubagentStop hook so Task-tool subagents also feed session events to the daemon.
@@ -408,7 +408,7 @@ pub(super) fn configure_claude_subagent_stop_hook(
     config_path: &Path,
     binary: &Path,
 ) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "SubagentStop", "hook stop")
+    configure_claude_hook(config_path, binary, "SubagentStop", "hook stop --agent claude-code")
 }
 
 /// Append a SessionStart hook that warms up context with high-relevance project knowledge.
@@ -416,7 +416,7 @@ pub(super) fn configure_claude_session_start_hook(
     config_path: &Path,
     binary: &Path,
 ) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "SessionStart", "hook session-start")
+    configure_claude_hook(config_path, binary, "SessionStart", "hook session-start --agent claude-code")
 }
 
 /// Generic Claude Code hook installer: append `<binary> <subcommand>` to `hooks.<event>`.

@@ -82,6 +82,12 @@ Record **after** a task that produced a real outcome (success or failure). Skip 
 | Task failed, approach was wrong, user had to correct course | `fail` |
 | Session cut off, outcome unclear | `unknown` |
 
+> **Do not under-report `fail`.** A library that only ever hears about successes cannot
+> decay bad knowledge: confidence only rises, `task_success_rate` pins at 1.0, and the
+> rules that archive knowledge which keeps failing never fire. If the user had to correct
+> you, if the recalled chunk sent you down the wrong path, if the fix did not work — that
+> is `fail`, and it is worth more than another `ok`.
+
 ### Per-Chunk Verdict — Mandatory
 
 This is the single most important contract in Innate: confidence ranking is only as good as the

@@ -589,7 +589,8 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             "4.17→4.18",
             "4.18→4.19",
             "4.19→4.20",
-            "4.20→4.21"
+            "4.20→4.21",
+            "4.21→4.22"
         ]
     );
 
@@ -609,7 +610,9 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "4.21");
+    // Pinned to the migrator's own target so the chain and the recorded version
+    // can never drift apart.
+    assert_eq!(version, crate::migrate::target_version());
 }
 
 #[test]

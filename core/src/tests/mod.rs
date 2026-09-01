@@ -18,6 +18,7 @@ mod reliability;
 mod resilient_distill;
 mod restoration;
 mod trace_semantics;
+mod tuning_regressions;
 
 use crate::embedding::{DummyEmbeddingProvider, EmbeddingProvider};
 use crate::errors::{InnateError, Result};

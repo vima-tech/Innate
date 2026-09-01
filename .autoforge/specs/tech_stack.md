@@ -8,7 +8,7 @@
 
 ## SQLite 存储
 
-使用 rusqlite 0.32（bundled feature）作为唯一持久化引擎，schema 版本 4.21；向量相似度由 Rust 代码直接计算，不依赖 sqlite-vec 扩展。
+使用 rusqlite 0.32（bundled feature）作为唯一持久化引擎，schema 版本 4.22；向量相似度由 Rust 代码直接计算，不依赖 sqlite-vec 扩展。
 
 ---
 

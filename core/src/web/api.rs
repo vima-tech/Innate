@@ -131,6 +131,9 @@ pub(crate) fn route(
         (Method::Get, ["api", "chunks", id, "provenance"]) => chunk_provenance(ctx, id, query),
 
         // Governance endpoints (token + same-origin required).
+        (Method::Post, ["api", "chunks", "batch", action]) => {
+            governance_batch(ctx, headers, action, body)
+        }
         (Method::Post, ["api", "chunk", id, action]) => governance(ctx, headers, id, action, body),
         (Method::Post, ["api", "daemon", "restart"]) => daemon_restart(ctx, headers),
 
@@ -301,6 +304,7 @@ fn playground(ctx: &Ctx, query: &str) -> Resp {
         min_score: None,
         session_only: false,
         rerank: false,
+        lexical_only: false,
     });
     match result {
         Ok(r) => json_resp(
@@ -451,6 +455,89 @@ fn governance(
         Ok(()) => json_resp(200, json!({ "ok": true, "id": id, "action": action })),
         Err(e) => err(400, &e.to_string()),
     }
+}
+
+/// Maximum ids accepted by one batch governance call.
+const BATCH_GOVERNANCE_MAX: usize = 200;
+
+/// `POST /api/chunks/batch/{approve|archive|invalidate|restore}` with
+/// `{"ids": [...], "reason": "..."}`.
+///
+/// Reviewing a pending queue one HTTP call at a time does not scale past a few
+/// dozen chunks, and the live library had 459 pending with the oldest 73 days
+/// old — the governance gate was jammed simply because working it was tedious.
+///
+/// Per-id failures are reported rather than aborting the batch: a stale id in a
+/// long list must not discard the reviewer's other 199 decisions.
+fn governance_batch(
+    ctx: &Ctx,
+    headers: &HashMap<String, String>,
+    action: &str,
+    body: &str,
+) -> Resp {
+    if !origin_ok(ctx, headers) {
+        return err(403, "cross-origin request rejected");
+    }
+    if !token_ok(ctx, headers) {
+        return err(403, "missing or invalid token");
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(body) else {
+        return err(400, "body must be JSON");
+    };
+    let ids: Vec<String> = payload
+        .get("ids")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return err(400, "ids must be a non-empty array");
+    }
+    if ids.len() > BATCH_GOVERNANCE_MAX {
+        return err(
+            400,
+            &format!("at most {BATCH_GOVERNANCE_MAX} ids per batch call"),
+        );
+    }
+    let reason = payload
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if matches!(action, "archive" | "invalidate") && reason.is_empty() {
+        return err(400, &format!("{action} requires a non-empty reason"));
+    }
+
+    let mut ok: Vec<String> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+    for id in &ids {
+        let result = match action {
+            "approve" => ctx.kb.approve(id),
+            "restore" => ctx.kb.restore(id),
+            "archive" => ctx.kb.archive(id, &reason),
+            "invalidate" => ctx.kb.invalidate(id, &reason),
+            _ => return err(404, "unknown governance action"),
+        };
+        match result {
+            Ok(()) => ok.push(id.clone()),
+            Err(e) => failed.push(json!({"id": id, "error": e.to_string()})),
+        }
+    }
+    json_resp(
+        200,
+        json!({
+            "action": action,
+            "ok": ok.len(),
+            "failed": failed.len(),
+            "ok_ids": ok,
+            "failures": failed
+        }),
+    )
 }
 
 // ── security helpers ────────────────────────────────────────────────────────

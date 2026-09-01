@@ -221,6 +221,122 @@ pub fn read_recent(limit: usize, kind: Option<&str>, status: Option<&str>) -> Re
     Ok(out)
 }
 
+/// Health of the LLM and embedding endpoints over the last `window_hours`.
+///
+/// This exists because a broken LLM was invisible. The API key went stale and
+/// every distillation for the next six days fell back to the heuristic
+/// distiller — silently, by design, since `ResilientDistiller`'s whole job is to
+/// keep capture working without the LLM. `innate inspect` reported nothing
+/// wrong: `operation_runs` recorded each `distill` as `ok` (the fallback *did*
+/// succeed), and the only evidence was 36 unread `401` lines in a log file.
+///
+/// Per kind (`chat`, `embedding`): call counts, success rate, latency
+/// percentiles, the most recent success and failure, and the dominant error
+/// bucket. `degraded` is the single flag worth alerting on.
+pub fn health(window_hours: i64) -> Result<Value> {
+    let cutoff = {
+        use chrono::{DateTime, Duration, Utc};
+        let now = crate::utils::utc_now_iso();
+        now.parse::<DateTime<Utc>>()
+            .map(|t| {
+                (t - Duration::hours(window_hours.max(1)))
+                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    };
+    // Read generously, then window by timestamp: the cap is a guard against a
+    // pathologically large log, not a sampling decision.
+    let entries = read_recent(20_000, None, None)?;
+
+    let mut kinds = serde_json::Map::new();
+    let mut degraded = false;
+    for kind in ["chat", "embedding"] {
+        let rows: Vec<&Value> = entries
+            .iter()
+            .filter(|e| e.get("kind").and_then(Value::as_str) == Some(kind))
+            .collect();
+        // `last_ok_ts` / `last_error_ts` deliberately ignore the window: "the
+        // last success was six days ago" is exactly the fact that was missing.
+        let last_of = |ok: bool| -> Option<&Value> {
+            rows.iter()
+                .find(|e| (e.get("status").and_then(Value::as_str) == Some("ok")) == ok)
+                .copied()
+        };
+        let last_ok = last_of(true);
+        let last_err = last_of(false);
+
+        let windowed: Vec<&&Value> = rows
+            .iter()
+            .filter(|e| e.get("ts").and_then(Value::as_str).unwrap_or("") >= cutoff.as_str())
+            .collect();
+        let calls = windowed.len();
+        let ok = windowed
+            .iter()
+            .filter(|e| e.get("status").and_then(Value::as_str) == Some("ok"))
+            .count();
+        let mut latencies: Vec<u64> = windowed
+            .iter()
+            .filter_map(|e| e.get("latency_ms").and_then(Value::as_u64))
+            .collect();
+        latencies.sort_unstable();
+        let pct = |p: f64| -> Option<u64> {
+            if latencies.is_empty() {
+                return None;
+            }
+            let idx = (((latencies.len() - 1) as f64) * p).round() as usize;
+            latencies.get(idx).copied()
+        };
+        let mut error_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for e in &windowed {
+            let status = e.get("status").and_then(Value::as_str).unwrap_or("");
+            if status != "ok" {
+                *error_counts.entry(status).or_insert(0) += 1;
+            }
+        }
+        let mut top_errors: Vec<(&str, usize)> = error_counts.into_iter().collect();
+        top_errors.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let success_rate = if calls == 0 {
+            Value::Null
+        } else {
+            json!(((ok as f64 / calls as f64) * 1000.0).round() / 1000.0)
+        };
+        // Degraded = we tried in this window and mostly failed. Silence is not
+        // degradation: a library that simply had nothing to distil is healthy.
+        if calls > 0 && (ok as f64) / (calls as f64) < 0.5 {
+            degraded = true;
+        }
+        kinds.insert(
+            kind.to_string(),
+            json!({
+                "calls": calls,
+                "ok": ok,
+                "error": calls - ok,
+                "success_rate": success_rate,
+                "p50_ms": pct(0.50),
+                "p95_ms": pct(0.95),
+                "last_ok_ts": last_ok.and_then(|e| e.get("ts").cloned()),
+                "last_error_ts": last_err.and_then(|e| e.get("ts").cloned()),
+                "last_error": last_err
+                    .and_then(|e| e.get("error").and_then(Value::as_str))
+                    .map(|m| m.chars().take(200).collect::<String>()),
+                "top_error_kinds": top_errors
+                    .into_iter()
+                    .take(3)
+                    .map(|(k, n)| json!({"kind": k, "count": n}))
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
+
+    Ok(json!({
+        "window_hours": window_hours,
+        "degraded": degraded,
+        "by_kind": Value::Object(kinds),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

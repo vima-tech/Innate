@@ -12,6 +12,13 @@ use crate::settings::{EmbeddingConfig, LlmConfig};
 
 const DISTILL_PROMPT_VERSION: &str = "4";
 
+/// Output cap for every chat completion. Was 800, which a batch of 20 logs
+/// overran routinely: the completion came back with `finish_reason="length"`,
+/// the truncated JSON failed to parse, and `ResilientDistiller` silently fell
+/// back to the heuristic distiller. Paired with the smaller
+/// `evolve.distill_batch_size`, this leaves ample headroom.
+const MAX_COMPLETION_TOKENS: u32 = 2000;
+
 fn safe_prompt_field(value: Option<&str>) -> String {
     let value = value.unwrap_or("");
     let (cleaned, action) = crate::utils::sanitize(value);
@@ -79,7 +86,12 @@ Rules:
   prefer general, technology- or domain-level phrasing over project-name phrasing
 - Never store conversation text verbatim; always distil to reusable principle form
 - If outcome is "fail", focus on what to avoid
-- Keep principles independent; do not combine unrelated lessons"#
+- Keep principles independent; do not combine unrelated lessons
+- Return [] for session status reports: progress updates, "what I did this session",
+  audit/assessment conclusions, task-state changes, and anything whose value is
+  reporting a state rather than telling a future agent what to do. A future agent
+  reading it cold must be able to ACT on it; if it can only learn what happened
+  once, it is not knowledge"#
     )
 }
 
@@ -119,6 +131,31 @@ const HTTP_MAX_ATTEMPTS: u32 = 3;
 /// Per-request socket timeout. Each retry gets a fresh timeout window.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Per-process override for [`HTTP_MAX_ATTEMPTS`] (`INNATE_HTTP_MAX_ATTEMPTS`).
+///
+/// The defaults are sized for background distillation, where waiting is free.
+/// They are badly wrong for the always-on recall hooks, which run on *every*
+/// user prompt: 3 attempts × 30 s let a flaky embedding endpoint stall the user
+/// for 19 seconds — measured ten times on the live library. `innate hook`
+/// tightens both knobs for its own process; nothing else changes behaviour.
+fn http_max_attempts() -> u32 {
+    std::env::var("INNATE_HTTP_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(HTTP_MAX_ATTEMPTS)
+}
+
+/// Per-process override for [`HTTP_TIMEOUT`] (`INNATE_HTTP_TIMEOUT_MS`).
+fn http_timeout() -> Duration {
+    std::env::var("INNATE_HTTP_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(HTTP_TIMEOUT)
+}
+
 /// POST `body` as JSON to `url` with the given extra headers, retrying transient
 /// failures (network/timeout errors, HTTP 429, and 5xx) with exponential backoff.
 /// `Content-Type: application/json` is set automatically. `label` names the call
@@ -133,6 +170,8 @@ fn post_json_retry(
     // call (across retries) and emit one trace with the final outcome. The
     // `Authorization` header is never handed to the tracer — only the body.
     let start = std::time::Instant::now();
+    let max_attempts = http_max_attempts();
+    let timeout = http_timeout();
     let mut attempt = 0;
     let outcome: Result<Value> = loop {
         attempt += 1;
@@ -142,7 +181,7 @@ fn post_json_retry(
         // transport-level failure (timeout / connection / I/O) — always retryable.
         let mut req = ureq::post(url)
             .config()
-            .timeout_global(Some(HTTP_TIMEOUT))
+            .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .build()
             .header("Content-Type", "application/json");
@@ -162,7 +201,7 @@ fn post_json_retry(
                     .get("retry-after")
                     .and_then(|h| h.to_str().ok())
                     .and_then(|s| s.trim().parse::<u64>().ok());
-                if status_is_retryable(code) && attempt < HTTP_MAX_ATTEMPTS {
+                if status_is_retryable(code) && attempt < max_attempts {
                     std::thread::sleep(backoff_delay(attempt, retry_after));
                     continue;
                 }
@@ -174,7 +213,7 @@ fn post_json_retry(
                 )));
             }
             Err(err) => {
-                if attempt < HTTP_MAX_ATTEMPTS {
+                if attempt < max_attempts {
                     std::thread::sleep(backoff_delay(attempt, None));
                     continue;
                 }
@@ -242,12 +281,27 @@ impl HttpDistiller {
         let body = json!({
             "model": self.config.model_id,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 800,
+            "max_tokens": MAX_COMPLETION_TOKENS,
             "temperature": 0.2,
         });
 
         let auth = format!("Bearer {api_key}");
         let resp_json = post_json_retry(&url, &[("Authorization", &auth)], &body, "LLM")?;
+
+        // A completion cut off at the token cap yields syntactically invalid
+        // JSON, which used to surface as an opaque "response parse error" —
+        // indistinguishable from a model that simply answered badly, and
+        // therefore invisible in the logs for days. Name the real cause.
+        if resp_json
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            == Some("length")
+        {
+            return Err(InnateError::Other(format!(
+                "LLM completion truncated at max_tokens={MAX_COMPLETION_TOKENS} \
+                 (finish_reason=length); lower evolve.distill_batch_size"
+            )));
+        }
 
         resp_json
             .pointer("/choices/0/message/content")
@@ -267,7 +321,7 @@ impl HttpDistiller {
 
         let body = json!({
             "model": self.config.model_id,
-            "max_tokens": 800,
+            "max_tokens": MAX_COMPLETION_TOKENS,
             "messages": [{"role": "user", "content": prompt}],
         });
 
@@ -277,6 +331,13 @@ impl HttpDistiller {
             &body,
             "Anthropic",
         )?;
+
+        if resp_json.get("stop_reason").and_then(Value::as_str) == Some("max_tokens") {
+            return Err(InnateError::Other(format!(
+                "Anthropic completion truncated at max_tokens={MAX_COMPLETION_TOKENS} \
+                 (stop_reason=max_tokens); lower evolve.distill_batch_size"
+            )));
+        }
 
         resp_json
             .pointer("/content/0/text")

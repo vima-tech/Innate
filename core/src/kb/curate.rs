@@ -521,6 +521,57 @@ impl KnowledgeBase {
                 }
             }
 
+            // ── 6b. Weak promote: sustained usefulness without a success streak ──
+            //
+            // The strong gate above needs `used_success_min` *successful* uses,
+            // each on a distinct trace. That depends on agents closing traces
+            // with an explicit outcome, which they do for a small minority of
+            // recalls — so pending chunks that were demonstrably useful still
+            // piled up: 459 pending against 27 active, the oldest 73 days old,
+            // two promotions a week.
+            //
+            // This second, deliberately narrower channel promotes a chunk that
+            // has earned its place by attrition instead: selected many times,
+            // used at least once, old enough to have had a fair trial, and
+            // carrying no negative signal: no thumbs-down, and confidence still
+            // at or above its seed. The confidence floor is what rules out a
+            // failed use — `task_fail` writes negative confidence evidence, so
+            // any chunk that has failed sits below the seed by construction.
+            let weak_promotable = self.storage.query_chunks_params(
+                "SELECT id FROM chunks
+                 WHERE state='pending' AND origin!='spark'
+                   AND selected_count >= ?
+                   AND used_count >= 1
+                   AND created_at <= ?
+                   AND confidence >= ?
+                   AND id NOT IN (SELECT chunk_id FROM feedback_events WHERE signal='down')
+                   AND (? IS NULL OR origin=?)
+                   AND (? IS NULL OR skill_name=?)",
+                rusqlite::params![
+                    self.weak_promote_selected_min,
+                    days_ago(&now_iso, self.weak_promote_age_days),
+                    DISTILLED_SEED_CONFIDENCE,
+                    scope_origin,
+                    scope_origin,
+                    scope_skill,
+                    scope_skill
+                ],
+            )?;
+            for c in &weak_promotable {
+                if let Some(id) = c.get("id").and_then(Value::as_str) {
+                    if report.promoted.iter().any(|p| p == id) {
+                        continue;
+                    }
+                    self.storage.update_chunk_state(
+                        id,
+                        "active",
+                        Some("sustained_usefulness"),
+                        &now_iso,
+                    )?;
+                    report.promoted.push(id.to_string());
+                }
+            }
+
             // ── 7. Cycle/orphan detection (report only, no auto-fix) ──
             let all_deps = self
                 .storage

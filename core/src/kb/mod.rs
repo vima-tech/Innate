@@ -74,11 +74,37 @@ const SPREAD_SEED_N: usize = 5;
 const TOP_K_CANDIDATES: usize = 20;
 const ANTI_TRIGGER_PENALTY: f64 = 0.6;
 const DENSITY_REFILL: bool = true;
+/// Weight of the length-normalisation penalty subtracted from the fused score.
+///
+/// Long chunks win the cosine lottery on almost any query: measured on the
+/// live library, 800–2k byte chunks were selected 65.7 times each versus 10.9
+/// for 300–800 byte ones, yet converted to an actual `used` event *less* often
+/// (2.5% vs 4.0%). The penalty grows with `ln(len / LENGTH_PENALTY_FREE_BYTES)`
+/// so short and mid-size chunks are untouched.
+const LENGTH_PENALTY: f64 = 0.15;
+/// Content length (bytes) below which no length penalty applies.
+const LENGTH_PENALTY_FREE_BYTES: f64 = 800.0;
 
 const LOW_CONF_THRESHOLD: f64 = 0.25;
 const LOW_CONF_IDLE_DAYS: i64 = 60;
 const REPEAT_SELECT_MIN: i64 = 10;
-const REPEAT_SELECT_CONF_MAX: f64 = 0.5;
+/// Ceiling for the `repeated_selected_unused` archive rule.
+///
+/// **Invariant: must stay strictly above [`DISTILLED_SEED_CONFIDENCE`].** The
+/// rule archives chunks that were selected many times and never used; a chunk
+/// that is never used never earns a confidence bump, so it sits at the seed
+/// value forever. When this gate was 0.5 and the seed 0.55, the rule could
+/// never fire on distilled chunks — 81% of the noise it exists to remove
+/// escaped it. `repeat_select_conf_max_invariant` locks the ordering.
+pub(crate) const REPEAT_SELECT_CONF_MAX: f64 = 0.60;
+/// Seed confidence assigned to a freshly distilled chunk (`kb/evolve.rs`).
+pub(crate) const DISTILLED_SEED_CONFIDENCE: f64 = 0.55;
+/// Seed confidence when the sanitizer redacted the source content.
+pub(crate) const DISTILLED_REDACTED_SEED_CONFIDENCE: f64 = 0.4;
+// Compile-time guard for the invariant documented on REPEAT_SELECT_CONF_MAX:
+// lowering the gate to (or below) the seed silently disables the
+// repeated_selected_unused archive rule for every distilled chunk.
+const _: () = assert!(REPEAT_SELECT_CONF_MAX > DISTILLED_SEED_CONFIDENCE);
 const NEVER_USED_AGE_DAYS: i64 = 30;
 const OPEN_TTL_DAYS: i64 = 14;
 const SCREENING_TIMEOUT_MINUTES: i64 = 30;
@@ -87,7 +113,22 @@ const PROMOTE_USED_SUCCESS_MIN: i64 = 2;
 const PROMOTE_CONFIDENCE_MIN: f64 = 0.60;
 const DECAY_FLOOR: f64 = 0.20;
 const EVOLVE_THRESHOLD: i64 = 5;
-const DISTILL_BATCH_SIZE: usize = 20;
+/// Logs handed to the distiller in one LLM call. Kept small: at 20 the
+/// completion routinely hit the model's output cap (`finish_reason="length"`),
+/// which surfaced as an unparseable-JSON error and silently demoted every
+/// distill to the heuristic fallback.
+const DISTILL_BATCH_SIZE: usize = 8;
+/// Minimum spacing between two time-based (`scheduled`, no pending request)
+/// curate passes. The daemon polls for evolve requests far more often than
+/// maintenance needs to run; without this gate every poll paid for a full
+/// aggregate/archive/promote/decay transaction.
+const CURATE_MIN_INTERVAL_MINUTES: i64 = 60;
+/// Weak promotion channel: a pending chunk that has been selected this many
+/// times, used at least once, and is older than
+/// [`WEAK_PROMOTE_AGE_DAYS`] is promoted even without reaching
+/// `promote_used_success_min` successful uses.
+const WEAK_PROMOTE_SELECTED_MIN: i64 = 20;
+const WEAK_PROMOTE_AGE_DAYS: i64 = 14;
 const PENDING_RECALL_PENALTY: f64 = 0.60;
 
 // Intuition / appraise critic defaults (Spec §8). The appraise path reuses the
@@ -219,6 +260,8 @@ pub struct KnowledgeBase {
     top_k_candidates: usize,
     anti_trigger_penalty: f64,
     density_refill: bool,
+    length_penalty: f64,
+    length_penalty_free_bytes: f64,
 
     low_conf_threshold: f64,
     low_conf_idle_days: i64,
@@ -230,6 +273,9 @@ pub struct KnowledgeBase {
     metrics_retain_days: i64,
     promote_used_success_min: i64,
     promote_confidence_min: f64,
+    weak_promote_selected_min: i64,
+    weak_promote_age_days: i64,
+    curate_min_interval_minutes: i64,
     decay_floor: f64,
     evolve_threshold: i64,
     distill_batch_size: usize,
@@ -334,6 +380,8 @@ impl KnowledgeBase {
             top_k_candidates: TOP_K_CANDIDATES,
             anti_trigger_penalty: ANTI_TRIGGER_PENALTY,
             density_refill: DENSITY_REFILL,
+            length_penalty: LENGTH_PENALTY,
+            length_penalty_free_bytes: LENGTH_PENALTY_FREE_BYTES,
             low_conf_threshold: LOW_CONF_THRESHOLD,
             low_conf_idle_days: LOW_CONF_IDLE_DAYS,
             repeat_select_min: REPEAT_SELECT_MIN,
@@ -344,6 +392,9 @@ impl KnowledgeBase {
             screening_timeout_minutes: SCREENING_TIMEOUT_MINUTES,
             promote_used_success_min: PROMOTE_USED_SUCCESS_MIN,
             promote_confidence_min: PROMOTE_CONFIDENCE_MIN,
+            weak_promote_selected_min: WEAK_PROMOTE_SELECTED_MIN,
+            weak_promote_age_days: WEAK_PROMOTE_AGE_DAYS,
+            curate_min_interval_minutes: CURATE_MIN_INTERVAL_MINUTES,
             decay_floor: DECAY_FLOOR,
             evolve_threshold: EVOLVE_THRESHOLD,
             distill_batch_size: DISTILL_BATCH_SIZE,
@@ -428,19 +479,24 @@ impl KnowledgeBase {
             ("recall.top_k_candidates", "20"),
             ("recall.anti_trigger_penalty", "0.6"),
             ("recall.density_refill", "true"),
+            ("recall.length_penalty", "0.15"),
+            ("recall.length_penalty_free_bytes", "800"),
             ("curate.low_conf_threshold", "0.25"),
             ("curate.low_conf_idle_days", "60"),
             ("curate.repeat_select_min", "10"),
-            ("curate.repeat_select_conf_max", "0.5"),
+            ("curate.repeat_select_conf_max", "0.60"),
             ("curate.never_used_age_days", "30"),
             ("metrics.retain_days", "30"),
             ("curate.open_ttl_days", "14"),
             ("curate.screening_timeout_minutes", "30"),
             ("curate.promote_used_success_min", "2"),
             ("curate.promote_confidence_min", "0.60"),
+            ("curate.weak_promote_selected_min", "20"),
+            ("curate.weak_promote_age_days", "14"),
+            ("curate.min_interval_minutes", "60"),
             ("curate.decay_floor", "0.20"),
             ("evolve.threshold_new_count", "5"),
-            ("evolve.distill_batch_size", "20"),
+            ("evolve.distill_batch_size", "8"),
             ("evolve.schedule_interval_hours", "6"),
             ("curate.soft_mature_threshold", "5"),
             ("evolve.distill_token_window_hours", "24"),
@@ -521,6 +577,12 @@ impl KnowledgeBase {
             i("recall.top_k_candidates", TOP_K_CANDIDATES as i64).max(1) as usize;
         self.anti_trigger_penalty = f("recall.anti_trigger_penalty", ANTI_TRIGGER_PENALTY);
         self.density_refill = b("recall.density_refill", DENSITY_REFILL);
+        self.length_penalty = f("recall.length_penalty", LENGTH_PENALTY).max(0.0);
+        self.length_penalty_free_bytes = f(
+            "recall.length_penalty_free_bytes",
+            LENGTH_PENALTY_FREE_BYTES,
+        )
+        .max(1.0);
         self.low_conf_threshold = f("curate.low_conf_threshold", LOW_CONF_THRESHOLD);
         self.low_conf_idle_days = i("curate.low_conf_idle_days", LOW_CONF_IDLE_DAYS);
         self.repeat_select_min = i("curate.repeat_select_min", REPEAT_SELECT_MIN);
@@ -535,6 +597,18 @@ impl KnowledgeBase {
         self.promote_used_success_min =
             i("curate.promote_used_success_min", PROMOTE_USED_SUCCESS_MIN);
         self.promote_confidence_min = f("curate.promote_confidence_min", PROMOTE_CONFIDENCE_MIN);
+        self.weak_promote_selected_min = i(
+            "curate.weak_promote_selected_min",
+            WEAK_PROMOTE_SELECTED_MIN,
+        )
+        .max(1);
+        self.weak_promote_age_days =
+            i("curate.weak_promote_age_days", WEAK_PROMOTE_AGE_DAYS).max(0);
+        self.curate_min_interval_minutes = i(
+            "curate.min_interval_minutes",
+            CURATE_MIN_INTERVAL_MINUTES,
+        )
+        .max(0);
         self.decay_floor = f("curate.decay_floor", DECAY_FLOOR).clamp(0.0, 0.4);
         self.evolve_threshold = i("evolve.threshold_new_count", EVOLVE_THRESHOLD);
         self.distill_batch_size =
@@ -831,6 +905,25 @@ impl KnowledgeBase {
         trace_id: Option<&str>,
         f: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
+        self.measure_with(op, source, |_| trace_id.map(str::to_string), f)
+    }
+
+    /// [`measure`](Self::measure) for operations that *create* the trace they
+    /// should be filed under.
+    ///
+    /// `recall` mints its `trace_id` inside the measured closure, so it could
+    /// only ever pass `None` — which left every one of the 2,379 recall /
+    /// hook_recall rows in `operation_runs` with a NULL `trace_id`, and made it
+    /// impossible to join an operation's latency and status to the outcome of
+    /// the trace it produced. `trace_of` extracts the id from the successful
+    /// result after the fact.
+    pub(crate) fn measure_with<T>(
+        &self,
+        op: &str,
+        source: Option<&str>,
+        trace_of: impl FnOnce(&T) -> Option<String>,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         let started = std::time::Instant::now();
         let started_at = utc_now_iso();
         let result = f();
@@ -844,7 +937,7 @@ impl KnowledgeBase {
         };
         let run = crate::storage::metrics::OperationRun {
             id: gen_uuid(),
-            trace_id: trace_id.map(|s| s.to_string()),
+            trace_id: result.as_ref().ok().and_then(trace_of),
             op: op.to_string(),
             source: source.map(|s| s.to_string()),
             agent: crate::utils::agent_source(),

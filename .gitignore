@@ -34,3 +34,7 @@ package-lock.json
 *.db-wal
 *.db-shm
 ~/.innate/
+
+# Recall-eval label sets are generated from the local library and embed its
+# content — personal data, and its chunk ids mean nothing elsewhere.
+recall_eval_*_baseline.jsonl

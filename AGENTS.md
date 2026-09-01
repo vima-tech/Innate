@@ -24,8 +24,12 @@ cd core && cargo test --release eval -- --nocapture
 
 # Run the CLI (after adding to PATH or using full path)
 innate recall "query" --format json
-innate inspect
+innate inspect                      # includes llm_health — check it when distillation looks off
 innate evolve --trigger manual
+
+# KPI baseline vs now — "did the last change help?"
+innate metrics snapshot             # pin a baseline
+innate metrics delta --days 7       # baseline / current / delta table
 
 # Start MCP server (for Claude Code / Claude Desktop integration)
 innate mcp
@@ -102,7 +106,7 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `lib.rs` | crate root; `open_kb()` injects remote models from settings, else Dummy/Heuristic |
 | `kb/mod.rs` | `KnowledgeBase` struct, param loading, `open_with` injection, cycle detection |
 | `kb/recall.rs` | `recall` — vector candidates, fused scoring, packing, dep expansion, trace write |
-| `kb/record/mod.rs` + `kb/record/evidence.rs` | `record`/`record_detailed`; confidence EMA replay, context stats, governance evidence |
+| `kb/record/mod.rs` + `kb/record/evidence.rs` | `record` (returns `RecordReport`); confidence EMA replay, context stats, governance evidence |
 | `kb/evolve.rs` | `evolve` — claim request, lease, distill transaction |
 | `kb/curate.rs` | aggregate → archive → promote → decay → dedupe → governance |
 | `kb/lifecycle.rs` | `add` / spark family / `approve` / `archive` / `invalidate` / `restore` |
@@ -122,12 +126,12 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
 | `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |
 | `upgrade.rs` | `innate upgrade` — GitHub Releases self-update + SHA-256 verify + atomic swap |
-| `migrate.rs` | Schema migration chain 4.0 → 4.21, each step atomic |
-| `hook.rs` | `innate hook stop` — Claude Code Stop payload → session.log events |
+| `migrate.rs` | Schema migration chain 4.0 → 4.22, each step atomic |
+| `hook.rs` | `innate hook stop/prompt/session-start` — Stop payload → session.log events **and** closes this session's hook traces (`close_session_traces`); recall hooks with a tight network budget + lexical fallback |
 | `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
 | `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `sanitize()`, cosine similarity |
 | `settings.rs` | `settings.json` parsing (LLM / Embedding / Daemon / Backup) |
-| `schema.sql` | Embedded schema (v4.21); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v4.22); `include_str!` at compile time |
 
 ### Filesystem layout (`~/.innate/`)
 
@@ -172,9 +176,24 @@ Three opt-in levers, all **off by default** so the no-LLM hot path is unchanged:
 - `recall.w_spread` (meta weight, default `0.0`) — **ACT-R spreading activation** (SAG-inspired associative recall, schema 4.18). Source activation flows from the **query's** entities and the entities of the top-`spread_seed_n` base candidates (2-hop), spreading `a_e / fan(e)` over the `chunk_entities` index (`storage::entity_links`/`entities_for_chunks`); the `1/fan` term is ACT-R's associative strength `S_ji = S − ln(fan_j)`, so promiscuous entities self-mute and entities with fan > `recall.spread_fan_cap` are dropped. Completes the activation model (base-level + associative). May pull in NEW candidates reachable only via a shared entity, which then flow through normal scoring. `expand_by_spreading` returns immediately when the weight is 0 — zero hot-path cost. Validate gains with a multi-hop `recall-eval` set before raising the weight.
 - `RecallParams.rerank` / CLI `--rerank` — offline LLM rerank of the shortlist via the injectable `Reranker` (default `NoopReranker`; `LlmReranker` wired by `open_kb` when an LLM is configured). **Never** used by hooks/MCP; non-fatal (falls back to fused order).
 
-Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k N]` (reports P@1 / Recall@k / MRR / nDCG@k using the configured provider). Template: `scripts/recall_eval_template.jsonl`. This is distinct from `cargo test eval`, which validates the ranking math on dummy-embedding fixtures.
+Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k N]` (reports P@1 / Recall@k / MRR / nDCG@k using the configured provider). Generate a label set from your own library with `scripts/gen_recall_eval_baseline.sh` (writes to `~/.innate/`, gitignored — it embeds your chunks' text and its ids are local-only). That set is a **retrievability regression guard**, not a relevance benchmark: it catches a ranking change that broke retrieval, it cannot tell you whether recall surfaces the right knowledge for a real question. This is distinct from `cargo test eval`, which validates the ranking math on dummy-embedding fixtures.
 
 ## Non-Obvious Implementation Constraints
+
+**`REPEAT_SELECT_CONF_MAX` must stay above `DISTILLED_SEED_CONFIDENCE`** — the `repeated_selected_unused` archive rule fires only below `curate.repeat_select_conf_max`, and a chunk that is never used never earns a confidence bump, so it sits at its seed value forever. With the gate at 0.5 and the seed at 0.55 the rule was unreachable for every distilled chunk (81% of the noise it exists to remove escaped it). A `const _: () = assert!(...)` in `kb/mod.rs` now makes the inversion a compile error.
+
+**Curate is throttled independently of evolve** (`curate.min_interval_minutes`, default 60) — the daemon polls for distill requests far more often than maintenance needs to run. `evolve` runs curate when the distill produced chunks *or* the interval has elapsed; otherwise it returns `curate_skipped: "throttled"`. Both the `scheduled` and `manual` (session-end) paths are gated; unthrottled they produced 39,383 full curate transactions in 30 days for 414 distilled chunks.
+
+**`record` never rejects a call for one bad id** — `filter_attributable` drops unattributable ids, applies the rest, and returns them in `RecordReport::unattributed` (`{field, chunk_id, reason}`). Rejecting outright killed 16% of MCP records. When *no* id survives, `used` degrades to `None` rather than `Some([])`, so a bad call cannot erase previously recorded attribution via `used_complete`.
+
+**The Stop hook closes its own session's traces** (`hook::close_session_traces`) — recall hooks used to open traces that nothing ever closed (47.5% expired as `timed_out`). Trace ids are recovered from the transcript, which is where `run_hook_recall` printed them. Two invariants: `outcome` stays `None` (the hook cannot judge success, and a guessed outcome would move confidence), and usage is claimed only for chunk ids the **assistant itself wrote**, as `cited`, with `used_complete=false`.
+
+**Transcript text must be JSON-decoded before scanning** — a `.jsonl` transcript stores message bodies as JSON strings, so a newline in the text is the two characters `\n`. Use `hook::role_text`; scanning the raw file for a marker spanning a newline silently matches nothing (and passes against hand-written fixtures with literal newlines).
+
+**`operation_runs.trace_id` for recall comes from the result** — `recall` mints its trace id inside the measured closure, so it must use `measure_with` (which extracts the id from the successful result). Plain `measure` can only pass `None`, which left every recall row unjoinable to its outcome.
+
+**LLM health is read from `llm_trace.log`, not `operation_runs`** — a distill whose LLM call failed still records `ok`, because `ResilientDistiller`'s deterministic fallback succeeded. That is correct for capture and useless for health: it is how a stale API key stayed invisible for six days. `inspect.llm_health` (and its `degraded` flag + suggestion) is the alarm.
+
 
 **Agent-source dimension (`agent` column, schema 4.17)** — `chunks.agent` and `episodic_log.agent` record *which agent product* drove the call (`claude-code` / `codex` / `opencode` / …). This is **orthogonal** to the access channel in `usage_trace.source` / `episodic_log.event_source` (`mcp/cli/hook/daemon/...`): the channel says *which entry point*, `agent` says *which agent*. Source of truth is `utils::agent_source()`, which reads the `INNATE_AGENT` env var (injected by `innate install` into each agent's MCP config; `None`/NULL when unset — backward compatible, never enum-constrained). Distilled chunks **inherit** `agent` from their source `episodic_log` (not the process running `evolve`, which may be a daemon/cron); promoted sparks inherit from the spark. The Stop/hook capture channel is not yet env-tagged (records land with NULL agent) — follow-up.
 

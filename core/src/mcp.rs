@@ -248,6 +248,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 session_only: false,
                 // MCP recall stays no-LLM by default; deep rerank is CLI-only ("deep recall").
                 rerank: false,
+                lexical_only: false,
             })?;
             Ok(json!({
                 "trace_id": result.trace_id,
@@ -338,7 +339,7 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let feedback_reason = so("feedback_reason");
             let nomination = so("nomination");
             let task_state = so("task_state");
-            kb.record(RecordParams {
+            let report = kb.record(RecordParams {
                 trace_id: &trace_id,
                 query: query.as_deref(),
                 output: output.as_deref(),
@@ -358,7 +359,13 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 source: &source,
                 verdict_heeded: b("verdict_heeded", false),
             })?;
-            Ok(json!({"ok": true}))
+            // `unattributed` is only present when something was dropped, so a
+            // clean record keeps the terse `{"ok":true}` shape agents expect.
+            if report.is_clean() {
+                Ok(json!({"ok": true}))
+            } else {
+                Ok(json!({"ok": true, "unattributed": report.unattributed}))
+            }
         }
         "innate_add" => {
             let content = s("content");

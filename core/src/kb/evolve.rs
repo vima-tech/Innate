@@ -5,6 +5,33 @@ impl KnowledgeBase {
         self.measure("evolve", None, None, || self.evolve_inner(trigger))
     }
 
+    /// Throttle gate for the time-based (`scheduled`, no pending request)
+    /// curate pass. Returns `Some(next_due_iso)` while curate is still on
+    /// cooldown, `None` when it should run.
+    ///
+    /// `last_agg_ts` is written by every curate pass, so it doubles as the
+    /// "last maintenance" clock. A library that has never been curated runs
+    /// immediately.
+    fn curate_next_due_at(&self, now_iso: &str) -> Result<Option<String>> {
+        if self.curate_min_interval_minutes <= 0 {
+            return Ok(None);
+        }
+        let Some(last_agg) = self.storage.get_meta("last_agg_ts")? else {
+            return Ok(None);
+        };
+        let cutoff = minutes_ago(now_iso, self.curate_min_interval_minutes);
+        // All timestamps use the fixed-width `utc_now_iso()` format, so a
+        // lexicographic compare is a chronological compare.
+        if last_agg.as_str() > cutoff.as_str() {
+            Ok(Some(minutes_after(
+                &last_agg,
+                self.curate_min_interval_minutes,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn evolve_inner(&self, trigger: &str) -> Result<Value> {
         if !matches!(trigger, "manual" | "scheduled" | "threshold") {
             return Err(InnateError::InvalidState(format!(
@@ -46,7 +73,22 @@ impl KnowledgeBase {
         let request_id = request.as_ref().map(|claim| claim.id.as_str());
         let request_reason = request.as_ref().map(|claim| claim.reason.as_str());
         // Issue 7: scheduled without pending request → still run curate (time-based maintenance).
+        //
+        // …but throttled. The daemon polls for evolve requests on a short timer
+        // so distillation reacts quickly; maintenance does not need the same
+        // cadence. Unthrottled, every poll paid for a full aggregate → archive →
+        // promote → decay → dedupe transaction (measured: 39,383 curate runs in
+        // 30 days for 414 distilled chunks). `curate.min_interval_minutes`
+        // decouples the two.
         if trigger == "scheduled" && request_id.is_none() {
+            if let Some(next_due) = self.curate_next_due_at(&evolve_started_at)? {
+                return Ok(json!({
+                    "distilled": 0,
+                    "curate": Value::Null,
+                    "skipped": "curate_throttled",
+                    "curate_next_due_at": next_due
+                }));
+            }
             let curator = Arc::clone(&self.curator);
             let curate = curator.run(self, &CurateScope::default())?;
             return Ok(json!({
@@ -148,6 +190,23 @@ impl KnowledgeBase {
 
         let result = (|| -> Result<Value> {
             let distill = self.measure("distill", None, None, || self.distill_batch())?;
+            // Curate runs when it has something to do, or when maintenance is
+            // due — not simply because an evolve happened. New chunks must be
+            // aggregated and considered for promotion immediately, so a
+            // productive distill always curates; an evolve that distilled
+            // nothing (the common case at a session end) leaves the periodic
+            // pass to do the work. Without this the session_end trigger alone
+            // kept curate running dozens of times a day for no state change.
+            let due = distill.distilled > 0
+                || self.curate_next_due_at(&utc_now_iso())?.is_none();
+            if !due {
+                return Ok(json!({
+                    "distilled": distill.distilled,
+                    "distill_failed": distill.failed,
+                    "curate": Value::Null,
+                    "curate_skipped": "throttled",
+                }));
+            }
             let curator = Arc::clone(&self.curator);
             let curate = curator.run(self, &CurateScope::default())?;
             Ok(json!({
@@ -332,7 +391,11 @@ impl KnowledgeBase {
                     continue; // skip invalidated content, try others
                 }
                 let redacted = action == SanitizeAction::Redact;
-                let conf = if redacted { 0.4 } else { 0.55 };
+                let conf = if redacted {
+                    DISTILLED_REDACTED_SEED_CONFIDENCE
+                } else {
+                    DISTILLED_SEED_CONFIDENCE
+                };
                 let now2 = utc_now_iso();
                 let chunk_id = gen_uuid();
                 let tokens = estimate_tokens(&content) as i64;

@@ -295,14 +295,17 @@ fn record_rejects_retrieved_but_unselected_attribution() {
         })
         .unwrap();
 
-    let error = kb
+    // `retrieved` is not `selected`: a chunk that only ever appeared as a
+    // candidate is not attributable, so it is dropped and reported — while the
+    // record itself is applied.
+    let report = kb
         .record(RecordParams {
             trace_id: &trace_id,
             query: None,
             output: None,
             output_summary: None,
             outcome: None,
-            used: Some(&[chunk_id]),
+            used: Some(std::slice::from_ref(&chunk_id)),
             used_attribution: "explicit",
             used_complete: Some(true),
             feedback_up: None,
@@ -316,8 +319,19 @@ fn record_rejects_retrieved_but_unselected_attribution() {
             source: "sdk",
             ..Default::default()
         })
-        .unwrap_err();
-    assert!(matches!(error, InnateError::InvalidState(_)));
+        .unwrap();
+    assert_eq!(report.unattributed.len(), 1);
+    assert_eq!(report.unattributed[0].chunk_id, chunk_id);
+    assert_eq!(report.unattributed[0].reason, "not_selected_by_trace");
+    // No `used` row may exist for a merely-retrieved chunk.
+    let used_rows = kb
+        .storage
+        .query_chunks_params(
+            "SELECT chunk_id FROM usage_trace WHERE trace_id=? AND event='used'",
+            rusqlite::params![trace_id],
+        )
+        .unwrap();
+    assert!(used_rows.is_empty());
 }
 
 #[test]

@@ -374,7 +374,10 @@ impl Storage {
         query: &[f32],
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
-        if limit == 0 {
+        // An empty query vector means the caller opted out of the embedding
+        // (`RecallParams::lexical_only`). Return before touching the cache so
+        // the lexical-only path never pays to load every embedding into memory.
+        if limit == 0 || query.is_empty() {
             return Ok(Vec::new());
         }
         self.refresh_vector_caches_if_changed()?;

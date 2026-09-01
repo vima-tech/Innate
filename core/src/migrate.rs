@@ -38,9 +38,10 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("4.18", "4.19", include_str!("migrations/4.18_to_4.19.sql")),
     ("4.19", "4.20", include_str!("migrations/4.19_to_4.20.sql")),
     ("4.20", "4.21", include_str!("migrations/4.20_to_4.21.sql")),
+    ("4.21", "4.22", include_str!("migrations/4.21_to_4.22.sql")),
 ];
 
-const TARGET: &str = "4.21";
+const TARGET: &str = "4.22";
 
 /// The schema version this binary migrates to (single source of truth for callers
 /// that want to report it, e.g. the CLI `migrate` "nothing to do" message).

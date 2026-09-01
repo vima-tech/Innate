@@ -126,6 +126,37 @@ pub struct DistilledChunk {
 /// Heuristic distiller: extracts chunks from log output / nomination fields.
 pub struct HeuristicDistiller;
 
+/// Phrases that mark a summary as a *session status report* rather than reusable
+/// procedural knowledge.
+///
+/// The heuristic distiller copies a summary verbatim into a chunk, so a summary
+/// like "用户要求将 X 置为等待执行状态…未做任何代码改动" became a permanent chunk.
+/// Such chunks are long, vocabulary-rich and match almost any query: the worst
+/// offender in the live library was selected 188 times and used zero times.
+///
+/// The list is deliberately narrow — only statements that explicitly say nothing
+/// was produced. Broader markers ("本次…", "this session…") appear in genuinely
+/// valuable write-ups too, and wrongly dropping real knowledge costs more than
+/// letting one status report through, which the recall-side length penalty
+/// already demotes.
+const SESSION_REPORT_MARKERS: &[&str] = &[
+    "未做任何代码改动",
+    "未做代码改动",
+    "没有做任何代码改动",
+    "无代码改动",
+    "no code changes were made",
+    "no code was changed",
+    "made no changes",
+];
+
+/// True when `text` announces that the session produced nothing reusable.
+pub fn is_session_status_report(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    SESSION_REPORT_MARKERS
+        .iter()
+        .any(|marker| lower.contains(&marker.to_lowercase()))
+}
+
 impl Distiller for HeuristicDistiller {
     fn distill(&self, log_entries: &[Value]) -> Result<Vec<DistilledChunk>> {
         let mut out = Vec::new();
@@ -135,6 +166,11 @@ impl Distiller for HeuristicDistiller {
             let text = nomination.or_else(|| entry["output_summary"].as_str());
             if let Some(t) = text {
                 let t = t.trim();
+                // An explicit nomination is the user/agent deliberately saying
+                // "keep this", so it is never second-guessed here.
+                if nomination.is_none() && is_session_status_report(t) {
+                    continue;
+                }
                 if !t.is_empty() {
                     let query = entry["query"].as_str().map(str::trim).unwrap_or("");
                     let outcome = entry["outcome"].as_str().unwrap_or("");
