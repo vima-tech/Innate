@@ -128,8 +128,27 @@ fn build_distill_prompt_with_related(log: &Value, logs: &[Value]) -> String {
 
 /// Max total attempts (initial try + retries) for a single LLM/embedding call.
 const HTTP_MAX_ATTEMPTS: u32 = 3;
-/// Per-request socket timeout. Each retry gets a fresh timeout window.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-request timeout for an **embedding** call. Embeddings sit on the recall
+/// hot path, return a fixed-size vector, and are fast; a slow one should fail
+/// over to the lexical channel rather than keep the caller waiting.
+const HTTP_TIMEOUT_EMBEDDING: Duration = Duration::from_secs(30);
+
+/// Per-request timeout for a **chat/completion** call.
+///
+/// Generous on purpose. Chat is only used for distillation and the opt-in
+/// reranker — both background, latency-tolerant paths that never run in front
+/// of a user. The cost of waiting is a slower cycle; the cost of giving up too
+/// early is that distillation silently degrades to the heuristic fallback.
+///
+/// The 30 s that both kinds used to share was simply too short for a
+/// generation endpoint. Measured against the configured model: output runs at
+/// roughly 25 tokens/second, so a 1,755-token completion took 69 s and even a
+/// 421-token one took 25 s. Every longer answer was cut off mid-body and
+/// surfaced as `response parse error: json: timeout: global` — an error that
+/// reads like malformed JSON and is really a stopwatch. That is what the
+/// library's 36 unexplained "parse errors" were.
+const HTTP_TIMEOUT_CHAT: Duration = Duration::from_secs(180);
 
 /// Per-process override for [`HTTP_MAX_ATTEMPTS`] (`INNATE_HTTP_MAX_ATTEMPTS`).
 ///
@@ -146,14 +165,22 @@ fn http_max_attempts() -> u32 {
         .unwrap_or(HTTP_MAX_ATTEMPTS)
 }
 
-/// Per-process override for [`HTTP_TIMEOUT`] (`INNATE_HTTP_TIMEOUT_MS`).
-fn http_timeout() -> Duration {
-    std::env::var("INNATE_HTTP_TIMEOUT_MS")
+/// Timeout for one call, by kind, with a per-process override
+/// (`INNATE_HTTP_TIMEOUT_MS`) that wins for both kinds — the recall hooks use it
+/// to cap their own embedding call far below the default.
+fn http_timeout(label: &str) -> Duration {
+    if let Some(ms) = std::env::var("INNATE_HTTP_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
-        .map(Duration::from_millis)
-        .unwrap_or(HTTP_TIMEOUT)
+    {
+        return Duration::from_millis(ms);
+    }
+    if label == "Embedding" {
+        HTTP_TIMEOUT_EMBEDDING
+    } else {
+        HTTP_TIMEOUT_CHAT
+    }
 }
 
 /// POST `body` as JSON to `url` with the given extra headers, retrying transient
@@ -171,7 +198,7 @@ fn post_json_retry(
     // `Authorization` header is never handed to the tracer — only the body.
     let start = std::time::Instant::now();
     let max_attempts = http_max_attempts();
-    let timeout = http_timeout();
+    let timeout = http_timeout(label);
     let mut attempt = 0;
     let outcome: Result<Value> = loop {
         attempt += 1;
