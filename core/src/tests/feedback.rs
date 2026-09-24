@@ -23,7 +23,7 @@ fn evolve_preserves_replayable_usage_facts_and_counts() {
         used: Some(std::slice::from_ref(&chunk_id)),
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -202,7 +202,7 @@ fn completed_trace_without_outcome_reaches_a_terminal_distill_state() {
         feedback_kind: "user",
         feedback_actor: None,
         feedback_reason: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         task_state: Some("completed"),
         source: "sdk",
@@ -333,7 +333,8 @@ fn migration_4_12_baselines_exclude_retained_usage_facts() {
             "4.18→4.19",
             "4.19→4.20",
             "4.20→4.21",
-            "4.21→4.22"
+            "4.21→4.22",
+            "4.22→5.0"
         ]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();
@@ -377,7 +378,7 @@ fn migration_4_14_repairs_existing_4_13_baselines_and_cost_history() {
             used: Some(std::slice::from_ref(&chunk_id)),
             feedback_up: None,
             feedback_down: None,
-            nomination: None,
+            nomination: Some("worth keeping: distillation fixture"),
             priority: 0,
             source: "sdk",
             ..Default::default()
@@ -415,7 +416,8 @@ fn migration_4_14_repairs_existing_4_13_baselines_and_cost_history() {
             "4.18→4.19",
             "4.19→4.20",
             "4.20→4.21",
-            "4.21→4.22"
+            "4.21→4.22",
+            "4.22→5.0"
         ]
     );
     let conn = rusqlite::Connection::open(file.path()).unwrap();

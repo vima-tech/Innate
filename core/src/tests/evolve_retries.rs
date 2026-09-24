@@ -106,7 +106,7 @@ fn scheduled_evolve_recovers_retryable_failed_log_without_existing_request() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -155,7 +155,7 @@ fn distill_retry_cost_is_cumulative() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -214,7 +214,7 @@ fn distill_retries_are_bounded_and_failures_remain_observable() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -248,4 +248,114 @@ fn distill_retries_are_bounded_and_failures_remain_observable() {
         inspect["feedback_loop"]["failed_distill_logs_30d"].as_i64(),
         Some(1)
     );
+}
+
+// ── Requeue must not collide with idx_evolve_pending_reason ──
+//
+// Live incident 2026-09-23: an evolve killed while holding a `distill_retry` lease
+// left a stale `running` row; the next evolve queued a new pending `distill_retry`.
+// Lease recovery then reset the stale row to pending, hit the one-pending-per-reason
+// unique index, and every later evolve failed on its first statement.
+
+/// `day` sets `requested_at` to 2001-01-<day>, so a lower day is an older request.
+fn insert_request(kb: &KnowledgeBase, id: &str, reason: &str, state: &str, day: u32) {
+    let requested_at = format!("2001-01-{day:02}T00:00:00.000Z");
+    kb.storage
+        .conn_execute_count(
+            "INSERT INTO evolve_requests(id, reason, state, requested_at, leased_at, completed_at,
+                                         attempts, next_retry_at)
+             VALUES (?1, ?2, ?3, ?4,
+                     CASE WHEN ?3='running' THEN '2000-01-01T00:00:00.000Z' END,
+                     CASE WHEN ?3='failed' THEN '2000-01-01T00:00:00.000Z' END,
+                     1, NULL)",
+            rusqlite::params![id, reason, state, requested_at],
+        )
+        .unwrap();
+}
+
+fn request_row(kb: &KnowledgeBase, id: &str) -> (String, String) {
+    let rows = kb
+        .storage
+        .query_chunks_params(
+            "SELECT state, COALESCE(note,'') AS note FROM evolve_requests WHERE id=?",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    (
+        rows[0]["state"].as_str().unwrap().to_string(),
+        rows[0]["note"].as_str().unwrap().to_string(),
+    )
+}
+
+#[test]
+fn stale_lease_with_same_reason_pending_does_not_wedge_claim() {
+    let (kb, _file) = tmp_kb();
+    insert_request(&kb, "stale", "distill_retry", "running", 1);
+    insert_request(&kb, "fresh", "distill_retry", "pending", 2);
+
+    let now = crate::utils::utc_now_iso();
+    let claim = kb
+        .storage
+        .claim_evolve_request_with_reason(&now, &now)
+        .expect("claim must not fail on the one-pending-per-reason index")
+        .expect("the pending request is claimable");
+    assert_eq!(claim.id, "fresh");
+    assert_eq!(
+        request_row(&kb, "stale"),
+        ("completed".into(), "lease_recovered_merged".into())
+    );
+}
+
+#[test]
+fn several_stale_leases_with_one_reason_requeue_only_the_oldest() {
+    let (kb, _file) = tmp_kb();
+    insert_request(&kb, "older", "distill_retry", "running", 1);
+    insert_request(&kb, "newer", "distill_retry", "running", 2);
+
+    let now = crate::utils::utc_now_iso();
+    let claim = kb
+        .storage
+        .claim_evolve_request_with_reason(&now, &now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.id, "older");
+    assert_eq!(
+        request_row(&kb, "newer"),
+        ("completed".into(), "lease_recovered_merged".into())
+    );
+}
+
+#[test]
+fn retryable_failure_with_same_reason_pending_does_not_wedge_claim() {
+    let (kb, _file) = tmp_kb();
+    insert_request(&kb, "failed", "threshold", "failed", 1);
+    insert_request(&kb, "queued", "threshold", "pending", 2);
+
+    let now = crate::utils::utc_now_iso();
+    let claim = kb
+        .storage
+        .claim_evolve_request_with_reason(&now, &now)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.id, "queued");
+    assert_eq!(
+        request_row(&kb, "failed"),
+        ("completed".into(), "retry_failed_merged".into())
+    );
+}
+
+#[test]
+fn scheduled_evolve_recovers_from_the_wedged_queue_state() {
+    let (kb, _file) = tmp_kb();
+    insert_request(&kb, "stale", "distill_retry", "running", 1);
+    insert_request(&kb, "fresh", "distill_retry", "pending", 2);
+    kb.evolve("scheduled")
+        .expect("evolve must survive a stale lease that shares a reason with a pending request");
+    let pending_or_running = kb
+        .storage
+        .query_chunks(
+            "SELECT COUNT(*) AS cnt FROM evolve_requests WHERE state IN ('pending','running')",
+        )
+        .unwrap();
+    assert_eq!(pending_or_running[0]["cnt"].as_i64(), Some(0));
 }

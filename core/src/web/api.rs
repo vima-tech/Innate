@@ -298,6 +298,8 @@ fn playground(ctx: &Ctx, query: &str) -> Resp {
         // and runs with trace=false (no episodic_log / usage_trace writes), so it
         // tags the operation_run as `cli`.
         source: "cli",
+        session_id: None,
+        project: None,
         expand_deps: "false",
         allow_trim: false,
         refine_mode: "off",

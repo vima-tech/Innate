@@ -197,7 +197,7 @@ fn selected_unused_always_decreases_confidence() {
 // ── v4.8 feedback loop fix tests ──────────────────────────────────────────────
 
 #[test]
-fn distilled_chunk_can_auto_promote_via_implicit_signals() {
+fn implicit_signals_raise_confidence_but_do_not_promote() {
     // Verifies that a distilled chunk (conf=0.55, pending) can cross the 0.60
     // promote threshold using only implicit outcome=ok signals (no feedback_up).
     use crate::refine::{DistilledChunk, Distiller};
@@ -244,7 +244,7 @@ fn distilled_chunk_can_auto_promote_via_implicit_signals() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -293,6 +293,15 @@ fn distilled_chunk_can_auto_promote_via_implicit_signals() {
     let conf_after = after["confidence"].as_f64().unwrap();
     assert!(conf_after > 0.60,
         "confidence should exceed promote threshold 0.60 after 5 implicit ok signals, got {conf_after}");
+
+    // 5.0: confidence ranks, it does not promote. "Used" + ok is exposure, not
+    // validation — the chunk stays a candidate until verdicts back it.
+    kb.builtin_curate_impl(&CurateScope::default()).unwrap();
+    let state = kb.storage.get_chunk(&chunk_id).unwrap().unwrap()["state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(state, "pending");
 }
 
 #[test]

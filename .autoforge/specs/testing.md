@@ -2,7 +2,7 @@
 
 ## 集成测试模块
 
-core/src/tests/ 下含 12 个测试模块（basics、distillation、eval、feedback、governance、intuition、intuition_optim、reliability、restoration 等），通过 tmp_kb() 创建临时 SQLite 文件隔离测试。其中 intuition_optim 锁定直觉模块偏差治理（弃权门 A、verdict_log B、provenance C、基率先验 D、校准映射 E、双通道 F、离散度 G）激活后的行为。
+core/src/tests/ 下含 16 个测试模块（basics、distillation、eval、feedback、governance、intuition、intuition_optim、reliability、restoration、rules 等），通过 tmp_kb() 创建临时 SQLite 文件隔离测试。其中 intuition_optim 锁定直觉模块偏差治理（弃权门 A、verdict_log B、provenance C、基率先验 D、校准映射 E、双通道 F、离散度 G）激活后的行为；rules 锁定 5.0 活知识闭环（经历复现生成规则、判定需观察、跨项目成熟、反例暂停与修订、候选限额、采集幂等）。
 
 ---
 

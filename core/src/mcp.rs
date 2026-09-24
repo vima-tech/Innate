@@ -241,6 +241,8 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 include_sparks,
                 top,
                 source: &source,
+                session_id: None,
+                project: None,
                 expand_deps: &expand_deps,
                 allow_trim,
                 refine_mode: &refine_mode,
@@ -339,6 +341,13 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
             let feedback_reason = so("feedback_reason");
             let nomination = so("nomination");
             let task_state = so("task_state");
+            let verdicts: Vec<crate::kb::RuleVerdict> = args
+                .get("verdicts")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| crate::errors::InnateError::InvalidState(format!("verdicts: {e}")))?
+                .unwrap_or_default();
             let report = kb.record(RecordParams {
                 trace_id: &trace_id,
                 query: query.as_deref(),
@@ -358,13 +367,23 @@ fn dispatch(kb: &KnowledgeBase, name: &str, args: &Value) -> crate::errors::Resu
                 task_state: task_state.as_deref(),
                 source: &source,
                 verdict_heeded: b("verdict_heeded", false),
+                verdicts: (!verdicts.is_empty()).then_some(verdicts.as_slice()),
+                session_id: None,
+                project: None,
             })?;
-            // `unattributed` is only present when something was dropped, so a
-            // clean record keeps the terse `{"ok":true}` shape agents expect.
+            // `unattributed` / `rejected_verdicts` are only present when something
+            // was dropped, so a clean record keeps the terse `{"ok":true}` shape.
             if report.is_clean() {
                 Ok(json!({"ok": true}))
             } else {
-                Ok(json!({"ok": true, "unattributed": report.unattributed}))
+                let mut out = json!({"ok": true});
+                if !report.unattributed.is_empty() {
+                    out["unattributed"] = json!(report.unattributed);
+                }
+                if !report.rejected_verdicts.is_empty() {
+                    out["rejected_verdicts"] = json!(report.rejected_verdicts);
+                }
+                Ok(out)
             }
         }
         "innate_add" => {
@@ -526,6 +545,19 @@ fn tool_schema(name: &str) -> Value {
                 "nomination": {"type": "string"},
                 "priority": {"type": "integer"},
                 "verdict_heeded": {"type": "boolean", "description": "Set when this trace came from an appraise whose caution was heeded (action avoided): the outcome is counterfactual and is excluded from the critic's calibration."},
+                "verdicts": {
+                    "type": "array",
+                    "description": "Your verdict on each recalled rule you acted on. This is how rules mature: supported/contradicted need an observation (what you actually saw).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "chunk_id": {"type": "string"},
+                            "verdict": {"type": "string", "enum": ["applied","supported","contradicted","irrelevant"]},
+                            "observation": {"type": "string", "description": "What happened when you followed the rule (command output, test result, user reaction)"}
+                        },
+                        "required": ["chunk_id", "verdict"]
+                    }
+                },
                 "source": {"type": "string", "enum": ["mcp","sdk","cli","hook","daemon","augmented"]}
             },
             "required": ["trace_id"]

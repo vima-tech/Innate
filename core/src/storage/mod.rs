@@ -18,6 +18,8 @@ mod evolution;
 mod meta;
 pub mod metrics;
 mod raw;
+mod rules;
+pub use rules::{EpisodeRow, ValidationRow};
 mod traces;
 
 /// Schema version this build understands.
@@ -25,7 +27,7 @@ mod traces;
 /// Kept identical to `migrate::target_version()` — they drifted once (a bump to
 /// the migration chain without a bump here made every command print
 /// "db schema 4.22 > expected 4.21"), so the test below pins them together.
-const EXPECTED_SCHEMA_VERSION: &str = "4.22";
+const EXPECTED_SCHEMA_VERSION: &str = "5.0";
 
 // Embedded SQL schema — no external files needed.
 const SCHEMA_SQL: &str = include_str!("../schema.sql");
@@ -216,6 +218,12 @@ pub struct ChunkRow {
     pub created_at: String,
     pub updated_at: String,
     pub last_used_at: Option<String>,
+    /// 5.0: JSON array of concrete, searchable signals (commands, error text,
+    /// API names, symptoms) — what action-time recall matches against.
+    pub signals: Option<String>,
+    /// 5.0: JSON array of the projects the rule was born from; a validation in
+    /// any other project is what makes it transferable.
+    pub source_projects: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -242,6 +250,8 @@ pub struct EpisodicLogRow {
     pub priority: i64,
     pub distill_state: String,
     pub distill_note: Option<String>,
+    pub session_id: Option<String>,
+    pub project: Option<String>,
 }
 
 // ------------------------------------------------------------------

@@ -198,8 +198,13 @@ class KnowledgeBase:
         task_state: str | None = None,
         priority: int = 0,
         verdict_heeded: bool = False,
+        verdicts: list[dict[str, str]] | None = None,
         source: str = "sdk",
     ) -> None:
+        """Close a trace. ``verdicts`` is how rules mature (schema 5.0): one
+        ``{"chunk_id", "verdict", "observation"}`` per recalled rule you acted on,
+        verdict in supported / contradicted / irrelevant / applied; supported and
+        contradicted need an observation."""
         args = self._args() + ["record", trace_id, "--source", source]
         if query:
             args += ["--query", query]
@@ -228,6 +233,8 @@ class KnowledgeBase:
             args += ["--priority", str(priority)]
         if verdict_heeded:
             args += ["--verdict-heeded"]
+        if verdicts:
+            args += ["--verdicts", json.dumps(verdicts, ensure_ascii=False)]
         _run(*args)
 
     def add(

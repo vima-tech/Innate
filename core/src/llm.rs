@@ -10,7 +10,7 @@ use crate::settings::{EmbeddingConfig, LlmConfig};
 // Prompt for distillation
 // ---------------------------------------------------------------------------
 
-const DISTILL_PROMPT_VERSION: &str = "4";
+const DISTILL_PROMPT_VERSION: &str = crate::rule_prompts::PROMPT_VERSION;
 
 /// Output cap for every chat completion. Was 800, which a batch of 20 logs
 /// overran routinely: the completion came back with `finish_reason="length"`,
@@ -54,45 +54,7 @@ fn build_distill_prompt(log: &Value) -> String {
     }
 
     let context = context_parts.join("\n");
-
-    format!(
-        r#"You are a knowledge distillation assistant. Given an agent interaction log, \
-extract zero or more independent reusable procedural principles. Favor GENERAL, \
-transferable skills, methods, and techniques over project-specific facts.
-
-Agent interaction:
-{context}
-
-Output a JSON array. Each item has:
-{{
-  "skill_name": "<1-3 word skill/topic label for this principle>",
-  "content": "<principle; when it applies; what to avoid>",
-  "trigger_desc": "<2-6 word canonical phrase>",
-  "anti_trigger_desc": "<when NOT to apply this, or null>"
-}}
-Return [] if nothing is worth keeping.
-
-Rules:
-- skill_name is a short human label (1-3 words) naming the skill/topic, e.g.
-  "error handling", "git rebase", "async retries"; not a sentence
-- content must be self-contained and actionable for a future agent reading cold
-- Prefer transferable methods and techniques; a principle that helps across many
-  projects is worth far more than one tied to this codebase
-- Abstract away project-specific detail: strip repo/file/function/path/variable names
-  and one-off identifiers, and rephrase the lesson as a general principle whoever the
-  next project is. Keep concrete project-specific detail ONLY when the lesson genuinely
-  cannot be generalized without losing its meaning
-- trigger_desc must match the vocabulary a future agent would use in a search query;
-  prefer general, technology- or domain-level phrasing over project-name phrasing
-- Never store conversation text verbatim; always distil to reusable principle form
-- If outcome is "fail", focus on what to avoid
-- Keep principles independent; do not combine unrelated lessons
-- Return [] for session status reports: progress updates, "what I did this session",
-  audit/assessment conclusions, task-state changes, and anything whose value is
-  reporting a state rather than telling a future agent what to do. A future agent
-  reading it cold must be able to ACT on it; if it can only learn what happened
-  once, it is not knowledge"#
-    )
+    crate::rule_prompts::rule_from_nomination(&format!("Agent interaction:\n{context}"))
 }
 
 fn build_distill_prompt_with_related(log: &Value, logs: &[Value]) -> String {
@@ -289,10 +251,13 @@ impl HttpDistiller {
     /// One-shot completion. Public so other LLM-backed features (e.g. the opt-in
     /// recall reranker) can reuse the same retrying transport and provider switch.
     pub fn call(&self, prompt: &str) -> Result<String> {
+        // Last line of defence before text leaves the machine (and before
+        // llm_trace.log previews the request body).
+        let prompt = crate::utils::redact_secrets(prompt).0;
         if self.config.provider == "anthropic" {
-            self.call_anthropic(prompt)
+            self.call_anthropic(&prompt)
         } else {
-            self.call_openai(prompt)
+            self.call_openai(&prompt)
         }
     }
 
@@ -387,6 +352,10 @@ impl Distiller for HttpDistiller {
         distill_entry_with(primary, related_logs, |prompt| self.call(prompt))
     }
 
+    fn complete(&self, prompt: &str) -> Option<crate::errors::Result<String>> {
+        Some(self.call(prompt))
+    }
+
     fn provenance(&self) -> DistillProvenance {
         DistillProvenance {
             provider: Some(self.config.provider.clone()),
@@ -468,6 +437,9 @@ fn distill_entry_with(
                 .and_then(Value::as_str)
                 .map(str::to_string),
             provider_override: None,
+            signals: crate::rule_prompts::draft_from(&parsed)
+                .map(|d| d.signals)
+                .unwrap_or_default(),
         });
     }
     Ok(out)
@@ -729,7 +701,7 @@ impl LlmEmbeddingProvider {
         let url = format!("{base}/embeddings");
 
         let body = json!({
-            "input": text,
+            "input": crate::utils::redact_secrets(text).0,
             "model": self.config.model_id,
         });
 

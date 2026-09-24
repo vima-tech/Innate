@@ -145,6 +145,8 @@ fn recall_snapshot_is_schema_2_with_channels_scores_packing() {
             include_sparks: false,
             top: Some(5),
             source: "cli",
+            session_id: None,
+            project: None,
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",

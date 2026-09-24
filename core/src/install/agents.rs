@@ -392,13 +392,13 @@ pub(super) fn remove_opencode_config() -> ConfigStatus {
 /// Append a Stop hook entry to the Claude Code settings at `config_path`.
 /// Uses the provided `binary` path so no Python interpreter is required.
 pub(super) fn configure_claude_stop_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "Stop", "hook stop --agent claude-code")
+    configure_claude_hook(config_path, binary, "Stop", "hook stop --agent claude-code", None)
 }
 
 /// Append a UserPromptSubmit hook that recalls relevant knowledge for every prompt.
 /// This is the high-frequency, relevance-gated recall trigger (see `innate hook prompt`).
 pub(super) fn configure_claude_prompt_hook(config_path: &Path, binary: &Path) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "UserPromptSubmit", "hook prompt --agent claude-code")
+    configure_claude_hook(config_path, binary, "UserPromptSubmit", "hook prompt --agent claude-code", None)
 }
 
 /// Append a SubagentStop hook so Task-tool subagents also feed session events to the daemon.
@@ -408,15 +408,20 @@ pub(super) fn configure_claude_subagent_stop_hook(
     config_path: &Path,
     binary: &Path,
 ) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "SubagentStop", "hook stop --agent claude-code")
+    configure_claude_hook(config_path, binary, "SubagentStop", "hook stop --agent claude-code", None)
 }
 
-/// Append a SessionStart hook that warms up context with high-relevance project knowledge.
-pub(super) fn configure_claude_session_start_hook(
-    config_path: &Path,
-    binary: &Path,
-) -> ConfigStatus {
-    configure_claude_hook(config_path, binary, "SessionStart", "hook session-start --agent claude-code")
+/// Action-time recall (5.0): PreToolUse matches the Bash command about to run,
+/// PostToolUseFailure the error of one that failed. Both are local-only and
+/// capped at a few seconds so they never hold up a command.
+pub(super) fn configure_claude_action_hooks(config_path: &Path, binary: &Path) -> Vec<(&'static str, ConfigStatus)> {
+    [
+        ("PreToolUse", "hook pre-tool --agent claude-code"),
+        ("PostToolUseFailure", "hook tool-failure --agent claude-code"),
+    ]
+    .into_iter()
+    .map(|(event, sub)| (event, configure_claude_hook(config_path, binary, event, sub, Some("Bash"))))
+    .collect()
 }
 
 /// Generic Claude Code hook installer: append `<binary> <subcommand>` to `hooks.<event>`.
@@ -426,6 +431,7 @@ fn configure_claude_hook(
     binary: &Path,
     event: &str,
     subcommand: &str,
+    tool_matcher: Option<&str>,
 ) -> ConfigStatus {
     let mut settings: Value = match read_json_object(config_path) {
         Ok(v) => v,
@@ -482,9 +488,13 @@ fn configure_claude_hook(
         ));
     };
 
-    event_arr.push(json!({
-        "hooks": [{"type": "command", "command": cmd}]
-    }));
+    event_arr.push(match tool_matcher {
+        Some(m) => json!({
+            "matcher": m,
+            "hooks": [{"type": "command", "command": cmd, "timeout": 5}]
+        }),
+        None => json!({ "hooks": [{"type": "command", "command": cmd}] }),
+    });
 
     match write_json(config_path, &settings) {
         Ok(()) => ConfigStatus::Updated(config_path.to_path_buf()),

@@ -226,3 +226,131 @@ fn stop_hook_recovers_trace_ids_from_transcript() {
         ]
     );
 }
+
+/// Stop fires after every assistant turn and each firing sees the whole
+/// transcript. Re-recording every trace on every Stop grew quadratically with
+/// session length (one live trace was recorded 84 times; one day ran 30,005
+/// records for 137 traces). An already-closed trace must be left alone; only the
+/// session's last trace takes the new end-of-turn summary.
+#[test]
+fn stop_hook_does_not_re_record_closed_traces() {
+    let (kb, _file) = tmp_kb();
+    let first = attributed_trace_many(&kb, &[]);
+    let second = attributed_trace_many(&kb, &[]);
+    let transcript = format!("trace_id: {first}\nlater turn\ntrace_id: {second}\n");
+
+    let state = |trace_id: &str| {
+        kb.storage.get_episodic_log(trace_id).unwrap().unwrap()["task_state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    assert_eq!(
+        crate::hook::close_traces_with(&kb, &transcript, "turn one"),
+        2
+    );
+    assert_eq!(state(&first), "completed");
+    assert_eq!(state(&second), "completed");
+
+    // A later Stop in the same session: only the last trace takes the new summary.
+    assert_eq!(
+        crate::hook::close_traces_with(&kb, &transcript, "turn two"),
+        1
+    );
+    let last = kb.storage.get_episodic_log(&second).unwrap().unwrap();
+    assert_eq!(last["output_summary"].as_str(), Some("turn two"));
+
+    // With nothing new to attach, nothing is recorded at all.
+    assert_eq!(crate::hook::close_traces_with(&kb, &transcript, "  "), 0);
+
+    // A trace opened after the earlier Stops is still closed.
+    let third = attributed_trace_many(&kb, &[]);
+    let longer = format!("{transcript}trace_id: {third}\n");
+    assert_eq!(crate::hook::close_traces_with(&kb, &longer, ""), 1);
+    assert_eq!(state(&third), "completed");
+}
+
+/// A sudo password, a VPS root password and two `sk-` keys were found in
+/// episodic_log, session.log and llm_trace.log: recall and record persisted
+/// free text verbatim, and `sanitize` had no Chinese labels. Both entry points
+/// must redact before anything is stored or embedded.
+#[test]
+fn recall_and_record_never_persist_credentials() {
+    let (kb, _file) = tmp_kb();
+    kb.add("deploy notes", "note", Some("deploy"), None, "manual", None)
+        .unwrap();
+    let result = kb
+        .recall(RecallParams {
+            query: "装依赖要 sudo 密码是 Lx9demopass 帮我部署",
+            budget: 6000,
+            trace: true,
+            source: "sdk",
+            expand_deps: "false",
+            refine_mode: "off",
+            ..Default::default()
+        })
+        .unwrap();
+    kb.record(RecordParams {
+        trace_id: &result.trace_id,
+        output_summary: Some("configured apikey: sk-demo_key_1234567890abcdefgh"),
+        nomination: Some("root 密码是`_6zDemo-444q`"),
+        outcome: Some("ok"),
+        task_state: Some("completed"),
+        source: "sdk",
+        ..Default::default()
+    })
+    .unwrap();
+
+    let log = kb.storage.get_episodic_log(&result.trace_id).unwrap().unwrap();
+    let stored = serde_json::to_string(&log).unwrap();
+    for secret in ["Lx9demopass", "sk-demo_key", "_6zDemo"] {
+        assert!(!stored.contains(secret), "{secret} persisted: {stored}");
+    }
+    assert!(log["query"].as_str().unwrap().contains("[REDACTED]"));
+}
+
+/// Twelve project status reports took 31% of all selections in 30 days, some at
+/// confidence 0.04, because the lifetime rules exempt a chunk forever after a
+/// single use. The windowed rule looks only at recent selection vs use.
+#[test]
+fn hub_chunk_selected_without_use_in_window_is_archived() {
+    let (kb, _f) = tmp_kb();
+    let seed = |label: &str, selected: i64, used: i64, days_ago: i64| -> String {
+        let id = kb.add(label, "note", Some(label), None, "manual", None).unwrap();
+        // One old use and a mid confidence: the lifetime rules (3a/3b/3c) must
+        // not be what archives it.
+        kb.storage
+            .conn_execute_count(
+                "UPDATE chunks SET protected=0, confidence=0.5, used_count_base=1, used_count=1,
+                     last_used_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 days')
+                 WHERE id=?",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        for (event, n) in [("selected", selected), ("used", used)] {
+            kb.storage
+                .conn_execute_count(
+                    "WITH RECURSIVE k(i) AS (SELECT 1 WHERE ?1 > 0 UNION ALL SELECT i+1 FROM k WHERE i < ?1)
+                     INSERT INTO usage_trace(trace_id, chunk_id, event, strength, source, ts)
+                     SELECT lower(hex(randomblob(16))), ?2, ?3, 1.0, 'hook',
+                            strftime('%Y-%m-%dT%H:%M:%fZ','now', printf('-%d days', ?4))
+                     FROM k",
+                    rusqlite::params![n, id, event, days_ago],
+                )
+                .unwrap();
+        }
+        id
+    };
+    let hub = seed("status report hub", 60, 0, 1);
+    let useful = seed("useful but popular", 60, 3, 1);
+    let stale = seed("was a hub long ago", 60, 0, 40);
+
+    kb.builtin_curate_impl(&CurateScope::default()).unwrap();
+
+    let row = |id: &str| kb.storage.get_chunk(id).unwrap().unwrap();
+    assert_eq!(row(&hub)["state"].as_str(), Some("archived"));
+    assert_eq!(row(&hub)["state_reason"].as_str(), Some("hub_selected_unused"));
+    assert_ne!(row(&useful)["state"].as_str(), Some("archived"), "5% use rate is healthy");
+    assert_ne!(row(&stale)["state"].as_str(), Some("archived"), "outside the window");
+}

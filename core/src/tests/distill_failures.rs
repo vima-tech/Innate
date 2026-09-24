@@ -42,7 +42,7 @@ fn distill_failure_is_isolated_to_the_failing_log() {
             used: None,
             feedback_up: None,
             feedback_down: None,
-            nomination: None,
+            nomination: Some("worth keeping: distillation fixture"),
             priority: 0,
             source: "sdk",
             ..Default::default()

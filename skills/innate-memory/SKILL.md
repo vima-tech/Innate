@@ -12,7 +12,7 @@ description: >
 license: MIT
 metadata:
   author: vima-tech
-  version: "0.4.0"
+  version: "0.5.0"
   architecture: mcp
 compatibility: >
   Requires `innate` binary (Rust). Install: `cargo build --release` from the innate directory.
@@ -61,8 +61,18 @@ prompt and carries a `trace_id`. When you see that block:
 - **Reuse its `trace_id`** for the closing `innate_record` — do **not** call `innate_recall`
   again for the same task (that would create a duplicate, dangling trace).
 - Treat its chunks exactly like ones you recalled yourself: apply what helps, then close with a
-  per-chunk verdict (see below).
+  verdict per rule you acted on (see below).
+- A chunk marked **(候选·待验证)** is a candidate rule: not yet validated. Try it when it fits,
+  and report what happened — that report is what lets it mature or get fixed.
 - If the block is absent and the task warrants it, recall manually as above.
+
+### Action-Time Rules
+
+Hooks may also inject an `<innate-rule>` block **right before a shell command runs** or **right
+after one failed**: a rule whose concrete signals (a command, a flag, an error message) matched.
+Read it before proceeding. If you changed what you did because of it, include it in the verdicts
+of your closing `innate_record`. The command's result is captured automatically as the
+observation; your verdict confirms whether you actually applied it.
 
 The hook is relevance-gated, so its silence means "nothing scored high enough" — not "no
 knowledge exists". Recall manually if you suspect relevant prior knowledge the gate missed.
@@ -88,28 +98,30 @@ Record **after** a task that produced a real outcome (success or failure). Skip 
 > you, if the recalled chunk sent you down the wrong path, if the fix did not work — that
 > is `fail`, and it is worth more than another `ok`.
 
-### Per-Chunk Verdict — Mandatory
+### Rule Verdicts — How Knowledge Matures
 
-This is the single most important contract in Innate: confidence ranking is only as good as the
-precision of what you report here. **Every recall that surfaced chunks (manual or hook-injected)
-must be closed with a per-chunk verdict.** For each chunk that was put in front of you, it falls
-into exactly one of three buckets:
+A rule becomes trusted knowledge only through **verdicts backed by what you observed**. Being
+recalled, being cited or a task ending `ok` proves nothing about a rule. For each recalled rule
+you **acted on**, add one entry to `verdicts`:
 
-| Verdict | What it means | Where it goes |
+| verdict | When | observation (required for the first two) |
 |---|---|---|
-| **Used + helped** | You applied it and it saved time / prevented a mistake | `used=[id]` **and** `feedback_up=[id]` |
-| **Used + misled** | You applied it but it was wrong or sent you the wrong way | `used=[id]` **and** `feedback_down=[id]` |
-| **Not used** | Recalled but you never applied it | omit entirely (do **not** list in `used`) |
+| `supported` | You followed it and the outcome matched what it predicts | What you saw: command output, test result, the user's reaction |
+| `contradicted` | You followed it (or it applied) and it was wrong or incomplete | What actually happened instead |
+| `irrelevant` | It was recalled but does not fit this situation | — |
+| `applied` | You followed it but cannot tell yet whether it worked | — |
 
-Rules that keep the signal clean:
-- `used` lists **only** chunks you actively referenced in your reasoning or output — typically
-  one to three. Never pad it with merely-recalled chunks.
-- If you applied **nothing**, that is a real, valuable signal: set `used=[]` explicitly
-  (known-none). Do not skip the record — silence is not the same as "nothing helped".
-- A chunk you `used` should almost always also carry an up **or** down signal. A used chunk with
-  no verdict wastes the strongest ranking input you can give.
-- Be honest about `feedback_down`. A wrong chunk you mark down gets reviewed and archived; a
-  wrong chunk you leave unmarked keeps misleading future sessions.
+```
+innate_record(trace_id=<id>, outcome="ok", verdicts=[
+  {"chunk_id": "<id>", "verdict": "contradicted",
+   "observation": "pgrep -f matched the waiting shell itself; loop hung until timeout"}])
+```
+
+- Rules you did not act on: leave them out.
+- A rule matures after at least two independent sessions support it, one of them in a
+  **different project**, with no unresolved contradiction. A `contradicted` verdict suspends it
+  and triggers a revision — it is as valuable as a `supported` one. Report it honestly.
+- `used` / `feedback_up` / `feedback_down` still tune ranking; they no longer promote anything.
 
 ### Output Summary — Structured Format
 
@@ -129,30 +141,29 @@ Bad examples (too vague to reuse):
 - `I helped the user with auth`
 - `The problem was timing`
 
-The output_summary becomes the reusable knowledge chunk. If it reads like a story, rewrite it
-as a principle. **Prefer the general, transferable form** — strip repo/file/function names and
-one-off identifiers, and phrase the lesson so it helps on the next project too; keep
-project-specific detail only when the lesson cannot be generalized without losing its meaning.
+The output_summary is kept as **experience material**, not turned into a rule directly. Rules
+are born when the same kind of struggle or correction recurs across sessions (captured
+automatically from the transcript), or from an explicit nomination (below).
 **If you cannot write a useful summary, set output="unknown" and skip recording.**
 
-Call: `innate_record(trace_id=<id>, outcome=<ok|fail|unknown>, used=[<chunk_ids>], output_summary=<sentence>)`
+Call: `innate_record(trace_id=<id>, outcome=<ok|fail|unknown>, verdicts=[...], output_summary=<sentence>)`
 
-### Explicit Feedback — Why It Matters
+### Explicit Feedback — Ranking Only
 
-The `feedback_up` / `feedback_down` lists from the verdict table above are the fastest signal for
-knowledge quality, and they directly drive ranking and lifecycle: **two** down signals on the same
-chunk trigger a governance review; **five** trigger automatic archival. Conversely, repeated
-`used + feedback_up` is what promotes a `pending` chunk to `active`. Withholding feedback freezes
-the knowledge base; giving it is how good knowledge rises and bad knowledge falls out.
+`feedback_up` / `feedback_down` adjust how a chunk ranks: **two** down signals trigger a
+governance review, **five** trigger archival. They do not mature a rule — only verdicts with an
+observation do.
 
 ## Nomination — Rare, Explicit
 
-Use the `nomination` field only for genuinely generalizable lessons — patterns that will
-save significant time the next time this type of problem appears. Rare. Not for every task.
+Use the `nomination` field only for genuinely transferable lessons — patterns that will
+save significant time the next time this type of problem appears, **in another project**.
+Rare. Not for every task. A nomination is the only way a single session becomes a candidate
+rule; it still has to be validated before it is trusted.
 
-Format for nomination (self-contained principle):
+Format for nomination (self-contained, no project names or business data):
 ```
-<principle> — <when it applies> — <what to avoid>
+<concrete signal (exact error / command / symptom)> — <what to do> — <how to tell it worked> — <when not to>
 ```
 
 Example:
@@ -165,7 +176,7 @@ innate_record(..., nomination="SQLite UNIQUE index on partial WHERE clause requi
 | Tool | Use | Notes |
 |---|---|---|
 | `innate_recall` | Task start (when relevant) | Use canonical query form — consistent phrasing accumulates context stats |
-| `innate_record` | Task end (when real outcome exists) | Structured output_summary + precise used IDs |
+| `innate_record` | Task end (when real outcome exists) | Outcome + `verdicts` for rules you acted on (with observations) |
 | `innate_add` | Capture confirmed insight | Always `source="mcp"`; goes to pending, awaits review |
 | `innate_spark` | Quick idea for later | Brief distilled form; no review needed |
 | `innate_evolve` | End of session | `trigger="manual"`; distils logs + curates knowledge base |
@@ -181,13 +192,12 @@ innate_record(..., nomination="SQLite UNIQUE index on partial WHERE clause requi
 Before ending a long session, run this checklist silently:
 
 1. Was a non-obvious solution found? (workaround, hidden constraint, subtle bug pattern)
-2. Was a general, transferable skill, method, or technique surfaced? (prefer these — abstract
-   project-specific lessons into reusable form; keep a project-specific rule only when it
-   genuinely can't be generalized)
+2. Was a general, transferable skill, method, or technique surfaced? (Innate keeps knowledge
+   that helps in other projects; project status, facts and one-off decisions are not rules)
 3. Did the user correct a wrong assumption of mine that I'd likely repeat?
 4. Was a hard-won insight reached after multiple failed attempts?
-5. Did a recalled chunk actively help? (record feedback_up)
-6. Did a recalled chunk mislead? (record feedback_down)
+5. Did a recalled rule work when I followed it? (verdict `supported` + observation)
+6. Did a recalled rule turn out wrong? (verdict `contradicted` + observation)
 
 If **any** of 1-4 → propose to the user:
 > "This session surfaced [one-line description]. Want me to save it to Innate?"
@@ -233,11 +243,10 @@ that pays off across projects, not just the current codebase. When a lesson is p
 # Recall
 innate recall "<canonical_intent>" --top 5 --format json --source cli
 
-# Record with structured summary
+# Record with structured summary and rule verdicts
 innate record <trace_id> --outcome ok \
-  --used <id1>,<id2> \
   --output-summary "Fixed X by doing Y — applies when Z" \
-  --feedback up  # or down
+  --verdicts '[{"chunk_id":"<id>","verdict":"supported","observation":"<what happened>"}]'
 
 # Capture insight
 innate add "<principle> — <trigger> — <what to avoid>" \
@@ -292,16 +301,14 @@ Parse $ARGUMENTS for:
 Steps:
 1. Identify the active trace_id from this session's most recent `innate_recall` call.
    If no trace_id is available, say "No active trace — run /innate-recall first."
-2. Determine which recalled chunk IDs were **actually used** in the final response (not
-   just candidates recalled). Be precise — unused recalled chunks should NOT be listed.
+2. For each recalled rule you **acted on**, decide a verdict: `supported` (it worked — say what
+   you observed), `contradicted` (it was wrong — say what actually happened), `irrelevant`, or
+   `applied` (followed, result unknown). Leave out rules you did not act on.
 3. Write a structured output_summary for a future agent reading cold:
    Format: `<what was done> — <key constraint/method> — <when this applies>`
    If the user provided summary text in $ARGUMENTS, use that.
-4. Assess feedback:
-   - If any chunk was directly helpful → include `feedback_up=[chunk_id]`
-   - If any chunk was wrong/misleading → include `feedback_down=[chunk_id]`
-5. Call `innate_record` with `trace_id`, `outcome`, `used=[<chunk_ids>]`,
-   `output_summary`, and feedback if applicable.
+4. Call `innate_record` with `trace_id`, `outcome`, `verdicts=[{chunk_id, verdict, observation}]`
+   and `output_summary`.
 6. Confirm: "Recorded trace <trace_id> as <outcome>."
 ```
 

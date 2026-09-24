@@ -226,6 +226,47 @@ impl KnowledgeBase {
                 }
             }
 
+            // ── 3b'. Archive: hub_selected_unused — windowed selection vs use ──
+            // Unlike 3a/3b this looks only at the recent window, so one old use
+            // no longer buys a chunk permanent immunity while it keeps crowding
+            // out other candidates.
+            let hub_cutoff = days_ago(&now_iso, super::HUB_WINDOW_DAYS);
+            let hubs = self.storage.query_chunks_params(
+                "SELECT c.id FROM chunks c
+                 JOIN (SELECT chunk_id,
+                              SUM(event='selected') AS sel,
+                              SUM(event='used') AS used
+                       FROM usage_trace
+                       WHERE ts >= ? AND event IN ('selected','used') AND chunk_id IS NOT NULL
+                       GROUP BY chunk_id) w ON w.chunk_id = c.id
+                 WHERE c.origin!='spark' AND c.protected=0 AND c.state IN ('active','pending')
+                   AND w.sel >= ? AND w.used < w.sel * ?
+                   AND (? IS NULL OR c.origin=?)
+                   AND (? IS NULL OR c.skill_name=?)",
+                rusqlite::params![
+                    hub_cutoff,
+                    self.hub_select_min,
+                    super::HUB_MAX_USE_RATE,
+                    scope_origin,
+                    scope_origin,
+                    scope_skill,
+                    scope_skill
+                ],
+            )?;
+            for c in &hubs {
+                if let Some(id) = c.get("id").and_then(Value::as_str) {
+                    if !report.archived.contains(&id.to_string()) {
+                        self.storage.update_chunk_state(
+                            id,
+                            "archived",
+                            Some("hub_selected_unused"),
+                            &now_iso,
+                        )?;
+                        report.archived.push(id.to_string());
+                    }
+                }
+            }
+
             // ── 3c. Archive: never_used — no successful use before the age limit ──
             let never_used_cutoff = days_ago(&now_iso, self.never_used_age_days);
             let never_used = self.storage.query_chunks_params(
@@ -233,6 +274,9 @@ impl KnowledgeBase {
                  WHERE origin!='spark' AND protected=0 AND state IN ('active','pending')
                    AND used_count = 0
                    AND COALESCE(evidence_cutoff_at, created_at) < ?
+                   -- 5.0: a rule under validation is being tried, not ignored.
+                   AND id NOT IN (SELECT chunk_id FROM rule_validations
+                                  WHERE verdict IN ('applied','supported'))
                    AND (? IS NULL OR origin=?)
                    AND (? IS NULL OR skill_name=?)",
                 rusqlite::params![
@@ -487,90 +531,10 @@ impl KnowledgeBase {
                 }
             }
 
-            // ── 6. Promote: pending → active when three-guard criteria met ──
-            let promotable = self.storage.query_chunks_params(
-                "SELECT id FROM chunks
-                 WHERE state='pending' AND origin!='spark'
-                   AND used_success_count >= ?
-                   AND success_trace_ids_count >= ?
-                   AND confidence >= ?
-                   AND (? IS NULL OR origin=?)
-                   AND (? IS NULL OR skill_name=?)",
-                rusqlite::params![
-                    self.promote_used_success_min,
-                    // Both counters are derived from the same trace-deduped
-                    // aggregate, so they share one threshold; a literal here
-                    // would silently pin the gate above a lower configured min.
-                    self.promote_used_success_min,
-                    self.promote_confidence_min,
-                    scope_origin,
-                    scope_origin,
-                    scope_skill,
-                    scope_skill
-                ],
-            )?;
-            for c in &promotable {
-                if let Some(id) = c.get("id").and_then(Value::as_str) {
-                    self.storage.update_chunk_state(
-                        id,
-                        "active",
-                        Some("repeated_success"),
-                        &now_iso,
-                    )?;
-                    report.promoted.push(id.to_string());
-                }
-            }
-
-            // ── 6b. Weak promote: sustained usefulness without a success streak ──
-            //
-            // The strong gate above needs `used_success_min` *successful* uses,
-            // each on a distinct trace. That depends on agents closing traces
-            // with an explicit outcome, which they do for a small minority of
-            // recalls — so pending chunks that were demonstrably useful still
-            // piled up: 459 pending against 27 active, the oldest 73 days old,
-            // two promotions a week.
-            //
-            // This second, deliberately narrower channel promotes a chunk that
-            // has earned its place by attrition instead: selected many times,
-            // used at least once, old enough to have had a fair trial, and
-            // carrying no negative signal: no thumbs-down, and confidence still
-            // at or above its seed. The confidence floor is what rules out a
-            // failed use — `task_fail` writes negative confidence evidence, so
-            // any chunk that has failed sits below the seed by construction.
-            let weak_promotable = self.storage.query_chunks_params(
-                "SELECT id FROM chunks
-                 WHERE state='pending' AND origin!='spark'
-                   AND selected_count >= ?
-                   AND used_count >= 1
-                   AND created_at <= ?
-                   AND confidence >= ?
-                   AND id NOT IN (SELECT chunk_id FROM feedback_events WHERE signal='down')
-                   AND (? IS NULL OR origin=?)
-                   AND (? IS NULL OR skill_name=?)",
-                rusqlite::params![
-                    self.weak_promote_selected_min,
-                    days_ago(&now_iso, self.weak_promote_age_days),
-                    DISTILLED_SEED_CONFIDENCE,
-                    scope_origin,
-                    scope_origin,
-                    scope_skill,
-                    scope_skill
-                ],
-            )?;
-            for c in &weak_promotable {
-                if let Some(id) = c.get("id").and_then(Value::as_str) {
-                    if report.promoted.iter().any(|p| p == id) {
-                        continue;
-                    }
-                    self.storage.update_chunk_state(
-                        id,
-                        "active",
-                        Some("sustained_usefulness"),
-                        &now_iso,
-                    )?;
-                    report.promoted.push(id.to_string());
-                }
-            }
+            // ── 6. Maturity (5.0): validated, transferable, uncontradicted ──
+            // Replaces the success-count and weak promotions, which matured any
+            // text an agent had marked "used" twice. See kb/rules/maturity.rs.
+            self.apply_maturity(&now_iso, &mut report)?;
 
             // ── 7. Cycle/orphan detection (report only, no auto-fix) ──
             let all_deps = self

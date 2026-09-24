@@ -89,8 +89,7 @@ impl KnowledgeBase {
                     "curate_next_due_at": next_due
                 }));
             }
-            let curator = Arc::clone(&self.curator);
-            let curate = curator.run(self, &CurateScope::default())?;
+            let curate = self.curate_with_rules()?;
             return Ok(json!({
                 "distilled": 0,
                 "curate": self.format_curate_report(&curate),
@@ -109,8 +108,7 @@ impl KnowledgeBase {
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
             if cnt < self.evolve_threshold {
-                let curator = Arc::clone(&self.curator);
-                let curate = curator.run(self, &CurateScope::default())?;
+                let curate = self.curate_with_rules()?;
                 if let Some(id) = request_id {
                     if matches!(request_reason, Some("governance" | "governance_ready")) {
                         self.storage.finish_evolve_request(
@@ -158,8 +156,7 @@ impl KnowledgeBase {
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
                 if used_tokens >= limit {
-                    let curator = Arc::clone(&self.curator);
-                    let curate = curator.run(self, &CurateScope::default())?;
+                    let curate = self.curate_with_rules()?;
                     if let Some(id) = request_id {
                         if matches!(request_reason, Some("governance" | "governance_ready")) {
                             self.storage.finish_evolve_request(
@@ -207,8 +204,7 @@ impl KnowledgeBase {
                     "curate_skipped": "throttled",
                 }));
             }
-            let curator = Arc::clone(&self.curator);
-            let curate = curator.run(self, &CurateScope::default())?;
+            let curate = self.curate_with_rules()?;
             Ok(json!({
                 "distilled": distill.distilled,
                 "distill_failed": distill.failed,
@@ -266,6 +262,8 @@ impl KnowledgeBase {
             "recovered": curate.recovered.len(),
             "orphans": curate.orphans.len(),
             "warnings": curate.warnings,
+            "suspended": curate.stats.get("suspended").cloned().unwrap_or(Value::Null),
+            "rules": curate.stats.get("rules").cloned().unwrap_or(Value::Null),
         })
     }
 
@@ -431,6 +429,12 @@ impl KnowledgeBase {
                     distill_provider,
                     distill_model: provenance.model.clone(),
                     distill_prompt_version: provenance.prompt_version.clone(),
+                    signals: (!dc.signals.is_empty())
+                        .then(|| serde_json::to_string(&dc.signals).unwrap_or_default()),
+                    source_projects: log
+                        .get("project")
+                        .and_then(Value::as_str)
+                        .map(|p| serde_json::json!([p]).to_string()),
                     state: "pending".to_string(),
                     state_reason: Some("init:distilled".to_string()),
                     confidence: conf,

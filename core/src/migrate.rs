@@ -39,9 +39,19 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("4.19", "4.20", include_str!("migrations/4.19_to_4.20.sql")),
     ("4.20", "4.21", include_str!("migrations/4.20_to_4.21.sql")),
     ("4.21", "4.22", include_str!("migrations/4.21_to_4.22.sql")),
+    ("4.22", "5.0", include_str!("migrations/4.22_to_5.0.sql")),
 ];
 
-const TARGET: &str = "4.22";
+const TARGET: &str = "5.0";
+
+/// Columns added by the 5.0 step. ALTER ADD COLUMN has no IF NOT EXISTS, so each
+/// is added only when its table exists and the column is missing.
+const COLUMNS_5_0: &[(&str, &str, &str)] = &[
+    ("chunks", "signals", "TEXT"),
+    ("chunks", "source_projects", "TEXT"),
+    ("episodic_log", "project", "TEXT"),
+    ("episodic_log", "session_id", "TEXT"),
+];
 
 /// The schema version this binary migrates to (single source of truth for callers
 /// that want to report it, e.g. the CLI `migrate` "nothing to do" message).
@@ -68,6 +78,13 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
     let current = schema_version(&conn)?;
     if current == TARGET {
         return Ok(vec![]);
+    }
+
+    // 5.0 changes what a library *means* (experience / rule / validation split).
+    // Keep a full copy of a real library before crossing that line. VACUUM INTO
+    // cannot run inside a transaction, so it happens before the step loop.
+    if !cfg!(test) && ver_tuple(&current) < ver_tuple("5.0") {
+        backup_before_major(&conn, db_path.as_ref(), "5.0")?;
     }
 
     let mut applied = vec![];
@@ -112,6 +129,7 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
         // 测试夹具只建简化 schema(缺这些表/列),故每个索引各自用 column_exists 守卫;
         // 真实库三表恒有 ts,索引照常建立。各索引独立判断(夹具可能只缺其中之一)。
         let add_ts_indexes = *to == "4.19";
+        let add_5_0_columns = *to == "5.0";
         // Run the step atomically.
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = conn.execute_batch(sql);
@@ -169,6 +187,27 @@ pub fn run_migrations(db_path: impl AsRef<Path>) -> Result<Vec<String>> {
                                 let _ = conn.execute_batch("ROLLBACK");
                                 return Err(error.into());
                             }
+                        }
+                    }
+                }
+                if add_5_0_columns {
+                    for (table, col, ty) in COLUMNS_5_0 {
+                        let table_exists = conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                                [table],
+                                |r| r.get::<_, i64>(0),
+                            )
+                            .map(|n| n > 0)
+                            .unwrap_or(false);
+                        if !table_exists || column_exists(&conn, table, col).unwrap_or(true) {
+                            continue;
+                        }
+                        if let Err(error) =
+                            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {ty}"))
+                        {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(error.into());
                         }
                     }
                 }
@@ -234,6 +273,21 @@ fn backfill_chunk_entities(conn: &Connection) -> Result<()> {
             ins.execute(rusqlite::params![id, e.entity, e.etype])?;
         }
     }
+    Ok(())
+}
+
+/// Copy the library to `<db>.pre_<version>.bak` with `VACUUM INTO` (consistent
+/// even with a live WAL). Skipped when the copy already exists, so a retried
+/// migration never overwrites the original pre-migration state.
+fn backup_before_major(conn: &Connection, db_path: &Path, version: &str) -> Result<()> {
+    let mut target = db_path.as_os_str().to_owned();
+    target.push(format!(".pre_{version}.bak"));
+    let target = std::path::PathBuf::from(target);
+    if target.exists() {
+        return Ok(());
+    }
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])?;
+    eprintln!("[innate] backed up library to {} before migrating to {version}", target.display());
     Ok(())
 }
 

@@ -220,9 +220,24 @@ pub fn aggregate_ops(rows: &[OpRunRow]) -> serde_json::Value {
         "by_op": group_perf(rows, |r| Some(r.op.as_str())),
         "by_source": group_perf(rows, |r| r.source.as_deref()),
         "by_agent": group_perf(rows, |r| r.agent.as_deref()),
-        "by_context": group_perf(rows, |r| r.context.as_deref()),
+        // Hundreds of per-query contexts make `inspect` unreadable; keep the busiest.
+        "by_context": top_groups(group_perf(rows, |r| r.context.as_deref()), 10),
         "error_kind_top": error_kind_top,
     })
+}
+
+/// Keep the `n` groups with the highest `count`.
+fn top_groups(groups: serde_json::Value, n: usize) -> serde_json::Value {
+    let serde_json::Value::Object(map) = groups else {
+        return groups;
+    };
+    let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+    entries.sort_by(|a, b| {
+        let count = |v: &serde_json::Value| v.get("count").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        count(&b.1).cmp(&count(&a.1)).then(a.0.cmp(&b.0))
+    });
+    entries.truncate(n);
+    serde_json::Value::Object(entries.into_iter().collect())
 }
 
 /// Group rows by a key extractor and emit per-group count + status split + p50/p95.

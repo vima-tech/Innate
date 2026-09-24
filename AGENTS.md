@@ -59,6 +59,8 @@ Add to `.claude/settings.json` to enable MCP tools directly in Claude Code:
 
 `docs/Innate-设计文档-v0.1.9.md` is the **编码基线** (latest; supersedes the v0.1.8 doc after the modular refactor). Every design decision references a section. When behavior is ambiguous, consult the doc first.
 
+**Schema 5.0 / v0.2.0 (living-knowledge model)** changes how knowledge is born and matures; for those parts `docs/Innate-活知识库重构-整体改进方案-v1.md` (with its decision record §8) overrides v0.1.9. Summary: experience (episodes) and rules are separate; rules are born from episodes recurring across sessions (or an explicit nomination); a rule matures only on validated, transferable evidence; counterexamples suspend and revise it.
+
 ## Architecture
 
 ### Conceptual model — 记忆 · 技能 · 直觉 (Memory · Skill · Intuition)
@@ -67,7 +69,7 @@ Innate presents as three cooperating layers over one procedural-knowledge core. 
 
 | Layer | Mechanism in code |
 |---|---|
-| **记忆 Memory** | `recall → record → evolve` flywheel; confidence EMA + decay + curate (`kb/recall.rs`, `kb/record/`, `kb/evolve.rs`, `kb/curate.rs`) |
+| **记忆 Memory** | episodes → rules → validations (5.0): transcripts yield episodes (`episodes.rs`), recurring episodes become candidate rules, verdicts with observations mature or suspend them (`kb/rules/`); ranking still uses confidence EMA + decay + curate (`kb/recall.rs`, `kb/record/`, `kb/evolve.rs`, `kb/curate.rs`) |
 | **技能 Skill** | `kind="skill"` / `origin="installed"` chunks; `innate-memory` SKILL.md; `install/` wizard |
 | **直觉 Intuition** | `appraise` critic — synchronous, no-LLM, value-domain-safe (no answer text) (`kb/appraise.rs`, `innate_appraise`) |
 
@@ -126,12 +128,18 @@ Source is split into focused module directories (the old monolithic `kb.rs` / `s
 | `install/{wizard,agents,skills,settings,path,ui,uninstall}.rs` | `innate install`/`uninstall` TUI — configures Claude/Codex/opencode MCP, skill, slash commands, Stop hook |
 | `backup/{mod,command}.rs` | Cloudflare R2 backup/restore/list/prune (S3-compatible + SigV4) |
 | `upgrade.rs` | `innate upgrade` — GitHub Releases self-update + SHA-256 verify + atomic swap |
-| `migrate.rs` | Schema migration chain 4.0 → 4.22, each step atomic |
-| `hook.rs` | `innate hook stop/prompt/session-start` — Stop payload → session.log events **and** closes this session's hook traces (`close_session_traces`); recall hooks with a tight network budget + lexical fallback |
+| `migrate.rs` | Schema migration chain 4.0 → 5.0, each step atomic; `VACUUM INTO <db>.pre_5.0.bak` before crossing into 5.0 |
+| `hook.rs` | `innate hook stop/prompt/session-start` — Stop payload → session.log events, closes this session's hook traces (`close_session_traces`) **and** captures episodes + observations (`capture_session`); prompt recall with a tight network budget + lexical fallback. `session-start` is a no-op since 5.0 |
+| `hook_action.rs` | `innate hook pre-tool` / `tool-failure` (PreToolUse / PostToolUseFailure) — action-time recall: local signal match (`action_match.rs`), at most one rule, once per session |
+| `episodes.rs` | Deterministic transcript parsing → episodes (struggle: failed command → attempts → recovery; correction: user says the agent got it wrong) and observations after a shown rule |
+| `project.rs` | Project identity = name of the nearest ancestor holding `.git`; the unit of "transferable" |
+| `rule_prompts.rs` | Prompts + parsing for the rule pipeline (write / judge / revise / signals); judge verdicts must quote the observation verbatim |
+| `kb/rules/{mod,evolve,maturity}.rs` | Rule loop: record verdicts, mark shown, capture; offline pipeline (judge → birth → revise → signal backfill, capped per run); maturity gates in curate |
+| `storage/rules.rs` | `episodes` + `rule_validations` tables |
 | `paths.rs` | Single source of truth for the `~/.innate` directory layout; `ensure_layout()` creates subdirs + migrates legacy flat files |
 | `utils.rs` | `utc_now_iso()`, `gen_uuid()`, `content_hash()`, `sanitize()`, cosine similarity |
 | `settings.rs` | `settings.json` parsing (LLM / Embedding / Daemon / Backup) |
-| `schema.sql` | Embedded schema (v4.22); `include_str!` at compile time |
+| `schema.sql` | Embedded schema (v5.0); `include_str!` at compile time |
 
 ### Filesystem layout (`~/.innate/`)
 
@@ -158,9 +166,11 @@ Plus `appraise` — the 直觉/intuition critic (synchronous, no-LLM, reuses rec
 ### Key Data Flow
 
 ```
-recall()  →  writes usage_trace(retrieved/selected) + episodic_log(distill_state='open')
-record()  →  appends usage_trace(used/task_ok/task_fail) + updates episodic_log → 'new' or 'discarded'
-evolve()  →  distill (new→pending chunks) + builtin_curate (aggregate→archive→promote→purge)
+recall()  →  writes usage_trace(retrieved/selected) + episodic_log(distill_state='open'); ≤1 candidate (pending) per result
+record()  →  appends usage_trace(used/task_ok/task_fail) + rule_validations (verdicts) + updates episodic_log → 'new' (nominated) or 'discarded'
+hook stop →  episodes (struggles, corrections) + observations for rules shown this session
+evolve()  →  rule pipeline (judge → birth from recurring episodes → revise contradicted → signal backfill)
+             + distill nominated logs + builtin_curate (aggregate→archive→maturity gates→purge)
 ```
 
 ### Vector Search
@@ -186,7 +196,11 @@ Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k
 
 **`record` never rejects a call for one bad id** — `filter_attributable` drops unattributable ids, applies the rest, and returns them in `RecordReport::unattributed` (`{field, chunk_id, reason}`). Rejecting outright killed 16% of MCP records. When *no* id survives, `used` degrades to `None` rather than `Some([])`, so a bad call cannot erase previously recorded attribution via `used_complete`.
 
-**The Stop hook closes its own session's traces** (`hook::close_session_traces`) — recall hooks used to open traces that nothing ever closed (47.5% expired as `timed_out`). Trace ids are recovered from the transcript, which is where `run_hook_recall` printed them. Two invariants: `outcome` stays `None` (the hook cannot judge success, and a guessed outcome would move confidence), and usage is claimed only for chunk ids the **assistant itself wrote**, as `cited`, with `used_complete=false`.
+**The Stop hook closes its own session's traces** (`hook::close_session_traces`) — recall hooks used to open traces that nothing ever closed (47.5% expired as `timed_out`). Trace ids are recovered from the transcript, which is where `run_hook_recall` printed them. Two invariants: `outcome` stays `None` (the hook cannot judge success, and a guessed outcome would move confidence), and usage is claimed only for chunk ids the **assistant itself wrote**, as `cited`, with `used_complete=false`. Third: Stop fires after every turn and sees the whole transcript, so a trace already `completed` is skipped (only the session's last trace is re-recorded, to take the new summary). Re-recording everything grew quadratically — one day ran 30,005 records for 137 traces.
+
+**Requeueing an evolve request must respect one-pending-per-reason** (`idx_evolve_pending_reason`) — `claim_evolve_request_with_reason` returns stale `running` and retryable `failed` rows to the queue via `requeue_evolve_requests`, which closes a row as `<note>_merged` when its reason already has a pending row (or an older candidate). Resetting it blindly raised a UNIQUE error on every claim, so one evolve killed mid-lease wedged the queue for good (2026-09-23).
+
+**Credentials are redacted at every entry and egress, not only on chunk writes** — `utils::redact_secrets` (keys: `sk-`/`AKIA`/`ghp_`, bearer tokens, labelled values incl. Chinese `密码是…`/`口令：…`) runs at `recall`/`record` entry (query, output, summary, nomination, feedback_reason), inside `HttpDistiller::call` and the embedding request, and before the Stop hook writes session.log (redact *before* truncating, or a clipped password slips under the length threshold). `sanitize()` wraps it for chunk writes. Before 2026-09-23 only chunks were sanitized, and sudo / root / admin passwords plus an `sk-` key sat in episodic_log, session.log and llm_trace.log and were sent to the LLM and embedding APIs. It must stay idempotent (an existing `[REDACTED]` is never re-matched) and must skip placeholders (`$VAR`, `${X}`) and paths.
 
 **Transcript text must be JSON-decoded before scanning** — a `.jsonl` transcript stores message bodies as JSON strings, so a newline in the text is the two characters `\n`. Use `hook::role_text`; scanning the raw file for a marker spanning a newline silently matches nothing (and passes against hand-written fixtures with literal newlines).
 
@@ -201,7 +215,15 @@ Measure recall quality on real data with `innate recall-eval <labels.jsonl> [--k
 
 **Time functions** — `utc_now_iso()` in `utils.rs` is the **only** time source. Format: `YYYY-MM-DDTHH:MM:SS.mmmZ` (fixed 3-digit ms). Never use system time directly. All SQL cutoff comparisons rely on lexicographic ordering of this format.
 
-**`record()` distill_state transition** — `open→new/discarded` judgment runs **only when `distill_state == 'open'`**. Second call must not downgrade a log already in `'new'` or `'screening'` state.
+**`record()` distill_state transition** — `open→new/discarded` judgment runs **only when `distill_state == 'open'`**. Second call must not downgrade a log already in `'new'` or `'screening'` state. Since 5.0 only a **nomination** makes a log `new` (a rule source); a summary or output is experience material. Per-log distillation of every summary produced ~107 candidates a day, 74% never retrieved.
+
+**Maturity is earned by verdicts, nothing else (5.0)** — `kb/rules/maturity.rs` promotes a candidate only with ≥2 `supported` verdicts from independent sessions *after* the rule was born (sessions that gave birth to it don't count), at least one in a project outside `chunks.source_projects`, and no unresolved `contradicted`. `supported`/`contradicted` require an observation. `used` + `outcome=ok`, `feedback_up`, selection counts and confidence never promote (the old `repeated_success`/`sustained_usefulness` paths matured status reports). An unresolved contradiction suspends an active rule back to pending; the user's own rules (`init:captured` or protected) are exempt. `never_used` archiving skips rules with `applied`/`supported` verdicts.
+
+**The rule pipeline never invents knowledge deterministically** — rule writing, judging, revision and signal backfill go through `Distiller::complete`; `None` (no model) or an error stops the step and leaves the work queued. `ResilientDistiller::complete` has no fallback on purpose. Each step is capped per evolve run (the configured model answers in ~50 s). The judge's `supported`/`contradicted` survives only if its quote is a verbatim substring of the observation (`rule_prompts::parse_judgement`) — the model links evidence, it cannot create it.
+
+**Action-time hooks stay local, rare and precise** — `hook pre-tool` / `tool-failure` match `chunks.signals` literally (no embedding, no network), require a strong match (`action_match::MIN_SCORE`, generic signals ignored), show at most one rule and never the same rule twice in a session (`shown_in_session`). Every injection is a `shown` row; the Stop hook attaches the following tool calls as its observation. Installed with `matcher: Bash` and a 5 s timeout.
+
+**Episode and capture idempotence** — the Stop hook sees the whole transcript every turn. Episode ids are `content_hash(session|kind|anchor)` and inserted with `INSERT OR IGNORE`; observations attach only to rows still `shown`. The transcript format is internal to Claude Code and changes between releases, so `episodes::parse` skips anything unexpected instead of failing.
 
 **`record()` fresh-insert path** — When no pre-existing `episodic_log` row exists (Hook/Daemon direct record), `is_fresh_insert = true` triggers `apply_outcome_implicit` even though `existing_outcome == outcome` after insert.
 

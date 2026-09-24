@@ -111,18 +111,18 @@ impl Storage {
         now: &str,
         stale_before: &str,
     ) -> Result<Option<EvolveRequestClaim>> {
-        self.conn.execute(
-            "UPDATE evolve_requests
-             SET state='pending', leased_at=NULL, note='lease_recovered'
-             WHERE state='running' AND leased_at < ?",
-            [stale_before],
+        self.requeue_evolve_requests(
+            "{t}.state='running' AND {t}.leased_at < ?2",
+            stale_before,
+            now,
+            "lease_recovered",
         )?;
-        self.conn.execute(
-            "UPDATE evolve_requests
-             SET state='pending', leased_at=NULL, note='retry_failed'
-             WHERE state='failed' AND attempts < 3
-               AND COALESCE(next_retry_at, completed_at) < ?",
-            [now],
+        self.requeue_evolve_requests(
+            "{t}.state='failed' AND {t}.attempts < 3
+               AND COALESCE({t}.next_retry_at, {t}.completed_at) < ?2",
+            now,
+            now,
+            "retry_failed",
         )?;
         Ok(self
             .conn
@@ -145,6 +145,50 @@ impl Storage {
                 },
             )
             .optional()?)
+    }
+
+    /// Put abandoned requests (rows matching `candidate`) back in the queue without
+    /// violating `idx_evolve_pending_reason`, which allows one pending row per reason.
+    ///
+    /// A candidate whose reason already has a pending row, or that is not the oldest
+    /// candidate for its reason, is subsumed by that row: it is closed as
+    /// `completed` with note `<note>_merged` instead of being reset. Resetting it
+    /// anyway raised a UNIQUE error on every claim, so one evolve killed while
+    /// holding a lease (shutdown, daemon restart) wedged the queue permanently.
+    ///
+    /// `candidate` is a predicate over table alias `{t}` that may use `?2` (`cutoff`).
+    fn requeue_evolve_requests(
+        &self,
+        candidate: &str,
+        cutoff: &str,
+        now: &str,
+        note: &str,
+    ) -> Result<()> {
+        let cand_r = candidate.replace("{t}", "r");
+        let cand_o = candidate.replace("{t}", "o");
+        self.conn.execute(
+            &format!(
+                "UPDATE evolve_requests AS r
+                 SET state='completed', completed_at=?1, leased_at=NULL,
+                     next_retry_at=NULL, note=?3 || '_merged'
+                 WHERE {cand_r}
+                   AND (EXISTS (SELECT 1 FROM evolve_requests p
+                                WHERE p.state='pending' AND p.reason=r.reason)
+                        OR EXISTS (SELECT 1 FROM evolve_requests o
+                                   WHERE {cand_o} AND o.reason=r.reason
+                                     AND (o.requested_at, o.id) < (r.requested_at, r.id)))"
+            ),
+            params![now, cutoff, note],
+        )?;
+        self.conn.execute(
+            &format!(
+                "UPDATE evolve_requests AS r
+                 SET state='pending', leased_at=NULL, note=?1
+                 WHERE {cand_r}"
+            ),
+            params![note, cutoff],
+        )?;
+        Ok(())
     }
 
     pub fn defer_evolve_request(&self, id: &str, note: &str, next_retry_at: &str) -> Result<()> {

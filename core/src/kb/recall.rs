@@ -13,6 +13,11 @@ pub struct RecallParams<'a> {
     pub include_sparks: bool,
     pub top: Option<usize>,
     pub source: &'a str,
+    /// Agent session the recall belongs to (hooks know it). Stored on the
+    /// episodic log; it is the independence unit for rule validation.
+    pub session_id: Option<&'a str>,
+    /// Project the work happens in. `None` → derived from the working directory.
+    pub project: Option<&'a str>,
     pub expand_deps: &'a str, // "false" | "direct" | "closure"
     pub allow_trim: bool,     // if true, invoke Refiner::trim when block doesn't fit
     pub refine_mode: &'a str, // "off" | "trim" | "adapt" — recorded in trace
@@ -60,6 +65,13 @@ impl KnowledgeBase {
             "recall"
         };
         let src = params.source.to_string();
+        // Credentials pasted into a prompt must not reach the embedding API or the
+        // episodic log (a sudo password was found in both, 2026-09-23).
+        let query = crate::utils::redact_secrets(params.query).0;
+        let params = RecallParams {
+            query: &query,
+            ..params
+        };
         self.measure_with(
             op,
             Some(&src),
@@ -76,6 +88,8 @@ impl KnowledgeBase {
             include_sparks,
             top,
             source,
+            session_id,
+            project,
             expand_deps,
             allow_trim,
             refine_mode,
@@ -171,6 +185,15 @@ impl KnowledgeBase {
             });
         }
 
+        // 5.0 candidate slot: validated rules plus at most one candidate per
+        // recall (the best-scoring one). Candidates are shown to be tried, not
+        // to crowd out what has been validated. `scored` is sorted best-first.
+        let mut candidate_taken = false;
+        scored.retain(|(_, chunk)| {
+            chunk.get("state").and_then(Value::as_str) != Some("pending")
+                || !std::mem::replace(&mut candidate_taken, true)
+        });
+
         // First-fit pack with dep expansion
         let (selected, skipped, skipped_reasons) =
             self.pack(&scored, budget, expand_deps, allow_trim, query)?;
@@ -252,6 +275,11 @@ impl KnowledgeBase {
                 &now,
                 session_only,
                 &recall_meta,
+                session_id,
+                project
+                    .map(str::to_string)
+                    .or_else(crate::project::current_project)
+                    .as_deref(),
             )?;
         }
 
@@ -941,6 +969,8 @@ impl KnowledgeBase {
         now: &str,
         session_only: bool,
         recall_meta: &Value,
+        session_id: Option<&str>,
+        project: Option<&str>,
     ) -> Result<()> {
         let lib_id = self.storage.lib_id()?;
         // `selected` must strictly mean "entered the model context". Record the
@@ -1068,6 +1098,8 @@ impl KnowledgeBase {
                 recall_snapshot: Some(snapshot.to_string()),
                 event_source: source.to_string(),
                 agent: agent_source(),
+                session_id: session_id.map(str::to_string),
+                project: project.map(str::to_string),
                 task_state: "recalled".to_string(),
                 usage_state: usage_state.to_string(),
                 context_key: Some(context_key.to_string()),

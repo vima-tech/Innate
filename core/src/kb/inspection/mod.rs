@@ -268,9 +268,9 @@ impl KnowledgeBase {
         if new_logs > 0 {
             suggestions.push(json!({"action": "innate evolve --trigger manual", "reason": format!("{new_logs} episodic log(s) ready to distill")}));
         }
-        if pending > 0 {
-            suggestions.push(json!({"action": "innate approve <id>  # or innate archive <id>", "reason": format!("{pending} pending chunk(s) awaiting review")}));
-        }
+        // 5.0: pending chunks are candidate rules. They mature through verdicts
+        // with observations, not by manual approval, so no "approve" nudge here;
+        // `rules.validations_7d` shows whether validation is happening.
         if !recurring_spark_ids.is_empty() {
             suggestions.push(json!({"action": "innate promote-spark <id> --to note", "reason": format!("{} spark(s) recalled ≥{spark_threshold}× — consider promoting", recurring_spark_ids.len())}));
         }
@@ -373,6 +373,7 @@ impl KnowledgeBase {
             "curate.promote_used_success_min": self.promote_used_success_min,
             "curate.promote_confidence_min": self.promote_confidence_min,
             "curate.weak_promote_selected_min": self.weak_promote_selected_min,
+            "curate.hub_select_min": self.hub_select_min,
             "curate.weak_promote_age_days": self.weak_promote_age_days,
             "curate.min_interval_minutes": self.curate_min_interval_minutes,
             "curate.decay_floor": self.decay_floor,
@@ -443,7 +444,23 @@ impl KnowledgeBase {
             "suggestions": suggestions
         });
 
+        let daemon_errors = operational
+            .pointer("/daemon/errors_24h")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let rules = self.rules_summary()?;
         if let Some(obj) = out.as_object_mut() {
+            // The evolve queue once failed on every run for 11 hours while the log
+            // only said "exited Some(1)"; running it by hand shows the real error.
+            if daemon_errors >= 10 {
+                if let Some(Value::Array(s)) = obj.get_mut("suggestions") {
+                    s.insert(0, json!({
+                        "action": "innate evolve --trigger scheduled",
+                        "reason": format!("daemon logged {daemon_errors} error(s) in 24h — run evolve by hand to see the real error"),
+                    }));
+                }
+            }
+            obj.insert("rules".to_string(), rules);
             obj.insert("observability".to_string(), observability);
             obj.insert("operational".to_string(), operational);
             if let Some(trends) = trends {
@@ -451,6 +468,22 @@ impl KnowledgeBase {
             }
         }
         Ok(out)
+    }
+
+    /// The living-knowledge loop at a glance (schema 5.0): how many rules are
+    /// mature vs candidate, and whether validation is actually happening.
+    fn rules_summary(&self) -> Result<Value> {
+        let count = |sql: &str| count_query(&self.storage, sql);
+        let week = days_ago(&utc_now_iso(), 7);
+        Ok(json!({
+            "mature_validated": count("SELECT COUNT(*) FROM chunks WHERE state='active' AND state_reason='validated:transferable'")?,
+            "active_total": count("SELECT COUNT(*) FROM chunks WHERE state='active' AND origin!='spark'")?,
+            "candidates": count("SELECT COUNT(*) FROM chunks WHERE state='pending' AND origin!='spark'")?,
+            "suspended": count("SELECT COUNT(*) FROM chunks WHERE state='pending' AND state_reason='suspended:contradicted'")?,
+            "with_signals": count("SELECT COUNT(*) FROM chunks WHERE state IN ('active','pending') AND signals IS NOT NULL AND signals != '[]'")?,
+            "open_contradictions": count("SELECT COUNT(*) FROM rule_validations WHERE verdict='contradicted' AND resolved_at IS NULL")?,
+            "loop_7d": self.storage.rule_loop_counts(&week)?,
+        }))
     }
 
     // ------------------------------------------------------------------

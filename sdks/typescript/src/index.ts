@@ -11,6 +11,14 @@
 import { execFileSync, spawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
 
+/** A verdict on one recalled rule (schema 5.0). */
+export interface RuleVerdict {
+  chunk_id: string;
+  verdict: "applied" | "supported" | "contradicted" | "irrelevant";
+  /** What actually happened. Required for supported / contradicted. */
+  observation?: string;
+}
+
 export interface Chunk {
   id: string;
   content: string;
@@ -340,6 +348,8 @@ export class KnowledgeBase {
       feedbackReason?: string;
       taskState?: "recalled" | "running" | "completed" | "abandoned" | "timed_out";
       verdictHeeded?: boolean;
+      /** Rule verdicts (schema 5.0) — how rules mature. supported/contradicted need an observation. */
+      verdicts?: RuleVerdict[];
       source?: string;
     } = {}
   ): void {
@@ -365,6 +375,9 @@ export class KnowledgeBase {
     if (options.feedbackReason) args.push("--feedback-reason", options.feedbackReason);
     if (options.taskState) args.push("--task-state", options.taskState);
     if (options.verdictHeeded) args.push("--verdict-heeded");
+    if (options.verdicts && options.verdicts.length > 0) {
+      args.push("--verdicts", JSON.stringify(options.verdicts));
+    }
     this.runRaw(...args);
   }
 
@@ -658,6 +671,7 @@ export class McpClient {
     feedback_reason?: string;
     task_state?: string;
     verdict_heeded?: boolean;
+    verdicts?: RuleVerdict[];
   } = {}): Promise<void> {
     await this.toolCall("innate_record", { trace_id: traceId, ...options });
   }

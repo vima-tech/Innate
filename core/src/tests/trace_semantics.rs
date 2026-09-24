@@ -162,6 +162,7 @@ fn abandoned_session_with_material_is_distillable_without_an_outcome() {
     kb.record(RecordParams {
         trace_id: &res.trace_id,
         outcome: Some("unknown"),
+        nomination: Some("worth keeping: fixture"),
         output_summary: Some("tried the flag, hit a dimension guard, worked around it"),
         task_state: Some("abandoned"),
         source: "hook",
@@ -211,6 +212,7 @@ fn unknown_outcome_unlocks_distillation_without_moving_confidence() {
     kb.record(RecordParams {
         trace_id: &res.trace_id,
         outcome: Some("unknown"),
+        nomination: Some("worth keeping: fixture"),
         output_summary: Some("did some work, cannot tell whether it succeeded"),
         used: Some(&used),
         task_state: Some("abandoned"),

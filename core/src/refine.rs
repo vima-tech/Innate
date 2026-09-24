@@ -97,6 +97,13 @@ pub trait Distiller: Send + Sync {
     fn provenance(&self) -> DistillProvenance {
         DistillProvenance::default()
     }
+
+    /// Free-form completion used by the rule pipeline (write / judge / revise /
+    /// signals). `None` means there is no model behind this distiller — the
+    /// pipeline then waits rather than inventing knowledge deterministically.
+    fn complete(&self, _prompt: &str) -> Option<Result<String>> {
+        None
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -121,6 +128,8 @@ pub struct DistilledChunk {
     /// which chunks were produced by the deterministic fallback rather than the
     /// primary (LLM) distiller. `None` ⇒ use the batch-level `provenance()`.
     pub provider_override: Option<String>,
+    /// 5.0: concrete, searchable signals for action-time matching.
+    pub signals: Vec<String>,
 }
 
 /// Heuristic distiller: extracts chunks from log output / nomination fields.
@@ -220,6 +229,7 @@ impl Distiller for HeuristicDistiller {
                         source_log_id: id,
                         nomination: entry["nomination"].as_str().map(str::to_string),
                         provider_override: None,
+                        signals: Vec::new(),
                     });
                 }
             }
@@ -326,5 +336,10 @@ impl Distiller for ResilientDistiller {
 
     fn provenance(&self) -> DistillProvenance {
         self.primary.provenance()
+    }
+
+    /// No fallback here: a deterministic writer cannot write a rule.
+    fn complete(&self, prompt: &str) -> Option<Result<String>> {
+        self.primary.complete(prompt)
     }
 }

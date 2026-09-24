@@ -2,7 +2,7 @@
 
 ## MCP 工具集
 
-MCP 暴露 15 个工具：innate_recall、innate_record、innate_appraise、innate_add、innate_spark、innate_inspect、innate_evolve、innate_approve、innate_archive、innate_invalidate、innate_restore、innate_mature_spark、innate_promote_spark、innate_drop_spark、innate_backup。
+MCP 暴露 15 个工具：innate_recall、innate_record、innate_appraise、innate_add、innate_spark、innate_inspect、innate_evolve、innate_approve、innate_archive、innate_invalidate、innate_restore、innate_mature_spark、innate_promote_spark、innate_drop_spark、innate_backup。innate_record 自 5.0 起接受 `verdicts`（每条 `{chunk_id, verdict, observation}`，verdict ∈ applied/supported/contradicted/irrelevant，后两者需 observation），这是规则成熟的唯一 agent 侧通道；CLI 对应 `--verdicts <JSON>`。
 
 ---
 

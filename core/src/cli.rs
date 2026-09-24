@@ -140,6 +140,9 @@ pub enum Commands {
         /// count toward the critic's calibration (provenance=counterfactual_censored).
         #[arg(long)]
         verdict_heeded: bool,
+        /// Rule verdicts as JSON: '[{"chunk_id":"…","verdict":"supported","observation":"…"}]'
+        #[arg(long)]
+        verdicts: Option<String>,
     },
     /// Add a knowledge chunk
     Add {
@@ -429,6 +432,8 @@ pub fn run() -> anyhow::Result<()> {
                 include_sparks,
                 top,
                 source: &source,
+                session_id: None,
+                project: None,
                 expand_deps: &expand_deps,
                 allow_trim,
                 refine_mode: &refine_mode,
@@ -575,7 +580,14 @@ pub fn run() -> anyhow::Result<()> {
             task_state,
             priority,
             verdict_heeded,
+            verdicts,
         } => {
+            let verdicts: Vec<crate::kb::RuleVerdict> = verdicts
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("--verdicts: {e}"))?
+                .unwrap_or_default();
             let used_ids = used.as_deref().map(|raw| {
                 raw.split(',')
                     .map(str::trim)
@@ -618,7 +630,13 @@ pub fn run() -> anyhow::Result<()> {
                 task_state: task_state.as_deref(),
                 source: &source,
                 verdict_heeded,
+                verdicts: (!verdicts.is_empty()).then_some(verdicts.as_slice()),
+                session_id: None,
+                project: None,
             })?;
+            for r in &report.rejected_verdicts {
+                eprintln!("warning: verdict for {} rejected ({})", r.chunk_id, r.reason);
+            }
             if report.is_clean() {
                 println!("recorded");
             } else {

@@ -114,7 +114,7 @@ fn distiller_error_marks_log_failed() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -157,7 +157,7 @@ fn distillation_only_receives_same_context_related_logs() {
             used: None,
             feedback_up: None,
             feedback_down: None,
-            nomination: None,
+            nomination: Some("worth keeping: distillation fixture"),
             priority: 0,
             source: "sdk",
             ..Default::default()
@@ -195,7 +195,7 @@ fn multi_chunk_distiller_produces_multiple_chunks() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -238,7 +238,7 @@ fn multiple_chunks_can_share_same_distilled_from() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -319,7 +319,7 @@ fn threshold_evolve_respects_distill_token_limit() {
             used: None,
             feedback_up: None,
             feedback_down: None,
-            nomination: None,
+            nomination: Some("worth keeping: distillation fixture"),
             priority: 0,
             source: "sdk",
             ..Default::default()
@@ -349,7 +349,7 @@ fn threshold_evolve_respects_distill_token_limit() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -387,7 +387,7 @@ fn distill_token_window_uses_actual_distill_time_not_log_creation_time() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -428,7 +428,7 @@ fn distill_token_window_uses_actual_distill_time_not_log_creation_time() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -456,7 +456,7 @@ fn scheduled_evolve_respects_distill_token_limit() {
             used: None,
             feedback_up: None,
             feedback_down: None,
-            nomination: None,
+            nomination: Some("worth keeping: distillation fixture"),
             priority: 0,
             source: "sdk",
             ..Default::default()
@@ -485,7 +485,7 @@ fn scheduled_evolve_respects_distill_token_limit() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()
@@ -590,7 +590,8 @@ fn migration_4_5_1_adds_distill_accounting_time() {
             "4.18→4.19",
             "4.19→4.20",
             "4.20→4.21",
-            "4.21→4.22"
+            "4.21→4.22",
+            "4.22→5.0"
         ]
     );
 
@@ -628,7 +629,7 @@ fn stale_screening_is_reported_as_recovered() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: distillation fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()

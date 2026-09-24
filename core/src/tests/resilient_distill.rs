@@ -87,6 +87,7 @@ fn evolve_creates_chunk_via_fallback_when_llm_unavailable() {
     kb.record(RecordParams {
         trace_id: &trace_id,
         query: Some("how to deploy"),
+        nomination: Some("worth keeping: distillation fixture"),
         output_summary: Some("run migrations then restart service"),
         outcome: Some("ok"),
         source: "sdk",
@@ -136,6 +137,7 @@ fn evolve_retries_llm_before_falling_back() {
     kb.record(RecordParams {
         trace_id: &trace_id,
         query: Some("q"),
+        nomination: Some("worth keeping: distillation fixture"),
         output_summary: Some("material to keep"),
         outcome: Some("ok"),
         source: "sdk",
@@ -233,6 +235,7 @@ fn max_cluster_size(per_session: bool) -> usize {
             kb.record(RecordParams {
                 trace_id: &crate::utils::gen_uuid(),
                 query: Some(q),
+                nomination: Some("worth keeping: distillation fixture"),
                 output_summary: Some("reusable material"),
                 outcome: Some("ok"),
                 source: "sdk",

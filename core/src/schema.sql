@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4.22');
+INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '5.0');
 
 CREATE TABLE IF NOT EXISTS chunks (
     id            TEXT PRIMARY KEY,
@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     last_used_at     TEXT,
     last_used_base   TEXT,
     last_decayed_at  TEXT,
-    evidence_cutoff_at TEXT
+    evidence_cutoff_at TEXT,
+    signals          TEXT,   -- 5.0: JSON array of concrete, searchable signals
+    source_projects  TEXT    -- 5.0: JSON array of projects the rule was born from
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_distilled_from ON chunks(distilled_from) WHERE distilled_from IS NOT NULL;
@@ -200,7 +202,9 @@ CREATE TABLE IF NOT EXISTS episodic_log (
     distill_completion_tokens INTEGER,
     distill_accounted_at      TEXT,
     distill_attempts          INTEGER NOT NULL DEFAULT 0,
-    distill_last_failed_at    TEXT
+    distill_last_failed_at    TEXT,
+    project                   TEXT,   -- 5.0: git root name of the working directory
+    session_id                TEXT    -- 5.0: agent session (independence unit)
 );
 CREATE INDEX IF NOT EXISTS idx_log_dstate ON episodic_log(distill_state);
 CREATE INDEX IF NOT EXISTS idx_log_prio   ON episodic_log(priority);
@@ -398,3 +402,50 @@ CREATE TABLE IF NOT EXISTS metric_snapshots (
     ts   TEXT PRIMARY KEY,
     kpis TEXT NOT NULL
 );
+
+-- ── 5.0 活知识库：经历与验证 ──
+CREATE TABLE IF NOT EXISTS episodes (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL CHECK(kind IN ('struggle','correction')),
+    session_id   TEXT,
+    project      TEXT,
+    agent        TEXT,
+    ts           TEXT NOT NULL,
+    signals      TEXT NOT NULL DEFAULT '[]',
+    trigger_text TEXT NOT NULL,
+    attempts     TEXT,
+    resolution   TEXT,
+    state        TEXT NOT NULL DEFAULT 'new'
+        CHECK(state IN ('new','ruled','no_rule','expired')),
+    rule_id      TEXT,
+    embedding    BLOB,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_episodes_state ON episodes(state, ts);
+CREATE INDEX IF NOT EXISTS idx_episodes_rule ON episodes(rule_id);
+
+-- 验证：某条规则的某个版本在某个会话里被展示、观察、判定的记录。
+-- shown → observed（取到了随后的命令结果）→ 评审/agent 判定。
+-- 只有 supported 计入成熟；contradicted 在 resolved_at 为空时暂停成熟资格。
+CREATE TABLE IF NOT EXISTS rule_validations (
+    id           TEXT PRIMARY KEY,
+    chunk_id     TEXT NOT NULL,
+    rule_version INTEGER NOT NULL DEFAULT 1,
+    verdict      TEXT NOT NULL CHECK(verdict IN
+        ('shown','observed','applied','supported','contradicted','irrelevant','unknown')),
+    observation  TEXT,
+    source       TEXT NOT NULL CHECK(source IN ('agent','judge','hook')),
+    channel      TEXT,
+    session_id   TEXT,
+    project      TEXT,
+    trace_id     TEXT,
+    tool_use_id  TEXT,
+    created_at   TEXT NOT NULL,
+    judged_at    TEXT,
+    resolved_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_rv_chunk ON rule_validations(chunk_id, verdict);
+CREATE INDEX IF NOT EXISTS idx_rv_session ON rule_validations(session_id, chunk_id);
+CREATE INDEX IF NOT EXISTS idx_rv_open ON rule_validations(verdict, created_at)
+    WHERE verdict IN ('shown','observed');
+

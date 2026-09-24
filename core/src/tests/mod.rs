@@ -17,6 +17,7 @@ mod observability;
 mod reliability;
 mod resilient_distill;
 mod restoration;
+mod rules;
 mod trace_semantics;
 mod tuning_regressions;
 

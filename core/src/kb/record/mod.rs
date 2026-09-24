@@ -32,6 +32,14 @@ pub struct RecordParams<'a> {
     /// 证据 —— 标记为 `counterfactual_censored`,不计入校准映射 / ECE。默认 `false`
     /// (actor 实际采取动作并观测到结果 → `observed`,计入校准)。
     pub verdict_heeded: bool,
+    /// 5.0: the agent's verdicts on rules it saw (supported / contradicted /
+    /// irrelevant / applied). The only agent-side path by which a rule earns
+    /// maturity — `used` + `outcome=ok` no longer promotes anything.
+    pub verdicts: Option<&'a [crate::kb::RuleVerdict]>,
+    /// Agent session (hooks know it); defaults to the trace's own session.
+    pub session_id: Option<&'a str>,
+    /// Project; defaults to the trace's, else the working directory's.
+    pub project: Option<&'a str>,
 }
 
 /// A chunk id that `record` could not attribute to the trace, and why.
@@ -51,11 +59,13 @@ pub struct UnattributedRef {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RecordReport {
     pub unattributed: Vec<UnattributedRef>,
+    /// Verdicts that were not stored, and why.
+    pub rejected_verdicts: Vec<crate::kb::RejectedVerdict>,
 }
 
 impl RecordReport {
     pub fn is_clean(&self) -> bool {
-        self.unattributed.is_empty()
+        self.unattributed.is_empty() && self.rejected_verdicts.is_empty()
     }
 }
 
@@ -63,7 +73,32 @@ impl KnowledgeBase {
     pub fn record(&self, params: RecordParams<'_>) -> Result<RecordReport> {
         let tid = params.trace_id.to_string();
         let src = params.source.to_string();
-        self.measure("record", Some(&src), Some(&tid), || self.record_inner(params))
+        // Free text is persisted to episodic_log and later sent to the distiller:
+        // strip credentials before either happens.
+        use crate::utils::redact_opt;
+        let (query, output, output_summary, nomination, feedback_reason) = (
+            redact_opt(params.query),
+            redact_opt(params.output),
+            redact_opt(params.output_summary),
+            redact_opt(params.nomination),
+            redact_opt(params.feedback_reason),
+        );
+        let params = RecordParams {
+            query: query.as_deref(),
+            output: output.as_deref(),
+            output_summary: output_summary.as_deref(),
+            nomination: nomination.as_deref(),
+            feedback_reason: feedback_reason.as_deref(),
+            ..params
+        };
+        let (verdicts, session_id, project) = (params.verdicts, params.session_id, params.project);
+        let mut report = self.measure("record", Some(&src), Some(&tid), || {
+            self.record_inner(params)
+        })?;
+        if let Some(verdicts) = verdicts.filter(|v| !v.is_empty()) {
+            report.rejected_verdicts = self.record_verdicts(&tid, verdicts, session_id, project)?;
+        }
+        Ok(report)
     }
 
     fn record_inner(&self, params: RecordParams<'_>) -> Result<RecordReport> {
@@ -86,6 +121,9 @@ impl KnowledgeBase {
             task_state,
             source,
             verdict_heeded,
+            session_id,
+            project,
+            ..
         } = params;
         let used_attribution = if used_attribution.is_empty() {
             "explicit"
@@ -191,6 +229,10 @@ impl KnowledgeBase {
                         outcome: outcome.map(str::to_string),
                         event_source: source.to_string(),
                         agent: agent_source(),
+                        session_id: session_id.map(str::to_string),
+                        project: project
+                            .map(str::to_string)
+                            .or_else(crate::project::current_project),
                         task_state: if matches!(outcome, Some("ok") | Some("fail")) {
                             "completed".to_string()
                         } else {
@@ -535,12 +577,13 @@ impl KnowledgeBase {
                 .and_then(Value::as_str)
                 .unwrap_or("open");
             let lifecycle_completed = lifecycle_state == "completed";
-            let has_material = output_summary.is_some()
-                || nomination.is_some()
-                || output.is_some()
-                || log.get("output_summary").and_then(Value::as_str).is_some()
-                || log.get("nomination").and_then(Value::as_str).is_some()
-                || log.get("output").and_then(Value::as_str).is_some();
+            // 5.0: only an explicit nomination makes a log a rule source. A
+            // summary or raw output is experience material — rules are born from
+            // recurring episodes (kb/rules), not one log at a time. Distilling
+            // every summarised session produced ~107 candidates a day, 74% of
+            // which were never retrieved (status reports and platitudes).
+            let has_material = nomination.is_some()
+                || log.get("nomination").and_then(Value::as_str).is_some();
             let retryable_discard = current_state == "discarded"
                 && matches!(
                     log.get("distill_note").and_then(Value::as_str),

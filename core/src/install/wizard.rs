@@ -244,22 +244,17 @@ pub fn run_install() -> anyhow::Result<()> {
                 }
             }
 
-            // Install SessionStart hook: warm up project knowledge at session start.
-            match configure_claude_session_start_hook(&hook_config, &binary_path) {
-                ConfigStatus::Updated(p) => {
-                    result_line(&format!(
-                        "{}: SessionStart hook → {}",
-                        bold("claude"),
-                        gray(&tilde_path(&p))
-                    ));
-                }
-                ConfigStatus::Unchanged(_) => {}
-                ConfigStatus::Skipped(_) => {}
-                ConfigStatus::Error(e) => {
-                    warn_line(&format!(
-                        "{}: \x1b[31mSessionStart hook error — {e}\x1b[0m",
-                        bold("claude")
-                    ));
+            // Install action-time recall hooks (5.0): before a Bash command and
+            // after a failed one. SessionStart is no longer installed.
+            for (event, status) in configure_claude_action_hooks(&hook_config, &binary_path) {
+                match status {
+                    ConfigStatus::Updated(p) => {
+                        result_line(&format!("{}: {event} hook → {}", bold("claude"), gray(&tilde_path(&p))));
+                    }
+                    ConfigStatus::Error(e) => {
+                        warn_line(&format!("{}: \x1b[31m{event} hook error — {e}\x1b[0m", bold("claude")));
+                    }
+                    _ => {}
                 }
             }
 

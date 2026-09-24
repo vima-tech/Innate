@@ -344,7 +344,7 @@ fn record_state_machine() {
         used: None,
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: fixture"),
         priority: 0,
         source: "cli",
         ..Default::default()
@@ -409,6 +409,17 @@ fn late_material_reopens_insufficient_material_log() {
         feedback_down: None,
         nomination: None,
         priority: 0,
+        source: "sdk",
+        ..Default::default()
+    })
+    .unwrap();
+    // 5.0: a summary is experience material, not a rule source.
+    let still = kb.storage.get_episodic_log(&trace_id).unwrap().unwrap();
+    assert_eq!(still["distill_state"].as_str(), Some("discarded"));
+
+    kb.record(RecordParams {
+        trace_id: &trace_id,
+        nomination: Some("worth keeping: late nomination"),
         source: "sdk",
         ..Default::default()
     })
@@ -644,7 +655,7 @@ fn record_requests_evolve_and_inspect_reports_feedback_metrics() {
         used: Some(&[]),
         feedback_up: None,
         feedback_down: None,
-        nomination: None,
+        nomination: Some("worth keeping: fixture"),
         priority: 0,
         source: "sdk",
         ..Default::default()

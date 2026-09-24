@@ -33,6 +33,7 @@ mod lifecycle;
 mod recall;
 mod record;
 mod repair;
+mod rules;
 mod situation;
 
 pub use appraise::{
@@ -41,6 +42,7 @@ pub use appraise::{
 };
 pub use recall::RecallParams;
 pub use record::RecordParams;
+pub use rules::{CaptureReport, RejectedVerdict, RuleVerdict};
 pub use repair::TraceRepairReport;
 pub use situation::Situation;
 
@@ -84,6 +86,17 @@ const DENSITY_REFILL: bool = true;
 const LENGTH_PENALTY: f64 = 0.15;
 /// Content length (bytes) below which no length penalty applies.
 const LENGTH_PENALTY_FREE_BYTES: f64 = 800.0;
+
+/// Windowed anti-hub rule: a chunk selected at least this many times in the
+/// last [`HUB_WINDOW_DAYS`] and used in under [`HUB_MAX_USE_RATE`] of them is
+/// archived. The lifetime rules above exempt a chunk forever after one use, so
+/// a dozen project status reports took 31% of all selections in 30 days, some
+/// at confidence 0.04 (2026-09-23).
+const HUB_SELECT_MIN: i64 = 50;
+pub(crate) const HUB_WINDOW_DAYS: i64 = 30;
+/// 1% — a third of the library-wide prompt-recall use rate (3.4%), so only
+/// clear outliers are hit.
+pub(crate) const HUB_MAX_USE_RATE: f64 = 0.01;
 
 const LOW_CONF_THRESHOLD: f64 = 0.25;
 const LOW_CONF_IDLE_DAYS: i64 = 60;
@@ -275,6 +288,7 @@ pub struct KnowledgeBase {
     promote_confidence_min: f64,
     weak_promote_selected_min: i64,
     weak_promote_age_days: i64,
+    hub_select_min: i64,
     curate_min_interval_minutes: i64,
     decay_floor: f64,
     evolve_threshold: i64,
@@ -394,6 +408,7 @@ impl KnowledgeBase {
             promote_confidence_min: PROMOTE_CONFIDENCE_MIN,
             weak_promote_selected_min: WEAK_PROMOTE_SELECTED_MIN,
             weak_promote_age_days: WEAK_PROMOTE_AGE_DAYS,
+            hub_select_min: HUB_SELECT_MIN,
             curate_min_interval_minutes: CURATE_MIN_INTERVAL_MINUTES,
             decay_floor: DECAY_FLOOR,
             evolve_threshold: EVOLVE_THRESHOLD,
@@ -493,6 +508,7 @@ impl KnowledgeBase {
             ("curate.promote_confidence_min", "0.60"),
             ("curate.weak_promote_selected_min", "20"),
             ("curate.weak_promote_age_days", "14"),
+            ("curate.hub_select_min", "50"),
             ("curate.min_interval_minutes", "60"),
             ("curate.decay_floor", "0.20"),
             ("evolve.threshold_new_count", "5"),
@@ -604,6 +620,7 @@ impl KnowledgeBase {
         .max(1);
         self.weak_promote_age_days =
             i("curate.weak_promote_age_days", WEAK_PROMOTE_AGE_DAYS).max(0);
+        self.hub_select_min = i("curate.hub_select_min", HUB_SELECT_MIN).max(1);
         self.curate_min_interval_minutes = i(
             "curate.min_interval_minutes",
             CURATE_MIN_INTERVAL_MINUTES,

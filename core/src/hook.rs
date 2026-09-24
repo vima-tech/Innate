@@ -5,8 +5,15 @@ pub enum HookCommands {
     /// UserPromptSubmit hook: recall relevant knowledge for the prompt and print it to
     /// stdout (injected into context). Relevance-gated so it stays quiet when nothing fits.
     Prompt,
-    /// SessionStart hook: warm up context with high-relevance project knowledge.
+    /// SessionStart hook. No-op since 5.0: recalling from a bare directory name
+    /// surfaced nothing useful (473 runs in a month, 9 non-empty, 0 used). Kept so
+    /// existing installs that still call it exit cleanly.
     SessionStart,
+    /// PreToolUse hook: match the Bash command about to run against rule signals
+    /// (local, no network) and inject one strongly matching rule.
+    PreTool,
+    /// PostToolUseFailure hook: match the failed command's error output.
+    ToolFailure,
 }
 fn extract_content_text(content: Option<&serde_json::Value>) -> String {
     match content {
@@ -97,9 +104,30 @@ pub(crate) fn role_text(transcript: &str, role: Option<&str>) -> String {
 ///     `used_complete=false` so it merges with — never overwrites — whatever
 ///     the agent recorded explicitly.
 fn close_session_traces(db_path: &Path, transcript: &str, summary: &str) -> anyhow::Result<usize> {
+    if uuids_after(transcript, "trace_id: ").is_empty() {
+        return Ok(0);
+    }
+    let kb = crate::open_kb(db_path)?;
+    Ok(close_traces_with(&kb, transcript, summary))
+}
+
+/// The body of [`close_session_traces`], on an already-open library.
+///
+/// Stop fires after every assistant turn, and each firing sees the whole
+/// transcript. A trace that is already `completed` (closed by an earlier Stop,
+/// or by the agent's own `innate_record`) is skipped, so each trace is recorded
+/// about once per session. Before this, every Stop re-recorded every trace in
+/// the session: one trace was recorded 84 times, and one day ran 30,005 records
+/// for 137 traces. The session's last trace is the exception while there is a
+/// summary to attach, because the summary describes the latest turn.
+pub(crate) fn close_traces_with(
+    kb: &crate::kb::KnowledgeBase,
+    transcript: &str,
+    summary: &str,
+) -> usize {
     let trace_ids = uuids_after(transcript, "trace_id: ");
     if trace_ids.is_empty() {
-        return Ok(0);
+        return 0;
     }
     // Chunk ids the hook offered this session, as printed by `run_hook_recall`
     // (`- [<uuid>] (confidence …`). Read from decoded message text, not the raw
@@ -111,19 +139,17 @@ fn close_session_traces(db_path: &Path, transcript: &str, summary: &str) -> anyh
         .filter(|id| assistant.contains(id.as_str()))
         .collect();
 
-    let kb = crate::open_kb(db_path)?;
     let summary = summary.trim();
     let last = trace_ids.len().saturating_sub(1);
     let mut closed = 0usize;
     for (i, trace_id) in trace_ids.iter().enumerate() {
         // Only touch traces this library actually knows about.
-        if kb
-            .storage
-            .get_episodic_log(trace_id)
-            .ok()
-            .flatten()
-            .is_none()
-        {
+        let Some(log) = kb.storage.get_episodic_log(trace_id).ok().flatten() else {
+            continue;
+        };
+        let already_closed =
+            log.get("task_state").and_then(serde_json::Value::as_str) == Some("completed");
+        if already_closed && (i != last || summary.is_empty()) {
             continue;
         }
         // The summary describes the end of the session, so it is attached to the
@@ -146,7 +172,7 @@ fn close_session_traces(db_path: &Path, transcript: &str, summary: &str) -> anyh
             closed += 1;
         }
     }
-    Ok(closed)
+    closed
 }
 
 fn run_hook_stop(db_path: &Path) -> anyhow::Result<()> {
@@ -175,13 +201,21 @@ fn run_hook_stop(db_path: &Path) -> anyhow::Result<()> {
         || (input.contains("tool_use") && input.contains("innate_recall"));
 
     // Summary: the payload hands us the last assistant message directly — prefer it.
-    let mut summary: String = data
-        .get("last_assistant_message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .chars()
-        .take(400)
-        .collect();
+    // Redact before truncating: cutting first could leave a credential too short
+    // to recognise. Everything below lands in session.log and episodic_log.
+    let clip = |text: &str, n: usize| -> String {
+        crate::utils::redact_secrets(text)
+            .0
+            .chars()
+            .take(n)
+            .collect()
+    };
+    let mut summary: String = clip(
+        data.get("last_assistant_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        400,
+    );
     let mut query = String::new();
 
     // Newest-first scan of the transcript file for the user query (and assistant fallback).
@@ -200,11 +234,11 @@ fn run_hook_stop(db_path: &Path) -> anyhow::Result<()> {
         if query.is_empty() && role == "user" {
             let q = extract_content_text(content);
             if !q.trim().is_empty() {
-                query = q.chars().take(200).collect();
+                query = clip(&q, 200);
             }
         }
         if summary.is_empty() && role == "assistant" {
-            summary = extract_content_text(content).chars().take(400).collect();
+            summary = clip(&extract_content_text(content), 400);
         }
     }
 
@@ -219,16 +253,10 @@ fn run_hook_stop(db_path: &Path) -> anyhow::Result<()> {
         for m in transcript.iter().rev() {
             let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
             if query.is_empty() && role == "user" {
-                query = extract_content_text(m.get("content"))
-                    .chars()
-                    .take(200)
-                    .collect();
+                query = clip(&extract_content_text(m.get("content")), 200);
             }
             if summary.is_empty() && role == "assistant" {
-                summary = extract_content_text(m.get("content"))
-                    .chars()
-                    .take(400)
-                    .collect();
+                summary = clip(&extract_content_text(m.get("content")), 400);
             }
             if !query.is_empty() && !summary.is_empty() {
                 break;
@@ -266,6 +294,13 @@ fn run_hook_stop(db_path: &Path) -> anyhow::Result<()> {
     // Best-effort: a Stop hook must never fail the session, and the session.log
     // events above (which trigger evolve) have already been written.
     let _ = close_session_traces(db_path, &transcript_text, &summary);
+    // 5.0: episodes (struggles, corrections) and observations for rules shown
+    // this session — the material rules are born from and judged by.
+    if !transcript_text.is_empty() {
+        if let Ok(kb) = crate::open_kb(db_path) {
+            let _ = kb.capture_session(&transcript_text);
+        }
+    }
 
     Ok(())
 }
@@ -276,20 +311,19 @@ pub(crate) fn run_command(action: &HookCommands, db_path: &Path) -> anyhow::Resu
         // Recall hooks are auxiliary and must never break the session: on any error we
         // swallow it and exit cleanly so the harness keeps going.
         HookCommands::Prompt => {
-            let _ = run_hook_recall(db_path, HookKind::Prompt);
+            let _ = run_hook_recall(db_path);
             Ok(())
         }
-        HookCommands::SessionStart => {
-            let _ = run_hook_recall(db_path, HookKind::SessionStart);
+        HookCommands::SessionStart => Ok(()),
+        HookCommands::PreTool => {
+            let _ = crate::hook_action::run(db_path, crate::hook_action::ActionKind::PreTool);
+            Ok(())
+        }
+        HookCommands::ToolFailure => {
+            let _ = crate::hook_action::run(db_path, crate::hook_action::ActionKind::ToolFailure);
             Ok(())
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum HookKind {
-    Prompt,
-    SessionStart,
 }
 
 /// Default relevance gate for always-on recall hooks. Relevance scores roughly span [0, ~1.05]
@@ -306,42 +340,32 @@ const DEFAULT_HOOK_MIN_SCORE: f64 = 0.40;
 /// local lexical channel.
 const HOOK_EMBED_TIMEOUT_MS: u64 = 2500;
 
-/// UserPromptSubmit / SessionStart hook: recall relevant knowledge and print it to stdout so
-/// Claude Code injects it into the conversation. Relevance-gated so it stays silent when nothing
-/// fits — high frequency without noise.
-fn run_hook_recall(db_path: &Path, kind: HookKind) -> anyhow::Result<()> {
+/// UserPromptSubmit hook: recall relevant knowledge and print it to stdout so Claude Code
+/// injects it into the conversation. Relevance-gated so it stays silent when nothing fits —
+/// high frequency without noise.
+fn run_hook_recall(db_path: &Path) -> anyhow::Result<()> {
     use std::io::Read;
 
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let data: serde_json::Value = serde_json::from_str(&input).unwrap_or(serde_json::Value::Null);
 
-    // Derive the recall query. UserPromptSubmit carries the user's prompt; SessionStart has no
-    // query, so warm up from the project directory name as a coarse canonical project intent.
-    let query: String = match kind {
-        HookKind::Prompt => data
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .chars()
-            .take(500)
-            .collect(),
-        HookKind::SessionStart => {
-            let cwd = data
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .or_else(|| data.get("workspace").and_then(|v| v.as_str()))
-                .unwrap_or("");
-            std::path::Path::new(cwd)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string()
-        }
-    };
+    let query: String = data
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .chars()
+        .take(500)
+        .collect();
     if query.trim().is_empty() {
         return Ok(());
     }
+    let session_id = data.get("session_id").and_then(|v| v.as_str());
+    let project = data
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(Path::new)
+        .and_then(crate::project::project_of);
 
     let min_score = std::env::var("INNATE_HOOK_MIN_SCORE")
         .ok()
@@ -359,10 +383,6 @@ fn run_hook_recall(db_path: &Path, kind: HookKind) -> anyhow::Result<()> {
     }
 
     let kb = crate::open_kb(db_path)?;
-    // SessionStart has no user prompt — its "query" is the project directory
-    // name. There is nothing for an embedding to add to a bare folder name, so
-    // it skips the remote call outright.
-    let lexical_only = matches!(kind, HookKind::SessionStart);
     let recall = |lexical_only: bool| {
         kb.recall(RecallParams {
             query: &query,
@@ -371,6 +391,8 @@ fn run_hook_recall(db_path: &Path, kind: HookKind) -> anyhow::Result<()> {
             include_sparks: false,
             top: Some(5),
             source: "hook",
+            session_id,
+            project: project.as_deref(),
             expand_deps: "false",
             allow_trim: false,
             refine_mode: "off",
@@ -380,13 +402,11 @@ fn run_hook_recall(db_path: &Path, kind: HookKind) -> anyhow::Result<()> {
             lexical_only,
         })
     };
-    let result = match recall(lexical_only) {
+    let result = match recall(false) {
         Ok(result) => result,
         // Degrade, don't disappear: if the embedding endpoint is slow or down,
         // the lexical/BM25 channel still answers, locally and instantly.
-        Err(crate::errors::InnateError::EmbeddingUnavailable(_)) if !lexical_only => {
-            recall(true)?
-        }
+        Err(crate::errors::InnateError::EmbeddingUnavailable(_)) => recall(true)?,
         Err(e) => return Err(e.into()),
     };
 
@@ -398,24 +418,28 @@ fn run_hook_recall(db_path: &Path, kind: HookKind) -> anyhow::Result<()> {
     // must cite the IDs it actually uses in innate_record — this is what keeps feedback precise.
     let mut out = String::new();
     out.push_str("<innate-recall>\n");
-    // The record instruction spells out the failure case explicitly. Left
-    // implicit, agents record only successes: the live library held 412
-    // `task_ok` events and zero `task_fail`, which made `task_success_rate` a
-    // constant 1.0 and starved every negative-evidence rule (decay,
-    // sustained_task_failure archiving) of input.
+    // 5.0: rules mature only through verdicts backed by an observation, so the
+    // instruction asks for exactly that. `used`/`feedback` still tune ranking.
     out.push_str(&format!(
-        "Innate recalled {} relevant knowledge chunk(s). Apply what helps; \
-         when you finish, call innate_record(trace_id, outcome, used=[ids you actually applied], \
-         feedback_up/down=[ids that helped/misled]). Record outcome=\"fail\" when the task did \
-         not succeed, and feedback_down for any chunk that was wrong or misleading — negative \
-         results are as valuable as positive ones and are the only way bad knowledge decays.\n\n",
+        "Innate recalled {} rule(s). Apply what fits. When you finish, call \
+         innate_record(trace_id, outcome, verdicts=[{{chunk_id, verdict, observation}}]) for each \
+         rule you acted on: verdict is supported / contradicted / irrelevant, and observation is \
+         what actually happened (a command result, a test, the user's reaction). A contradicted \
+         rule is as valuable as a supported one — it is how wrong rules get fixed.\n\n",
         result.knowledge.len()
     ));
     for c in &result.knowledge {
         let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("?");
         let content = c.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        let conf = c.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        out.push_str(&format!("- [{id}] (confidence {conf:.2}) {content}\n"));
+        let candidate = c.get("state").and_then(|v| v.as_str()) == Some("pending");
+        if candidate {
+            // The one candidate slot: shown so it can be tried. The Stop hook
+            // attaches what happened next for the offline judge.
+            let _ = kb.mark_shown(id, "prompt", session_id, project.as_deref(), None);
+            out.push_str(&format!("- [{id}] (候选·待验证) {content}\n"));
+        } else {
+            out.push_str(&format!("- [{id}] {content}\n"));
+        }
     }
     out.push_str(&format!("\ntrace_id: {}\n", result.trace_id));
     out.push_str("</innate-recall>");
