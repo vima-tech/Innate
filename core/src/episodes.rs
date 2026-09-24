@@ -250,6 +250,8 @@ const WRAPPERS: &[&str] = &["sudo", "timeout", "env", "nohup", "time", "exec", "
 /// → `{cargo}`).
 fn programs(command: &str) -> Vec<String> {
     let mut out = Vec::new();
+    // A heredoc body (`python3 - <<'PY' … PY`) is data, not commands.
+    let command = command.split("<<").next().unwrap_or(command);
     for segment in command.split(['&', '|', ';', '\n', '(', ')']) {
         for word in segment.split_whitespace() {
             let is_assignment = word.contains('=') && !word.starts_with('-');
@@ -287,6 +289,9 @@ fn is_noise_failure(result: &str) -> bool {
         // command failing.
         || r.contains("Permission for this action was denied")
         || r.contains("auto mode classifier")
+        // The harness stopping the call is not the command failing either.
+        || r.starts_with("Interrupted")
+        || r.contains("was stopped by a")
 }
 
 const ERROR_WORDS: &[&str] = &[
@@ -362,6 +367,183 @@ pub fn error_signature(result: &str) -> Option<String> {
     (out.chars().count() >= 8).then(|| format!("sig:{out}"))
 }
 
+/// One token with its project-specific parts removed: paths dropped, hex ids
+/// dropped, quoted names dropped when `drop_quoted` (identifiers in error
+/// messages name one project's variables), bare numbers masked while codes
+/// such as `E0425` / `TS2304` keep their digits (a digit run stays when a
+/// letter precedes it).
+fn depersonalize_token(word: &str, drop_quoted: bool) -> Option<String> {
+    if word.contains('/') || word.contains('\\') {
+        return None;
+    }
+    let mut kept = String::new();
+    let mut quote: Option<char> = None;
+    let mut prev_alpha = false;
+    for c in word.chars() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if !drop_quoted {
+                kept.push(c.to_ascii_lowercase());
+            }
+            continue;
+        }
+        if matches!(c, '`' | '"' | '\'' | '“' | '‘') {
+            quote = Some(match c {
+                '“' => '”',
+                '‘' => '’',
+                other => other,
+            });
+            continue;
+        }
+        if c.is_ascii_digit() && !prev_alpha {
+            if !kept.ends_with('#') {
+                kept.push('#');
+            }
+        } else {
+            kept.push(c.to_ascii_lowercase());
+        }
+        prev_alpha = c.is_ascii_alphabetic() || (prev_alpha && c.is_ascii_digit());
+    }
+    if kept.is_empty() || !kept.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    let hexish = kept.chars().count() >= 16
+        && kept
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-' || c == '_');
+    // Random ids such as `toolu_01ASYnubLzYfahjhADeAgtbx`: a long mixed-case
+    // alphanumeric tail. Checked on the original word — lowercasing hides it.
+    let tail = word
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .rsplit('_')
+        .next()
+        .unwrap_or("");
+    let idlike = tail.chars().count() >= 16
+        && tail.chars().all(|c| c.is_ascii_alphanumeric())
+        && tail.chars().any(|c| c.is_ascii_digit())
+        && tail.chars().any(|c| c.is_ascii_uppercase())
+        && tail.chars().any(|c| c.is_ascii_lowercase());
+    (!hexish && !idlike).then_some(kept)
+}
+
+/// Traceback boilerplate: says where, never what.
+fn is_boilerplate(line: &str) -> bool {
+    let l = line.trim();
+    l.starts_with("Traceback (most recent call last)")
+        || (l.starts_with("File \"") && l.contains(", line "))
+        || l.starts_with("--> ")
+        || l.starts_with("at ") && l.contains('(')
+        || l == "^"
+        || l.chars()
+            .all(|c| c == '^' || c == '~' || c == ' ' || c == '|')
+}
+
+/// The lines of an error output worth embedding: those naming an error, then
+/// the last lines (a Python traceback ends with the exception, a Rust build
+/// with the summary). Boilerplate frames are dropped first.
+fn error_lines(result: &str) -> String {
+    let lines: Vec<&str> = result
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("Exit code") && !is_boilerplate(l))
+        .collect();
+    let mut out: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| {
+            let low = l.to_lowercase();
+            ERROR_WORDS.iter().any(|w| low.contains(w))
+        })
+        .take(4)
+        .collect();
+    for l in lines.iter().rev().take(2) {
+        if !out.contains(l) {
+            out.push(l);
+        }
+    }
+    out.join("\n")
+}
+
+/// `text` with paths, ids and numbers removed, deduplicated line by line,
+/// at most `max_lines` lines and `max_chars` characters.
+fn depersonalize(text: &str, drop_quoted: bool, max_lines: usize, max_chars: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("Exit code") {
+            continue;
+        }
+        let words: Vec<String> = line
+            .split_whitespace()
+            .filter_map(|w| depersonalize_token(w, drop_quoted))
+            .collect();
+        let joined = words.join(" ");
+        if joined.chars().count() >= 3 && !lines.contains(&joined) {
+            lines.push(joined);
+        }
+        if lines.len() >= max_lines {
+            break;
+        }
+    }
+    lines.join("\n").chars().take(max_chars).collect()
+}
+
+/// Text an episode is embedded from, for recurrence clustering.
+///
+/// Not the raw record: absolute paths, ids and counts make two sessions that
+/// hit the same problem look different, while shell plumbing shared by every
+/// command (`sleep N; cd …`) makes different problems look alike. Measured on
+/// real episodes, raw-text cosine between unrelated sessions reached 0.72 on
+/// plumbing alone. What survives: the programs involved, the error lines with
+/// specifics masked, the user's words for a correction, and the fix.
+///
+/// No instruction prefix: measured with the configured model (57 episodes,
+/// 2026-09-24), a shared `Instruct: … Query:` prefix lifted every pair's
+/// cosine by ~0.19 without widening the gap between same-problem pairs and
+/// unrelated ones.
+pub fn embed_text(kind: &str, trigger: &str, resolution: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match kind {
+        "correction" => {
+            let (said, before) = trigger.split_once("\n之前: ").unwrap_or((trigger, ""));
+            let said = said.trim_start_matches("用户纠正: ");
+            parts.push(format!("用户纠正: {}", depersonalize(said, false, 6, 400)));
+            if !before.is_empty() {
+                parts.push(format!("之前: {}", depersonalize(before, false, 4, 200)));
+            }
+            if let Some(r) = resolution {
+                parts.push(format!("之后: {}", depersonalize(r, false, 4, 200)));
+            }
+        }
+        _ => {
+            let (cmd, err) = trigger.split_once("\n报错: ").unwrap_or((trigger, ""));
+            let cmd = cmd.trim_start_matches("命令: ");
+            let progs = programs(cmd);
+            if !progs.is_empty() {
+                parts.push(format!("程序: {}", progs.join(" ")));
+            }
+            parts.push(format!(
+                "报错: {}",
+                depersonalize(&error_lines(err), true, 6, 500)
+            ));
+            if let Some(r) = resolution {
+                let (rcmd, rres) = r.split_once("\n结果: ").unwrap_or((r, ""));
+                let rcmd = rcmd.trim_start_matches("命令: ");
+                let rprogs = programs(rcmd);
+                let mut fix = String::from("修复: ");
+                if !rprogs.is_empty() {
+                    fix.push_str(&rprogs.join(" "));
+                    fix.push(' ');
+                }
+                fix.push_str(&depersonalize(rres, true, 3, 200));
+                parts.push(fix);
+            }
+        }
+    }
+    parts.join("\n")
+}
+
 /// Discriminative signals of a piece of text: error signature plus error codes,
 /// flags and code symbols. Paths are dropped — they name a project, and a signal
 /// that only recurs inside one project cannot show that knowledge transfers.
@@ -421,7 +603,13 @@ pub fn struggles(t: &Transcript) -> Vec<RawEpisode> {
             continue;
         }
         let family = programs(&anchor.input);
-        if family.is_empty() {
+        // Nothing to learn from a failure that says nothing (a `pkill` with no
+        // match, stderr that was all paths).
+        let says_something = depersonalize(&error_lines(&anchor.result), true, 6, 500)
+            .chars()
+            .count()
+            >= 4;
+        if family.is_empty() || !says_something {
             i += 1;
             continue;
         }
@@ -512,7 +700,9 @@ fn is_cjk(c: char) -> bool {
 
 pub fn is_correction(text: &str) -> bool {
     if text.chars().count() > CORRECTION_MAX_CHARS
-        || text.trim_start().starts_with("This session is being continued")
+        || text
+            .trim_start()
+            .starts_with("This session is being continued")
     {
         return false;
     }
@@ -521,9 +711,8 @@ pub fn is_correction(text: &str) -> bool {
         // A two-character Chinese marker followed by another ideograph is part
         // of a longer word: 「不对齐」 is not 「不对」.
         let short_cjk = m.chars().count() <= 2 && m.chars().all(is_cjk);
-        low.match_indices(m).any(|(i, _)| {
-            !short_cjk || !low[i + m.len()..].chars().next().is_some_and(is_cjk)
-        })
+        low.match_indices(m)
+            .any(|(i, _)| !short_cjk || !low[i + m.len()..].chars().next().is_some_and(is_cjk))
     })
 }
 
@@ -733,17 +922,64 @@ mod tests {
         assert!(is_correction("不对，第一封邮件不要带报价"));
         assert!(is_correction("错了"));
         assert!(!is_correction("现在页面中存在各个模块稀疏，不对齐的问题"));
-        assert!(!is_correction("This session is being continued from a previous conversation. The fix was incorrect."));
-        assert!(!is_correction(&"很长的粘贴文档，内容里提到错了。".repeat(100)));
+        assert!(!is_correction(
+            "This session is being continued from a previous conversation. The fix was incorrect."
+        ));
+        assert!(!is_correction(
+            &"很长的粘贴文档，内容里提到错了。".repeat(100)
+        ));
     }
 
     #[test]
     fn ansi_colors_and_generic_tokens_do_not_become_signals() {
-        let colored = strip_ansi("\u{1b}[31mAttributeError\u{1b}[0m: 'NoneType' object has no attribute 'x'");
-        assert_eq!(colored, "AttributeError: 'NoneType' object has no attribute 'x'");
+        let colored =
+            strip_ansi("\u{1b}[31mAttributeError\u{1b}[0m: 'NoneType' object has no attribute 'x'");
+        assert_eq!(
+            colored,
+            "AttributeError: 'NoneType' object has no attribute 'x'"
+        );
         let s = signals_of("until-loop non-test -c -rw-r--r-- error E0425 in crate::kb::rules --no-default-features");
-        assert!(s.iter().all(|x| !matches!(x.as_str(), "until-loop" | "non-test" | "-c" | "-rw-r--r--")), "{s:?}");
+        assert!(
+            s.iter()
+                .all(|x| !matches!(x.as_str(), "until-loop" | "non-test" | "-c" | "-rw-r--r--")),
+            "{s:?}"
+        );
         assert!(s.iter().any(|x| x == "--no-default-features"), "{s:?}");
+    }
+
+    #[test]
+    fn embed_text_is_the_same_for_the_same_problem_in_two_projects() {
+        let a = embed_text(
+            "struggle",
+            "命令: cd /home/a/projects/shop && cargo build --release 2>&1 | tail -20\n报错: Exit code 101\nerror[E0425]: cannot find value `cfg` in this scope\n  --> src/lib.rs:52:9",
+            Some("命令: cd /home/a/projects/shop && cargo build --release\n结果: Finished release [optimized] target(s) in 41.3s"),
+        );
+        let b = embed_text(
+            "struggle",
+            "命令: sleep 30; cd /srv/crm/core && cargo build --release\n报错: Exit code 101\nerror[E0425]: cannot find value `db` in this scope\n  --> src/main.rs:7:1",
+            Some("命令: cd /srv/crm/core && cargo build --release\n结果: Finished release [optimized] target(s) in 9.8s"),
+        );
+        assert_eq!(a, b, "\n{a}\n{b}");
+        assert!(a.starts_with("程序: cargo"), "{a}");
+        assert!(
+            a.contains("程序: cargo")
+                && a.contains("error[e0425]: cannot find value in this scope")
+        );
+        assert!(!a.contains("/home") && !a.contains("shop") && !a.contains("41.3"));
+    }
+
+    #[test]
+    fn embed_text_drops_plumbing_and_ids() {
+        let t = embed_text(
+            "struggle",
+            "命令: sleep 240; cd /home/renmk/projects/x && tail -3 /tmp/claude-1000/tasks/bhhh1tamx.output\n报错: <tool_use_error>Blocked: sleep 240 — use Monitor with an until-loop (toolu_01ASYnubLzYfahjhADeAgtbx)",
+            None,
+        );
+        assert!(
+            !t.contains("sleep 240;") && !t.contains("toolu_") && !t.contains("/tmp"),
+            "{t}"
+        );
+        assert!(t.contains("blocked: sleep use monitor"), "{t}");
     }
 
     #[test]
@@ -781,7 +1017,23 @@ mod tests {
     }
 
     #[test]
+    fn python_tracebacks_embed_the_exception_not_the_frames() {
+        let t = embed_text(
+            "struggle",
+            "命令: cd /w/a && python3 - <<'PY'\nimport json\nd = json.load(open('x.json'))\nprint(d['chain_id'])\nPY\n报错: Exit code 1\nTraceback (most recent call last):\n  File \"<stdin>\", line 3, in <module>\nKeyError: 'chain_id'",
+            None,
+        );
+        assert!(t.contains("程序: python3\n"), "{t}");
+        assert!(!t.contains("import") && !t.contains("traceback"), "{t}");
+        assert!(t.contains("keyerror:"), "{t}");
+    }
+
+    #[test]
     fn wrappers_and_generic_tools_are_seen_through() {
+        assert_eq!(
+            programs("python3 - <<'PY'\nimport os\nprint(1)\nPY"),
+            vec!["python3"]
+        );
         assert_eq!(programs("sudo -S systemctl restart app"), vec!["systemctl"]);
         assert_eq!(
             programs("cd core && timeout 300 innate evolve | tail -5"),

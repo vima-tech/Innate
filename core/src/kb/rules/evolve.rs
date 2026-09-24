@@ -23,13 +23,14 @@ const EMBED_EPISODES_PER_RUN: usize = 12;
 const EPISODE_POOL: i64 = 400;
 /// A signal shared by more episodes than this is too common to mean anything.
 const SIGNAL_FAN_MAX: usize = 8;
-/// Two episodes this similar describe the same situation. Model-dependent:
-/// with the configured embedding model (2026-09-24, 24 real episodes) cross-
-/// session pairs sat at p50 0.47 / p99 0.69 / max 0.72, and pairs at ~0.7
-/// shared only surface wording ("sleep N; cd …"). Kept strict on purpose —
-/// a spurious cluster costs a ~50 s model call for nothing — so in practice
-/// clustering is signal-driven, and user corrections enter as singletons.
-const EPISODE_COSINE_MIN: f32 = 0.82;
+/// Two episodes this similar describe the same situation. Model- and
+/// text-dependent: with the configured embedding model over
+/// `episodes::embed_text` (57 real episodes, 24 sessions, 2026-09-24),
+/// cross-session pairs sat at p50 0.45 / p99 0.65 / max 0.79; every pair at
+/// ≥ 0.75 was the same problem (urllib transport errors, KeyError on fetched
+/// JSON) and the highest unrelated pair scored 0.715. Re-measure when the
+/// embedding model or the embed text changes.
+const EPISODE_COSINE_MIN: f32 = 0.74;
 const CLUSTER_MAX: usize = 6;
 /// Episodes that never recurred within this window stop being candidates.
 const EPISODE_WINDOW_DAYS: i64 = 60;
@@ -117,10 +118,10 @@ impl KnowledgeBase {
             .filter(|e| e.get("has_embedding").and_then(Value::as_i64) == Some(0))
             .take(EMBED_EPISODES_PER_RUN);
         for e in pending {
-            let text = format!(
-                "{}\n{}",
+            let text = crate::episodes::embed_text(
+                e.get("kind").and_then(Value::as_str).unwrap_or("struggle"),
                 e.get("trigger_text").and_then(Value::as_str).unwrap_or(""),
-                e.get("resolution").and_then(Value::as_str).unwrap_or("")
+                e.get("resolution").and_then(Value::as_str),
             );
             let id = e.get("id").and_then(Value::as_str).unwrap_or("");
             match self.embedding.embed_content(&text) {
