@@ -9,6 +9,12 @@ opencode, Gemini CLI, …) working in this repository. Tool-specific shells such
 > generated shell that only contains `@AGENTS.md` — never add real guidance to it.
 > Other tool shells (`GEMINI.md`, etc.) follow the same rule.
 
+## Branch workflow
+
+- Keep only `main` and `dev` branches. Make all changes directly on `dev`;
+  do not create additional branches unless the user explicitly requests one.
+- Leave changes uncommitted unless the user explicitly requests a commit or push.
+
 ## Commands
 
 ```bash
